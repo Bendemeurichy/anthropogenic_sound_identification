@@ -1,0 +1,22 @@
+[project]
+name = "anthropogenic-noise-detection"
+version = "0.1.0"
+description = "Detect and identify man made noise in field recordings from Brazil"
+authors = [
+    {name = "Ben De Meurichy",email = "48103261+Bendemeurichy@users.noreply.github.com"}
+]
+readme = "README.md"
+
+requires-python = ">=3.13"
+dependencies = [
+    "numpy (>=2.3.3,<3.0.0)",
+    "plotly (>=6.3.1,<7.0.0)",
+    "tensorflow (>=2.20.0,<3.0.0)",
+    "pandas (>=2.3.3,<3.0.0)"
+]
+[tool.poetry]
+package-mode=false
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
