@@ -17,6 +17,7 @@ dependencies = [
     "kaleido (>=1.1.0,<2.0.0)",
     "rdflib (>=7.4.0,<8.0.0)",
     "owlready2 (>=0.48,<0.49)",
+    "nbconvert (>=7.16.6,<8.0.0)",
 ]
 [tool.poetry]
 package-mode=false
