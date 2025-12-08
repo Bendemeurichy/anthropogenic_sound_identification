@@ -11,6 +11,13 @@ def _to_mono(waveform: tf.Tensor) -> tf.Tensor:
     return waveform
 
 
+def _resample_audio(waveform_np: np.ndarray, rate_in: int, rate_out: int) -> np.ndarray:
+    """Core resampling logic using resampy."""
+    if rate_in == rate_out:
+        return waveform_np
+    return resampy.resample(waveform_np, rate_in, rate_out, filter="kaiser_best")
+
+
 def _resample_tensor(
     waveform: tf.Tensor, rate_in: tf.Tensor, rate_out: int
 ) -> tf.Tensor:
@@ -20,13 +27,7 @@ def _resample_tensor(
     """
 
     def _resample_with_resampy(waveform_np, rate_in_np):
-        """Python function to perform resampling using resampy."""
-        rate_in_int = int(rate_in_np)
-        if rate_in_int == rate_out:
-            return waveform_np
-        return resampy.resample(
-            waveform_np, rate_in_int, rate_out, filter="kaiser_best"
-        )
+        return _resample_audio(waveform_np, int(rate_in_np), rate_out)
 
     # Use tf.py_function to wrap the numpy/resampy operation
     resampled = tf.py_function(
@@ -105,7 +106,17 @@ def _augment_waveform(waveform: tf.Tensor, config: DataLoaderConfig) -> tf.Tenso
             [], config.aug_time_stretch_range[0], config.aug_time_stretch_range[1]
         )
         stretch_length = tf.cast(tf.cast(target_length, tf.float32) * rate, tf.int32)
-        stretched = tf.signal.resample(waveform, stretch_length)
+
+        # Use resampy for time stretching
+        def _stretch_with_resampy(waveform_np, stretch_len_np):
+            return _resample_audio(waveform_np, len(waveform_np), int(stretch_len_np))
+
+        stretched = tf.py_function(
+            func=_stretch_with_resampy,
+            inp=[waveform, stretch_length],
+            Tout=waveform.dtype,
+        )
+        stretched.set_shape([None])
 
         def _crop_stretched():
             start = (stretch_length - target_length) // 2
