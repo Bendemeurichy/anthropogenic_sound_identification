@@ -1,4 +1,6 @@
 import tensorflow as tf
+import resampy
+import numpy as np
 from .data_config import DataLoaderConfig
 
 
@@ -12,24 +14,29 @@ def _to_mono(waveform: tf.Tensor) -> tf.Tensor:
 def _resample_tensor(
     waveform: tf.Tensor, rate_in: tf.Tensor, rate_out: int
 ) -> tf.Tensor:
-    """Resample using tf.signal.resample. Works with 1-D waveforms.
+    """Resample using resampy library wrapped in tf.py_function.
     rate_in: scalar int tensor (sample rate of input waveform)
     rate_out: python int (target sample rate)
     """
-    rate_in = tf.cast(rate_in, tf.float32)
-    rate_out_f = tf.cast(rate_out, tf.float32)
-    n_in = tf.shape(waveform)[0]
 
-    # compute new length
-    n_out = tf.cast(
-        tf.math.round(tf.cast(n_in, tf.float32) * (rate_out_f / rate_in)), tf.int32
+    def _resample_with_resampy(waveform_np, rate_in_np):
+        """Python function to perform resampling using resampy."""
+        rate_in_int = int(rate_in_np)
+        if rate_in_int == rate_out:
+            return waveform_np
+        return resampy.resample(
+            waveform_np, rate_in_int, rate_out, filter="kaiser_best"
+        )
+
+    # Use tf.py_function to wrap the numpy/resampy operation
+    resampled = tf.py_function(
+        func=_resample_with_resampy, inp=[waveform, rate_in], Tout=waveform.dtype
     )
 
-    def _do_resample():
-        # tf.signal.resample uses Fourier method
-        return tf.signal.resample(waveform, n_out)
+    # Set shape information since py_function loses it
+    resampled.set_shape([None])
 
-    return tf.cond(tf.equal(n_in, n_out), lambda: waveform, _do_resample)
+    return resampled
 
 
 def normalize_audio_length(waveform: tf.Tensor, config: DataLoaderConfig) -> tf.Tensor:
