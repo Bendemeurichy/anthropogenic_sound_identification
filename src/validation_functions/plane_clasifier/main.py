@@ -13,6 +13,7 @@ from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
 )
+from common.audioset_downloader import download_missing_files
 
 
 def main():
@@ -67,7 +68,64 @@ def main():
         )
     )
 
-    # 5. Use existing splits if available, otherwise create new ones
+    # 5. Check for missing files and download if needed
+    print("\nChecking for missing audio files...")
+    unique_files = sampled_df["filename"].unique()
+    missing_files = [str(f) for f in unique_files if not Path(f).exists()]
+
+    if missing_files:
+        print(
+            f"\n⚠️  Found {len(missing_files)} missing files out of {len(unique_files)} unique files"
+        )
+        print(f"Sample missing files: {[Path(f).name for f in missing_files[:5]]}")
+
+        download = input("\nDownload missing files? (y/n): ").lower()
+        if download == "y":
+            cookies_path = input(
+                "Enter path to cookies.txt (or press Enter to skip): "
+            ).strip()
+            cookies = cookies_path if cookies_path else None
+
+            # Determine split type based on majority of missing files
+            audioset_missing = [f for f in missing_files if "audioset" in f.lower()]
+            train_missing = [f for f in audioset_missing if "/train/" in f]
+            eval_missing = [f for f in audioset_missing if "/eval/" in f]
+
+            if train_missing:
+                output_dir = str(
+                    Path(audio_base_path) / "audioset_strong" / "wavs" / "train"
+                )
+                Path(output_dir).mkdir(parents=True, exist_ok=True)
+                print(f"\nDownloading train files to: {output_dir}")
+                download_missing_files(train_missing, output_dir, "train", cookies)
+
+            if eval_missing:
+                output_dir = str(
+                    Path(audio_base_path) / "audioset_strong" / "wavs" / "eval"
+                )
+                Path(output_dir).mkdir(parents=True, exist_ok=True)
+                print(f"\nDownloading eval files to: {output_dir}")
+                download_missing_files(eval_missing, output_dir, "eval", cookies)
+
+            # Recheck missing files
+            still_missing = [str(f) for f in unique_files if not Path(f).exists()]
+            if still_missing:
+                print(f"\n⚠️  Still missing {len(still_missing)} files")
+                cont = input("Continue training anyway? (y/n): ").lower()
+                if cont != "y":
+                    print("Training aborted.")
+                    return None
+            else:
+                print("\n✅ All files downloaded successfully!")
+        else:
+            cont = input("Continue training without downloading? (y/n): ").lower()
+            if cont != "y":
+                print("Training aborted.")
+                return None
+    else:
+        print("✅ All audio files present!")
+
+    # 6. Use existing splits if available, otherwise create new ones
     if sampled_df["split"].notna().all():
         print("\nUsing existing dataset splits...")
         train_df = sampled_df[sampled_df["split"] == "train"].copy()
@@ -92,7 +150,7 @@ def main():
         val_df["split"] = "val"
         test_df["split"] = "test"
 
-    # 6. Update label column to use binary labels
+    # 7. Update label column to use binary labels
     for df in [train_df, val_df, test_df]:
         df["label"] = df["binary_label"]
 
@@ -115,7 +173,7 @@ def main():
     print("\nDatasets in train split:")
     print(train_df["dataset"].value_counts())
 
-    # 7. Create training configuration
+    # 8. Create training configuration
     config = TrainingConfig(
         filename_column="filename",
         start_time_column="start_time",
@@ -144,7 +202,7 @@ def main():
         aug_gain_range=(0.8, 1.2),
     )
 
-    # 8. Train model using the lazy loader
+    # 9. Train model using the lazy loader
     print("\n" + "=" * 70)
     print("STARTING TRAINING")
     print("=" * 70)
