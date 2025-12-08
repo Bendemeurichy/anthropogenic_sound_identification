@@ -34,25 +34,25 @@ DATASET_CONFIG = {
 # Adjust these paths according to your actual data directory structure
 DATASET_AUDIO_PATHS = {
     "audioset": {
-        "base": "audioset/audio",  # Base path for AudioSet audio files
+        "base": "audioset_strong/wavs",  # Base path for AudioSet audio files
         "train": "train",  # train files in audioset/audio/train/
         "val": "train",  # val files also in train directory
         "test": "eval",  # test files in audioset/audio/eval/
     },
     "esc50": {
-        "base": "esc50/audio",  # Base path for ESC-50 audio files
+        "base": "ESC-50-master/audio",  # Base path for ESC-50 audio files
         "train": "",  # All files in esc50/audio/ directly
         "val": "",
         "test": "",
     },
     "fsd50k": {
-        "base": "fsd50k/audio",  # Base path for FSD50K audio files
-        "train": "dev_audio",  # train/val in fsd50k/audio/dev_audio/
-        "val": "dev_audio",
-        "test": "eval_audio",  # test in fsd50k/audio/eval_audio/
+        "base": "FSD50K/clips",  # Base path for FSD50K audio files
+        "train": "dev",  # train/val in fsd50k/audio/dev_audio/
+        "val": "dev",
+        "test": "eval",  # test in fsd50k/audio/eval_audio/
     },
     "sounddesc": {
-        "base": "sounddesc/audio",  # Base path for SoundDesc audio files
+        "base": "SoundDesc/audios",  # Base path for SoundDesc audio files
         "train": "",  # All files in sounddesc/audio/ directly
         "val": "",
         "test": "",
