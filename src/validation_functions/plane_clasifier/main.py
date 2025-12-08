@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import sys
+import pandas as pd
 
 # Add parent directories to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -13,7 +14,7 @@ from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
 )
-from common.audioset_downloader import download_missing_files
+from common.audioset_downloader import download_missing_files_from_df
 
 
 def main():
@@ -70,58 +71,102 @@ def main():
 
     # 5. Check for missing files and download if needed
     print("\nChecking for missing audio files...")
-    unique_files = sampled_df["filename"].unique()
-    missing_files = [str(f) for f in unique_files if not Path(f).exists()]
 
-    if missing_files:
+    # Check which files are missing
+    sampled_df["file_exists"] = sampled_df["filename"].apply(lambda f: Path(f).exists())
+    missing_mask = ~sampled_df["file_exists"]
+
+    if missing_mask.any():
+        missing_df = sampled_df[missing_mask].copy()
         print(
-            f"\n⚠️  Found {len(missing_files)} missing files out of {len(unique_files)} unique files"
+            f"\n⚠️  Found {len(missing_df)} missing files out of {len(sampled_df)} total samples"
         )
-        print(f"Sample missing files: {[Path(f).name for f in missing_files[:5]]}")
 
-        download = input("\nDownload missing files? (y/n): ").lower()
-        if download == "y":
-            cookies_path = input(
-                "Enter path to cookies.txt (or press Enter to skip): "
-            ).strip()
-            cookies = cookies_path if cookies_path else None
+        # Filter for AudioSet only - drop all other datasets
+        audioset_missing = missing_df[missing_df["dataset"] == "audioset"].copy()
+        other_missing = missing_df[missing_df["dataset"] != "audioset"]
 
-            # Determine split type based on majority of missing files
-            audioset_missing = [f for f in missing_files if "audioset" in f.lower()]
-            train_missing = [f for f in audioset_missing if "/train/" in f]
-            eval_missing = [f for f in audioset_missing if "/eval/" in f]
+        if len(other_missing) > 0:
+            print(
+                f"⚠️  Dropping {len(other_missing)} samples from non-AudioSet datasets"
+            )
+            sampled_df = sampled_df[
+                (sampled_df["dataset"] == "audioset") | sampled_df["file_exists"]
+            ].copy()
 
-            if train_missing:
-                output_dir = str(
-                    Path(audio_base_path) / "audioset_strong" / "wavs" / "train"
+        if len(audioset_missing) > 0:
+            print(f"📥 {len(audioset_missing)} AudioSet files need to be downloaded")
+            print(
+                f"Sample missing files: {audioset_missing['filename'].head(5).apply(lambda x: Path(x).name).tolist()}"
+            )
+
+            download = input("\nDownload missing AudioSet files? (y/n): ").lower()
+            if download == "y":
+                cookies_path = input(
+                    "Enter path to cookies.txt (or press Enter to skip): "
+                ).strip()
+                cookies = cookies_path if cookies_path else None
+
+                # Split by train/eval based on the split column or path
+                train_missing = audioset_missing[audioset_missing["split"] == "train"]
+                val_missing = audioset_missing[audioset_missing["split"] == "val"]
+                test_missing = audioset_missing[audioset_missing["split"] == "test"]
+
+                # Download train files (train + val since both are from train split)
+                train_and_val = pd.concat([train_missing, val_missing])
+                if len(train_and_val) > 0:
+                    output_dir = str(
+                        Path(audio_base_path) / "audioset_strong" / "wavs" / "train"
+                    )
+                    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                    print(
+                        f"\nDownloading {len(train_and_val)} train files to: {output_dir}"
+                    )
+                    download_missing_files_from_df(
+                        train_and_val, output_dir, "train", cookies
+                    )
+
+                # Download eval/test files
+                if len(test_missing) > 0:
+                    output_dir = str(
+                        Path(audio_base_path) / "audioset_strong" / "wavs" / "eval"
+                    )
+                    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                    print(
+                        f"\nDownloading {len(test_missing)} eval files to: {output_dir}"
+                    )
+                    download_missing_files_from_df(
+                        test_missing, output_dir, "eval", cookies
+                    )
+
+                # Recheck missing files
+                sampled_df["file_exists"] = sampled_df["filename"].apply(
+                    lambda f: Path(f).exists()
                 )
-                Path(output_dir).mkdir(parents=True, exist_ok=True)
-                print(f"\nDownloading train files to: {output_dir}")
-                download_missing_files(train_missing, output_dir, "train", cookies)
+                still_missing = sampled_df[~sampled_df["file_exists"]]
 
-            if eval_missing:
-                output_dir = str(
-                    Path(audio_base_path) / "audioset_strong" / "wavs" / "eval"
-                )
-                Path(output_dir).mkdir(parents=True, exist_ok=True)
-                print(f"\nDownloading eval files to: {output_dir}")
-                download_missing_files(eval_missing, output_dir, "eval", cookies)
-
-            # Recheck missing files
-            still_missing = [str(f) for f in unique_files if not Path(f).exists()]
-            if still_missing:
-                print(f"\n⚠️  Still missing {len(still_missing)} files")
-                cont = input("Continue training anyway? (y/n): ").lower()
+                if len(still_missing) > 0:
+                    print(f"\n⚠️  Still missing {len(still_missing)} files")
+                    cont = input("Continue training anyway? (y/n): ").lower()
+                    if cont != "y":
+                        print("Training aborted.")
+                        return None
+                    # Drop still missing samples
+                    sampled_df = sampled_df[sampled_df["file_exists"]].copy()
+                else:
+                    print("\n✅ All files downloaded successfully!")
+            else:
+                cont = input("Continue training without downloading? (y/n): ").lower()
                 if cont != "y":
                     print("Training aborted.")
                     return None
-            else:
-                print("\n✅ All files downloaded successfully!")
-        else:
-            cont = input("Continue training without downloading? (y/n): ").lower()
-            if cont != "y":
-                print("Training aborted.")
-                return None
+                # Drop missing samples
+                sampled_df = sampled_df[sampled_df["file_exists"]].copy()
+
+        # Clean up the temporary column
+        sampled_df = sampled_df.drop(columns=["file_exists"])
+
+        print(f"\n✅ Final dataset size: {len(sampled_df)} samples")
     else:
         print("✅ All audio files present!")
 
