@@ -61,14 +61,14 @@ DATASET_AUDIO_PATHS = {
 
 
 def add_audio_file_paths(df: pd.DataFrame, audio_base_path: str) -> pd.DataFrame:
-    """Add full file paths to the dataframe based on dataset and split.
+    """Update filename column with full file paths based on dataset and split.
 
     Args:
         df: DataFrame with 'filename', 'dataset', and 'split' columns
         audio_base_path: Base path to the audio files directory (e.g., '/path/to/data/audio')
 
     Returns:
-        DataFrame with added 'file_path' column containing full paths to audio files
+        DataFrame with updated 'filename' column containing full paths to audio files
     """
     from pathlib import Path
 
@@ -93,7 +93,7 @@ def add_audio_file_paths(df: pd.DataFrame, audio_base_path: str) -> pd.DataFrame
 
         return str(full_path)
 
-    df["file_path"] = df.apply(construct_path, axis=1)
+    df["filename"] = df.apply(construct_path, axis=1)
     return df
 
 
@@ -103,7 +103,7 @@ def load_metadata_datasets(
     """Loads labels from all datasets.
     Args:
         datasets_path: Path of directory containing label metadata files.
-        audio_base_path: Base path to audio files. If provided, adds 'file_path' column with full paths.
+        audio_base_path: Base path to audio files. If provided, updates 'filename' column with full paths.
     Returns:
         pandas.DataFrame: DataFrame containing all labels.
     """
