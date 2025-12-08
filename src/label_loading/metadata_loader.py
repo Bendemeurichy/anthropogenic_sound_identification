@@ -30,11 +30,80 @@ DATASET_CONFIG = {
     },
 }
 
+# Audio file path prefixes for each dataset
+# Adjust these paths according to your actual data directory structure
+DATASET_AUDIO_PATHS = {
+    "audioset": {
+        "base": "audioset/audio",  # Base path for AudioSet audio files
+        "train": "train",  # train files in audioset/audio/train/
+        "val": "train",  # val files also in train directory
+        "test": "eval",  # test files in audioset/audio/eval/
+    },
+    "esc50": {
+        "base": "esc50/audio",  # Base path for ESC-50 audio files
+        "train": "",  # All files in esc50/audio/ directly
+        "val": "",
+        "test": "",
+    },
+    "fsd50k": {
+        "base": "fsd50k/audio",  # Base path for FSD50K audio files
+        "train": "dev_audio",  # train/val in fsd50k/audio/dev_audio/
+        "val": "dev_audio",
+        "test": "eval_audio",  # test in fsd50k/audio/eval_audio/
+    },
+    "sounddesc": {
+        "base": "sounddesc/audio",  # Base path for SoundDesc audio files
+        "train": "",  # All files in sounddesc/audio/ directly
+        "val": "",
+        "test": "",
+    },
+}
 
-def load_metadata_datasets(datasets_path: str) -> pd.DataFrame:
+
+def add_audio_file_paths(df: pd.DataFrame, audio_base_path: str) -> pd.DataFrame:
+    """Add full file paths to the dataframe based on dataset and split.
+
+    Args:
+        df: DataFrame with 'filename', 'dataset', and 'split' columns
+        audio_base_path: Base path to the audio files directory (e.g., '/path/to/data/audio')
+
+    Returns:
+        DataFrame with added 'file_path' column containing full paths to audio files
+    """
+    from pathlib import Path
+
+    def construct_path(row):
+        dataset = row["dataset"]
+        split = row["split"]
+        filename = row["filename"]
+
+        if dataset not in DATASET_AUDIO_PATHS:
+            # Fallback: just use base path + filename
+            return str(Path(audio_base_path) / filename)
+
+        dataset_config = DATASET_AUDIO_PATHS[dataset]
+        base = dataset_config["base"]
+        split_dir = dataset_config.get(split, "")
+
+        # Construct the full path
+        if split_dir:
+            full_path = Path(audio_base_path) / base / split_dir / filename
+        else:
+            full_path = Path(audio_base_path) / base / filename
+
+        return str(full_path)
+
+    df["file_path"] = df.apply(construct_path, axis=1)
+    return df
+
+
+def load_metadata_datasets(
+    datasets_path: str, audio_base_path: str | None = None
+) -> pd.DataFrame:
     """Loads labels from all datasets.
     Args:
-        filepath: Path of directory containing label metadata files.
+        datasets_path: Path of directory containing label metadata files.
+        audio_base_path: Base path to audio files. If provided, adds 'file_path' column with full paths.
     Returns:
         pandas.DataFrame: DataFrame containing all labels.
     """
@@ -55,6 +124,10 @@ def load_metadata_datasets(datasets_path: str) -> pd.DataFrame:
     )
 
     master_set = pd.concat([audioset, esc50, fsd50k, sounddesc], ignore_index=True)
+
+    # Add full file paths if audio_base_path is provided
+    if audio_base_path:
+        master_set = add_audio_file_paths(master_set, audio_base_path)
 
     return master_set
 

@@ -23,7 +23,10 @@ def main():
     # Use absolute path from project root
     project_root = Path(__file__).parent.parent.parent.parent
     datasets_path = str(project_root / "data" / "metadata")
-    all_metadata = load_metadata_datasets(datasets_path)
+    audio_base_path = str(project_root / "datasets")
+
+    # Load metadata with full file paths
+    all_metadata = load_metadata_datasets(datasets_path, audio_base_path)
 
     _, classification_metadata = split_seperation_classification(all_metadata)
 
