@@ -87,7 +87,7 @@ def download_missing_files_from_df(
 
         # change label to mid
         display_names_df = pd.read_csv(
-            "/mnt/d/Users/bdmeuric/masterproef/anthropogenic_sound_identification/data/metadata/audioset/mid_to_display_name.tsv",
+            "/mnt/d/Users/bdmeuric/masterproef/anthropogenic_sound_identification/data/audioset/mid_to_display_name.tsv",
             sep="\t",
             header=None,
             names=["mid", "display_name"],
@@ -104,12 +104,6 @@ def download_missing_files_from_df(
         start_time = float(row.get("start_time", 0))
         end_time = float(row.get("end_time", 10))  # Default 10 seconds if not specified
 
-        # Convert label to string format (handle both single labels and lists)
-        label = row.get("label", "")
-        if isinstance(label, list):
-            positive_labels = ",".join(label)
-        else:
-            positive_labels = str(label)
 
         print(f"  Downloading {youtube_id} ({start_time}s-{end_time}s)...")
         if download_single_file(
