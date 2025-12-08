@@ -17,7 +17,10 @@ class PlaneClassifier(keras.Model):
     """
 
     def __init__(
-        self, yamnet_model, config: Optional[ModelConfig] = None, fine_tune: bool = False
+        self,
+        yamnet_model,
+        config: Optional[ModelConfig] = None,
+        fine_tune: bool = False,
     ):
         super().__init__()
 
@@ -58,20 +61,30 @@ class PlaneClassifier(keras.Model):
         """Forward pass through the model
 
         Args:
-            inputs: Audio waveform tensor
+            inputs: Audio waveform tensor with shape (batch_size, samples)
             training: Whether in training mode
 
         Returns:
-            Logits for binary classification
+            Logits for binary classification with shape (batch_size, 1)
         """
-        # YAMNet returns (scores, embeddings, spectrogram)
-        _, embeddings, _ = self.yamnet(inputs)
 
-        # Average pool across time dimension
-        pooled_embeddings = tf.reduce_mean(embeddings, axis=0, keepdims=True)
+        # YAMNet expects 1D waveforms, so we need to process each sample in the batch
+        def process_single_waveform(waveform):
+            # YAMNet returns (scores, embeddings, spectrogram)
+            _, embeddings, _ = self.yamnet(waveform)
+            # Average pool across time dimension to get a single embedding vector
+            pooled = tf.reduce_mean(embeddings, axis=0)
+            return pooled
+
+        # Apply YAMNet to each sample in the batch
+        batch_embeddings = tf.map_fn(
+            process_single_waveform,
+            inputs,
+            fn_output_signature=tf.TensorSpec(shape=(1024,), dtype=tf.float32),
+        )
 
         # Classification head
-        logits = self.classifier(pooled_embeddings, training=training)
+        logits = self.classifier(batch_embeddings, training=training)
 
         return logits
 
