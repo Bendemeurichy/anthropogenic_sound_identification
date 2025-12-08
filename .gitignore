@@ -209,3 +209,4 @@ __marimo__/
 # data
 src/tags/graphs/
 src/tags/metadata/
+/data/

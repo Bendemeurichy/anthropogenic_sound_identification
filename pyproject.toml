@@ -20,6 +20,8 @@ dependencies = [
     "nbconvert (>=7.16.6,<8.0.0)",
     "soundfile (>=0.13.1,<0.14.0)",
     "resampy (>=0.4.3,<0.5.0)",
+    "polars (>=1.35.2,<2.0.0)",
+    "sounddevice (>=0.5.3,<0.6.0)",
 ]
 [tool.poetry]
 package-mode=false
