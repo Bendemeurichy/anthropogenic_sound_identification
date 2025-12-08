@@ -98,10 +98,7 @@ def _augment_waveform(waveform: tf.Tensor, config: DataLoaderConfig) -> tf.Tenso
         waveform = random_crop_audio(extended, config)
 
     # Time stretch (via resampling)
-    if (
-        config.aug_time_stretch_prob > 0
-        and tf.random.uniform([]) < config.aug_time_stretch_prob
-    ):
+    def _apply_time_stretch():
         rate = tf.random.uniform(
             [], config.aug_time_stretch_range[0], config.aug_time_stretch_range[1]
         )
@@ -135,9 +132,13 @@ def _augment_waveform(waveform: tf.Tensor, config: DataLoaderConfig) -> tf.Tenso
                 axis=0,
             )
 
-        waveform = tf.cond(
-            stretch_length > target_length, _crop_stretched, _pad_stretched
-        )
+        return tf.cond(stretch_length > target_length, _crop_stretched, _pad_stretched)
+
+    if (
+        config.aug_time_stretch_prob > 0
+        and tf.random.uniform([]) < config.aug_time_stretch_prob
+    ):
+        waveform = _apply_time_stretch()
 
     # Add noise
     if config.aug_noise_prob > 0 and tf.random.uniform([]) < config.aug_noise_prob:
