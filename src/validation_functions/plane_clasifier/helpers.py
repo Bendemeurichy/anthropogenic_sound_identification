@@ -26,7 +26,18 @@ def _resample_tensor(
     rate_out: python int (target sample rate)
     """
 
-    def _resample_with_resampy(waveform_np, rate_in_np):
+    def _resample_with_resampy(waveform_tensor, rate_in_tensor):
+        # Convert TensorFlow tensors to NumPy arrays
+        waveform_np = (
+            waveform_tensor.numpy()
+            if hasattr(waveform_tensor, "numpy")
+            else np.array(waveform_tensor)
+        )
+        rate_in_np = (
+            rate_in_tensor.numpy()
+            if hasattr(rate_in_tensor, "numpy")
+            else int(rate_in_tensor)
+        )
         return _resample_audio(waveform_np, int(rate_in_np), rate_out)
 
     # Use tf.py_function to wrap the numpy/resampy operation
@@ -105,7 +116,18 @@ def _augment_waveform(waveform: tf.Tensor, config: DataLoaderConfig) -> tf.Tenso
         stretch_length = tf.cast(tf.cast(target_length, tf.float32) * rate, tf.int32)
 
         # Use resampy for time stretching
-        def _stretch_with_resampy(waveform_np, stretch_len_np):
+        def _stretch_with_resampy(waveform_tensor, stretch_len_tensor):
+            # Convert TensorFlow tensors to NumPy arrays
+            waveform_np = (
+                waveform_tensor.numpy()
+                if hasattr(waveform_tensor, "numpy")
+                else np.array(waveform_tensor)
+            )
+            stretch_len_np = (
+                stretch_len_tensor.numpy()
+                if hasattr(stretch_len_tensor, "numpy")
+                else int(stretch_len_tensor)
+            )
             return _resample_audio(waveform_np, len(waveform_np), int(stretch_len_np))
 
         stretched = tf.py_function(
