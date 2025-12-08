@@ -85,6 +85,21 @@ def download_missing_files_from_df(
         # Extract YouTube ID from filename (remove path and .wav extension)
         youtube_id = Path(row["filename"]).stem
 
+        # change label to mid
+        display_names_df = pd.read_csv(
+            "../../data/metadata/audioset/mid_to_display_name.tsv",
+            sep="\t",
+            header=None,
+            names=["mid", "display_name"],
+        )
+        label_mapping = display_names_df.set_index("display_name")["mid"].to_dict()
+        label = row.get("label", "")
+        if isinstance(label, list):
+            mids = [label_mapping.get(l, l) for l in label]
+            positive_labels = ",".join(mids)
+        else:
+            positive_labels = label_mapping.get(label, str(label))
+
         # Get time boundaries and labels
         start_time = float(row.get("start_time", 0))
         end_time = float(row.get("end_time", 10))  # Default 10 seconds if not specified
