@@ -53,6 +53,7 @@ def load_sounddesc(
     sounddescs_df["start_time"] = "0.0"
     sounddescs_df["end_time"] = None
     sounddescs_df["dataset"] = "sounddesc"
+    sounddescs_df["filename"] = sounddescs_df["filename"].astype(str) + ".wav"
 
     return sounddescs_df
 

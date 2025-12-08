@@ -54,7 +54,7 @@ def load_audioset(train_set, test_set, display_names_path) -> pd.DataFrame:
     all_labels_df["dataset"] = "audioset"
 
     all_labels_df["filename"] = (
-        all_labels_df["filename"].str.split("_").str[:-1].str.join("_")
+        all_labels_df["filename"].str.split("_").str[:-1].str.join("_") + ".wav"
     )
 
     return all_labels_df
