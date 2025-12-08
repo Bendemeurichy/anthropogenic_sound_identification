@@ -6,8 +6,8 @@ import sys
 # Add parent directories to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from .train import train_plane_classifier
-from .config import TrainingConfig
+from train import train_plane_classifier
+from config import TrainingConfig
 from label_loading.sampler import get_coi, sample_non_coi
 from label_loading.metadata_loader import (
     load_metadata_datasets,
@@ -23,8 +23,8 @@ def main():
     print("Loading dataset metadata...")
     # Use absolute path from project root
     project_root = Path(__file__).parent.parent.parent.parent
-    datasets_path = str(project_root / "data" / "metadata")
-    audio_base_path = str(project_root / "datasets")
+    datasets_path = str(project_root / "data")
+    audio_base_path = str(project_root.parent / "datasets")
 
     # Load metadata with full file paths
     all_metadata = load_metadata_datasets(datasets_path, audio_base_path)
