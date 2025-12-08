@@ -8,6 +8,7 @@ from typing import Tuple, Dict, Any, Optional
 from model import PlaneClassifier, load_yamnet, ModelConfig
 from lazyloader import prepare_dataset
 from config import TrainingConfig
+from helpers import validate_dataset_files
 
 
 def create_callbacks(phase: str, config: TrainingConfig) -> list:
@@ -111,8 +112,22 @@ def train_plane_classifier(
     if config is None:
         config = TrainingConfig()
 
-    # Prepare datasets
+    # Validate audio files first to identify corrupted files
     print("=" * 70)
+    print("VALIDATING AUDIO FILES")
+    print("=" * 70)
+
+    print("\nValidating training files...")
+    train_df = validate_dataset_files(train_df, config.filename_column, verbose=True)
+
+    print("\nValidating validation files...")
+    val_df = validate_dataset_files(val_df, config.filename_column, verbose=True)
+
+    print("\nValidating test files...")
+    test_df = validate_dataset_files(test_df, config.filename_column, verbose=True)
+
+    # Prepare datasets
+    print("\n" + "=" * 70)
     print("PREPARING DATASETS")
     print("=" * 70)
 

@@ -2,6 +2,89 @@ import tensorflow as tf
 import resampy
 import numpy as np
 from data_config import DataLoaderConfig
+import os
+
+
+def validate_audio_file(file_path: str) -> tuple[bool, str]:
+    """Validate that a file is a proper WAV file that TensorFlow can decode.
+
+    Args:
+        file_path: Path to the audio file
+
+    Returns:
+        (is_valid, error_message) tuple
+    """
+    try:
+        if not os.path.exists(file_path):
+            return False, f"File not found: {file_path}"
+
+        # Try to read and decode the file
+        audio_binary = tf.io.read_file(file_path)
+        waveform, sample_rate = tf.audio.decode_wav(audio_binary, desired_channels=1)
+
+        # Check if waveform has valid shape
+        if tf.size(waveform) == 0:
+            return False, "Empty waveform"
+
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def validate_dataset_files(df, filename_column: str = "filename", verbose: bool = True):
+    """Validate all audio files in a dataframe and report issues.
+
+    Args:
+        df: DataFrame with audio file paths
+        filename_column: Column name containing file paths
+        verbose: Whether to print detailed error messages
+
+    Returns:
+        DataFrame with only valid files
+    """
+    invalid_files = []
+    valid_indices = []
+
+    for idx, row in df.iterrows():
+        file_path = row[filename_column]
+        is_valid, error_msg = validate_audio_file(file_path)
+
+        if is_valid:
+            valid_indices.append(idx)
+        else:
+            invalid_files.append((file_path, error_msg))
+            if verbose:
+                print(f"Invalid file: {file_path} - {error_msg}")
+
+    if invalid_files:
+        print(
+            f"\nFound {len(invalid_files)} invalid audio files out of {len(df)} total files"
+        )
+        print(f"Filtering dataset to {len(valid_indices)} valid files")
+    else:
+        print(f"All {len(df)} audio files are valid")
+
+    return df.loc[valid_indices].reset_index(drop=True)
+
+
+def safe_decode_wav(audio_binary: tf.Tensor, desired_channels: int = 1):
+    """Safely decode WAV file with error handling.
+
+    Returns:
+        (waveform, sample_rate, success) where success is a boolean tensor
+    """
+    try:
+        waveform, sample_rate = tf.audio.decode_wav(
+            audio_binary, desired_channels=desired_channels
+        )
+        return waveform, sample_rate, tf.constant(True)
+    except Exception:
+        # Return empty waveform and default sample rate on error
+        return (
+            tf.zeros([0, desired_channels], dtype=tf.float32),
+            tf.constant(16000),
+            tf.constant(False),
+        )
 
 
 def _to_mono(waveform: tf.Tensor) -> tf.Tensor:

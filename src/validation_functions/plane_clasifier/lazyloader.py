@@ -147,9 +147,13 @@ class KerasAudioDataLoader:
         - If annotated segment >= audio_duration: when split_long was used the row already
           corresponds to at most audio_duration length; otherwise center-crop.
         - If annotated segment < audio_duration: take the available samples and pad to target length.
+        
+        Note: Invalid WAV files will cause errors. Use _safe_load_and_preprocess for error handling.
         """
         # filename: scalar tf.string
         audio_binary = tf.io.read_file(filename)
+        
+        # Try to decode WAV - this will raise an error for invalid files
         waveform, sample_rate = tf.audio.decode_wav(audio_binary, desired_channels=1)
         waveform = _to_mono(waveform)
         sample_rate_scalar = tf.cast(tf.squeeze(sample_rate), tf.int32)
@@ -248,6 +252,9 @@ class KerasAudioDataLoader:
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
+        
+        # Ignore errors from corrupted or invalid audio files
+        ds = ds.apply(tf.data.experimental.ignore_errors())
 
         # Augmentation
         if augment and self.config.use_augmentation:
