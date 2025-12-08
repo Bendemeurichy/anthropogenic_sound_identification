@@ -87,7 +87,7 @@ def download_missing_files_from_df(
 
         # change label to mid
         display_names_df = pd.read_csv(
-            "../../data/metadata/audioset/mid_to_display_name.tsv",
+            "/mnt/d/Users/bdmeuric/masterproef/anthropogenic_sound_identification/data/metadata/audioset/mid_to_display_name.tsv",
             sep="\t",
             header=None,
             names=["mid", "display_name"],
