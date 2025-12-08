@@ -5,9 +5,9 @@ import pandas as pd
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
 
-from .model import PlaneClassifier, load_yamnet, ModelConfig
-from .lazyloader import prepare_dataset
-from .config import TrainingConfig
+from model import PlaneClassifier, load_yamnet, ModelConfig
+from lazyloader import prepare_dataset
+from config import TrainingConfig
 
 
 def create_callbacks(phase: str, config: TrainingConfig) -> list:

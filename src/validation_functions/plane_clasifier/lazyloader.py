@@ -1,9 +1,9 @@
 import tensorflow as tf
 import pandas as pd
 import numpy as np
-from .data_config import DataLoaderConfig
-from .config import TrainingConfig
-from .helpers import (
+from data_config import DataLoaderConfig
+from config import TrainingConfig
+from helpers import (
     _to_mono,
     _resample_tensor,
     normalize_audio_length,

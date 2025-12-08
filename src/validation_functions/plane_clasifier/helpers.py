@@ -1,7 +1,7 @@
 import tensorflow as tf
 import resampy
 import numpy as np
-from .data_config import DataLoaderConfig
+from data_config import DataLoaderConfig
 
 
 def _to_mono(waveform: tf.Tensor) -> tf.Tensor:

@@ -4,7 +4,7 @@ import tensorflow as tf
 from tensorflow import keras
 import tensorflow_hub as hub
 from typing import Optional
-from .config import ModelConfig
+from config import ModelConfig
 
 
 class PlaneClassifier(keras.Model):
