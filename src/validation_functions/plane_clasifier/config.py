@@ -9,12 +9,18 @@ class TrainingConfig:
     """Training configuration parameters"""
 
     # Data parameters
-    audio_column: str = "file_path"
+    filename_column: str = "filename"
+    start_time_column: str = "start_time"
+    end_time_column: str = "end_time"
     label_column: str = "label"
+    split_column: str = "split"
     batch_size: int = 32
     sample_rate: int = 16000  # YAMNet requirement
     audio_duration: float = 5.0  # Duration in seconds for each audio clip
+    split_long: bool = True  # Split long annotations into multiple clips
+    min_clip_length: float = 0.5  # Minimum clip length in seconds
     min_audio_duration: float = 0.5  # Minimum duration to keep clip
+    shuffle_buffer: int = 10000
 
     # Training parameters - Phase 1 (frozen backbone)
     phase1_epochs: int = 30
