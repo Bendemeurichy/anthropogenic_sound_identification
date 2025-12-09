@@ -146,8 +146,12 @@ def train_plane_classifier(
         test_df, config, shuffle=False, augment=False, repeat=False
     )
 
-    # Calculate steps per epoch (use ceiling to include all samples)
-    steps_per_epoch = math.ceil(len(train_df) / config.batch_size)
+    # Calculate steps per epoch
+    # When augmentation is enabled, dataset size doubles (original + augmented)
+    effective_train_size = (
+        len(train_df) * 2 if config.use_augmentation else len(train_df)
+    )
+    steps_per_epoch = math.ceil(effective_train_size / config.batch_size)
     validation_steps = math.ceil(len(val_df) / config.batch_size)
 
     # Calculate class weights for imbalanced data
@@ -159,6 +163,10 @@ def train_plane_classifier(
     }
 
     print(f"Train samples: {len(train_df)}")
+    if config.use_augmentation:
+        print(
+            f"  With augmentation: {effective_train_size} samples (original + augmented)"
+        )
     print(f"Validation samples: {len(val_df)}")
     print(f"Test samples: {len(test_df)}")
     print(f"Steps per epoch: {steps_per_epoch}")

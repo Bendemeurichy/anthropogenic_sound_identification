@@ -255,6 +255,20 @@ class KerasAudioDataLoader:
         # Ignore errors from corrupted or invalid audio files
         ds = ds.apply(tf.data.experimental.ignore_errors())
 
+        # If augmentation is enabled, create both original and augmented versions
+        if augment and self.config.use_augmentation:
+            # Original samples (no augmentation)
+            ds_original = ds
+
+            # Augmented samples
+            ds_augmented = ds.map(
+                lambda x, y: (_augment_waveform(x, self.config), y),
+                num_parallel_calls=tf.data.AUTOTUNE,
+            )
+
+            # Concatenate original + augmented to double the dataset
+            ds = ds_original.concatenate(ds_augmented)
+
         # IMPORTANT: Repeat BEFORE shuffle to ensure proper epoch boundaries
         # This way each epoch reshuffles all samples in a new order
         if repeat:
@@ -264,13 +278,6 @@ class KerasAudioDataLoader:
             # reshuffle_each_iteration ensures different order each epoch when repeat=True
             ds = ds.shuffle(
                 buffer_size=self.config.shuffle_buffer, reshuffle_each_iteration=True
-            )
-
-        # Augmentation applied after shuffle so each sample gets fresh augmentation
-        if augment and self.config.use_augmentation:
-            ds = ds.map(
-                lambda x, y: (_augment_waveform(x, self.config), y),
-                num_parallel_calls=tf.data.AUTOTUNE,
             )
 
         final_batch = batch_size or self.config.batch_size
