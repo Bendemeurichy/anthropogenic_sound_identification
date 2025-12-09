@@ -37,11 +37,11 @@ def create_callbacks(phase: str, config: TrainingConfig) -> list:
 
     callbacks = [
         keras.callbacks.EarlyStopping(
-            monitor="val_loss",
+            monitor="val_auc",
             patience=patience,
             restore_best_weights=True,
             verbose=1,
-            mode="min",
+            mode="max",
         ),
         keras.callbacks.ModelCheckpoint(
             str(checkpoint_dir / f"best_model_{phase}.weights.h5"),
@@ -132,13 +132,25 @@ def train_plane_classifier(
     print("PREPARING DATASETS")
     print("=" * 70)
 
-    train_dataset = prepare_dataset(train_df, config, shuffle=True, augment=True)
-    val_dataset = prepare_dataset(val_df, config, shuffle=False, augment=False)
-    test_dataset = prepare_dataset(test_df, config, shuffle=False, augment=False)
+    train_dataset = prepare_dataset(
+        train_df, config, shuffle=True, augment=True, repeat=True
+    )
+    val_dataset = prepare_dataset(
+        val_df, config, shuffle=False, augment=False, repeat=False
+    )
+    test_dataset = prepare_dataset(
+        test_df, config, shuffle=False, augment=False, repeat=False
+    )
+
+    # Calculate steps per epoch
+    steps_per_epoch = len(train_df) // config.batch_size
+    validation_steps = len(val_df) // config.batch_size
 
     print(f"Train samples: {len(train_df)}")
     print(f"Validation samples: {len(val_df)}")
     print(f"Test samples: {len(test_df)}")
+    print(f"Steps per epoch: {steps_per_epoch}")
+    print(f"Validation steps: {validation_steps}")
 
     # Load YAMNet
     print("\nLoading YAMNet model...")
@@ -170,6 +182,8 @@ def train_plane_classifier(
         train_dataset,
         validation_data=val_dataset,
         epochs=config.phase1_epochs,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=validation_steps,
         callbacks=callbacks_phase1,
         verbose=1,
     )
@@ -189,7 +203,7 @@ def train_plane_classifier(
     # but we can still update the model with a lower learning rate to fine-tune all weights
     model.fine_tune = True
 
-    # Recompile with lower learning rate
+    # Recompile and train phase 2
     compile_model(model, config.phase2_lr, config)
     callbacks_phase2 = create_callbacks("phase2", config)
 
@@ -197,6 +211,8 @@ def train_plane_classifier(
         train_dataset,
         validation_data=val_dataset,
         epochs=config.phase2_epochs,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=validation_steps,
         callbacks=callbacks_phase2,
         verbose=1,
     )
@@ -211,7 +227,8 @@ def train_plane_classifier(
     print("FINAL EVALUATION ON TEST SET")
     print("=" * 70)
 
-    test_results = model.evaluate(test_dataset, verbose=1)
+    test_steps = len(test_df) // config.batch_size
+    test_results = model.evaluate(test_dataset, steps=test_steps, verbose=1)
 
     print("\nTest Results:")
     for metric_name, value in zip(model.metrics_names, test_results):

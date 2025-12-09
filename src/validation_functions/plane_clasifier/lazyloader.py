@@ -147,12 +147,12 @@ class KerasAudioDataLoader:
         - If annotated segment >= audio_duration: when split_long was used the row already
           corresponds to at most audio_duration length; otherwise center-crop.
         - If annotated segment < audio_duration: take the available samples and pad to target length.
-        
+
         Note: Invalid WAV files will cause errors. Use _safe_load_and_preprocess for error handling.
         """
         # filename: scalar tf.string
         audio_binary = tf.io.read_file(filename)
-        
+
         # Try to decode WAV - this will raise an error for invalid files
         waveform, sample_rate = tf.audio.decode_wav(audio_binary, desired_channels=1)
         waveform = _to_mono(waveform)
@@ -240,7 +240,9 @@ class KerasAudioDataLoader:
 
         if split is not None:
             split_str = str(split)
-            ds = ds.filter(lambda f, s, e, lbl, sp: tf.equal(sp, tf.constant(split_str)))
+            ds = ds.filter(
+                lambda f, s, e, lbl, sp: tf.equal(sp, tf.constant(split_str))
+            )
 
         if shuffle:
             ds = ds.shuffle(buffer_size=self.config.shuffle_buffer)
@@ -252,7 +254,7 @@ class KerasAudioDataLoader:
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
-        
+
         # Ignore errors from corrupted or invalid audio files
         ds = ds.apply(tf.data.experimental.ignore_errors())
 
@@ -277,6 +279,7 @@ def prepare_dataset(
     config: t.Union[DataLoaderConfig, "TrainingConfig"],
     shuffle: bool = True,
     augment: bool = False,
+    repeat: bool = False,
 ) -> tf.data.Dataset:
     """Compatibility wrapper matching the training code's expected API.
 
@@ -287,6 +290,7 @@ def prepare_dataset(
       dfs (train/val/test) so no filtering is performed here.
     - start_time/end_time may be NaN to indicate "use full file".
     - `augment` should be True only for training.
+    - `repeat` should be True for training to enable proper steps_per_epoch.
 
     Returns:
         tf.data.Dataset yielding (waveform, label) where waveform has shape
@@ -299,5 +303,5 @@ def prepare_dataset(
         batch_size=batch_size,
         shuffle=shuffle,
         augment=augment,
-        repeat=False,
+        repeat=repeat,
     )
