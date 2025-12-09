@@ -1,9 +1,12 @@
 """Training pipeline and utilities"""
 
+import tensorflow as tf
 from tensorflow import keras
 import pandas as pd
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
+import math
+import numpy as np
 
 from model import PlaneClassifier, load_yamnet, ModelConfig
 from lazyloader import prepare_dataset
@@ -52,11 +55,12 @@ def create_callbacks(phase: str, config: TrainingConfig) -> list:
             verbose=1,
         ),
         keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss",
+            monitor="val_auc",
             factor=0.5,
             patience=reduce_lr_patience,
             min_lr=1e-8,
             verbose=1,
+            mode="max",
         ),
         keras.callbacks.TensorBoard(log_dir=str(log_dir), histogram_freq=1),
         keras.callbacks.CSVLogger(str(checkpoint_dir / f"training_{phase}.csv")),
@@ -85,10 +89,10 @@ def compile_model(model: PlaneClassifier, learning_rate: float, config: Training
             from_logits=True, label_smoothing=config.label_smoothing
         ),
         metrics=[
-            keras.metrics.BinaryAccuracy(name="accuracy"),
+            keras.metrics.BinaryAccuracy(name="accuracy", threshold=0.0),
             keras.metrics.AUC(name="auc", from_logits=True),
-            keras.metrics.Precision(name="precision"),
-            keras.metrics.Recall(name="recall"),
+            keras.metrics.Precision(name="precision", thresholds=0.0),
+            keras.metrics.Recall(name="recall", thresholds=0.0),
         ],
     )
 
@@ -142,15 +146,25 @@ def train_plane_classifier(
         test_df, config, shuffle=False, augment=False, repeat=False
     )
 
-    # Calculate steps per epoch
-    steps_per_epoch = len(train_df) // config.batch_size
-    validation_steps = len(val_df) // config.batch_size
+    # Calculate steps per epoch (use ceiling to include all samples)
+    steps_per_epoch = math.ceil(len(train_df) / config.batch_size)
+    validation_steps = math.ceil(len(val_df) / config.batch_size)
+
+    # Calculate class weights for imbalanced data
+    label_counts = train_df[config.label_column].value_counts()
+    total = len(train_df)
+    class_weight = {
+        0: total / (2 * label_counts.get(0, total)),
+        1: total / (2 * label_counts.get(1, total)),
+    }
 
     print(f"Train samples: {len(train_df)}")
     print(f"Validation samples: {len(val_df)}")
     print(f"Test samples: {len(test_df)}")
     print(f"Steps per epoch: {steps_per_epoch}")
     print(f"Validation steps: {validation_steps}")
+    print(f"Class distribution: {label_counts.to_dict()}")
+    print(f"Class weights: {class_weight}")
 
     # Load YAMNet
     print("\nLoading YAMNet model...")
@@ -184,6 +198,7 @@ def train_plane_classifier(
         epochs=config.phase1_epochs,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
+        class_weight=class_weight,
         callbacks=callbacks_phase1,
         verbose=1,
     )
@@ -198,10 +213,13 @@ def train_plane_classifier(
     print("PHASE 2: FINE-TUNING ENTIRE MODEL")
     print("=" * 70)
 
-    # Mark model for fine-tuning
-    # Note: TensorFlow Hub models don't support trainable attribute directly,
-    # but we can still update the model with a lower learning rate to fine-tune all weights
+    # Enable fine-tuning flag
+    # Note: TensorFlow Hub models loaded with hub.load() don't have a trainable attribute,
+    # but their variables will be included in model.trainable_variables automatically.
+    # The lower learning rate in phase 2 allows gradual fine-tuning of all parameters.
     model.fine_tune = True
+
+    print(f"Total trainable variables in model: {len(model.trainable_variables)}")
 
     # Recompile and train phase 2
     compile_model(model, config.phase2_lr, config)
@@ -213,6 +231,7 @@ def train_plane_classifier(
         epochs=config.phase2_epochs,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
+        class_weight=class_weight,
         callbacks=callbacks_phase2,
         verbose=1,
     )
@@ -227,7 +246,7 @@ def train_plane_classifier(
     print("FINAL EVALUATION ON TEST SET")
     print("=" * 70)
 
-    test_steps = len(test_df) // config.batch_size
+    test_steps = math.ceil(len(test_df) / config.batch_size)
     test_results = model.evaluate(test_dataset, steps=test_steps, verbose=1)
 
     print("\nTest Results:")
