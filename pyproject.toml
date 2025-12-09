@@ -23,6 +23,7 @@ dependencies = [
     "polars (>=1.35.2,<2.0.0)",
     "sounddevice (>=0.5.3,<0.6.0)",
     "audioset-strong-download (>=2.0.5,<3.0.0)",
+    "optuna (>=4.6.0,<5.0.0)",
 ]
 [tool.poetry]
 package-mode=false
