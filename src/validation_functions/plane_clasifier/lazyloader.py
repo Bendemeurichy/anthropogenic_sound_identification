@@ -244,9 +244,6 @@ class KerasAudioDataLoader:
                 lambda f, s, e, lbl, sp: tf.equal(sp, tf.constant(split_str))
             )
 
-        if shuffle:
-            ds = ds.shuffle(buffer_size=self.config.shuffle_buffer)
-
         # Map with explicit tensor args to avoid py_function (graph-friendly)
         ds = ds.map(
             lambda f, st, en, lbl, sp: self._load_and_preprocess_tensors(
@@ -258,15 +255,23 @@ class KerasAudioDataLoader:
         # Ignore errors from corrupted or invalid audio files
         ds = ds.apply(tf.data.experimental.ignore_errors())
 
-        # Augmentation
+        # IMPORTANT: Repeat BEFORE shuffle to ensure proper epoch boundaries
+        # This way each epoch reshuffles all samples in a new order
+        if repeat:
+            ds = ds.repeat()
+
+        if shuffle:
+            # reshuffle_each_iteration ensures different order each epoch when repeat=True
+            ds = ds.shuffle(
+                buffer_size=self.config.shuffle_buffer, reshuffle_each_iteration=True
+            )
+
+        # Augmentation applied after shuffle so each sample gets fresh augmentation
         if augment and self.config.use_augmentation:
             ds = ds.map(
                 lambda x, y: (_augment_waveform(x, self.config), y),
                 num_parallel_calls=tf.data.AUTOTUNE,
             )
-
-        if repeat:
-            ds = ds.repeat()
 
         final_batch = batch_size or self.config.batch_size
         ds = ds.batch(final_batch)

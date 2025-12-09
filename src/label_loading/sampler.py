@@ -1,5 +1,6 @@
 """Sampler function that samples all samples from the datasets containing the class of interest and sample non-interest samples to the desired ratio."""
 
+from metadata_loader import load_metadata_datasets, split_seperation_classification
 import pandas as pd
 
 
@@ -88,3 +89,107 @@ def sample_non_coi(
         print(f"    {split}: {split_count}")
 
     return result_df
+
+
+def test_sampler():
+    print("Loading dataset metadata...")
+    # Use absolute path from project root
+    project_root = Path(__file__).parent.parent.parent
+    datasets_path = str(project_root / "data" / "metadata")
+    audio_base_path = str(project_root.parent / "datasets")
+
+    # Load metadata with full file paths
+    all_metadata = load_metadata_datasets(datasets_path, audio_base_path)
+
+    _, classification_metadata = split_seperation_classification(all_metadata)
+
+    print(f"Loaded {len(all_metadata)} total samples from all datasets")
+    print(f"Datasets included: {all_metadata['dataset'].unique()}")
+    print(f"\nColumns: {list(all_metadata.columns)}")
+
+    # 2. Define your target class (plane-related sounds)
+    # You'll need to check what plane-related labels exist in your datasets
+    # Common airplane labels in AudioSet: "Aircraft", "Airplane", "Fixed-wing aircraft"
+    # In ESC-50: "airplane"
+    target_classes = [
+        "airplane",
+        "Aircraft",
+        "Fixed-wing aircraft, airplane",
+        "Aircraft engine",
+        "Fixed-wing_aircraft_and_airplane",
+    ]
+
+    print(f"\nTarget classes: {target_classes}")
+
+    # 3. Sample data to get balanced dataset
+    print("\nSampling data with class-of-interest ratio...")
+    coi_df = get_coi(classification_metadata, target_classes)
+    sampled_df = sample_non_coi(
+        classification_metadata,
+        coi_df,
+        coi_ratio=0.25,  # Aim for 50% plane sounds
+    )
+
+    # 4. Create binary labels: 1 for plane, 0 for non-plane
+    sampled_df["binary_label"] = sampled_df["label"].apply(
+        lambda x: (
+            1
+            if (isinstance(x, list) and any(label in target_classes for label in x))
+            or (isinstance(x, str) and x in target_classes)
+            else 0
+        )
+    )
+
+    # 6. Use existing splits if available, otherwise create new ones
+    if sampled_df["split"].notna().all():
+        print("\nUsing existing dataset splits...")
+        train_df = sampled_df[sampled_df["split"] == "train"].copy()
+        val_df = sampled_df[sampled_df["split"] == "val"].copy()
+        test_df = sampled_df[sampled_df["split"] == "test"].copy()
+
+    else:
+        print("\nCreating train/val/test splits...")
+        from sklearn.model_selection import train_test_split
+
+        train_df, temp_df = train_test_split(
+            sampled_df,
+            test_size=0.3,
+            stratify=sampled_df["binary_label"],
+            random_state=42,
+        )
+        val_df, test_df = train_test_split(
+            temp_df, test_size=0.5, stratify=temp_df["binary_label"], random_state=42
+        )
+
+        train_df["split"] = "train"
+        val_df["split"] = "val"
+        test_df["split"] = "test"
+
+    # 7. Update label column to use binary labels
+    for df in [train_df, val_df, test_df]:
+        df["label"] = df["binary_label"]
+
+    print("\nDataset splits:")
+    print(f"  Train: {len(train_df)} samples")
+    print(f"  Val:   {len(val_df)} samples")
+    print(f"  Test:  {len(test_df)} samples")
+
+    print("\nClass distribution:")
+    print(
+        f"  Train - Plane: {train_df['label'].sum()}, Non-plane: {(train_df['label'] == 0).sum()}"
+    )
+    print(
+        f"  Val   - Plane: {val_df['label'].sum()}, Non-plane: {(val_df['label'] == 0).sum()}"
+    )
+    print(
+        f"  Test  - Plane: {test_df['label'].sum()}, Non-plane: {(test_df['label'] == 0).sum()}"
+    )
+
+    print("\nDatasets in train split:")
+    print(train_df["dataset"].value_counts())
+
+
+if __name__ == "__main__":
+    from pathlib import Path
+
+    test_sampler()
