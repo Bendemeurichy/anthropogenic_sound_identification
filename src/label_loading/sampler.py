@@ -11,12 +11,28 @@ def get_coi(metadata_df: pd.DataFrame, target_class: list[str]) -> pd.DataFrame:
     Returns:
         pandas.DataFrame: DataFrame containing all samples with the class of interest.
     """
+
+    def _contains_target(labels):
+        """Check if labels contain any target class, handling both list and string types."""
+        if isinstance(labels, list):
+            return any(target in labels for target in target_class)
+        elif isinstance(labels, str):
+            return labels in target_class
+        else:
+            return False
+
     # Check if any target class is in the label array for each row
-    coi_df = metadata_df[
-        metadata_df["label"].apply(
-            lambda labels: any(target in labels for target in target_class)
-        )
-    ].copy()
+    coi_df = metadata_df[metadata_df["label"].apply(_contains_target)].copy()
+
+    # Debug info
+    print(f"\nClass of Interest (COI) sampling:")
+    print(f"  Total samples in metadata: {len(metadata_df)}")
+    print(f"  COI samples found: {len(coi_df)}")
+    print(f"  COI samples by split:")
+    for split in ["train", "val", "test"]:
+        split_count = len(coi_df[coi_df["split"] == split])
+        print(f"    {split}: {split_count}")
+
     return coi_df
 
 
@@ -37,6 +53,8 @@ def sample_non_coi(
     """
     sampled_dfs = [coi_df]
 
+    print(f"\nSampling non-COI with target ratio: {coi_ratio}")
+
     for split in ["train", "val", "test"]:
         coi_split_df = coi_df[coi_df["split"] == split]
         num_coi = len(coi_split_df)
@@ -45,6 +63,11 @@ def sample_non_coi(
         non_coi_split_df = metadata_df[
             (metadata_df["split"] == split) & (~metadata_df.index.isin(coi_df.index))
         ]
+
+        print(f"  {split}:")
+        print(f"    COI samples: {num_coi}")
+        print(f"    Non-COI needed: {num_non_coi_needed}")
+        print(f"    Non-COI available: {len(non_coi_split_df)}")
 
         if len(non_coi_split_df) < num_non_coi_needed:
             raise ValueError(
@@ -57,4 +80,11 @@ def sample_non_coi(
         )
         sampled_dfs.append(sampled_non_coi_split_df)
 
-    return pd.concat(sampled_dfs, ignore_index=True)
+    result_df = pd.concat(sampled_dfs, ignore_index=True)
+    print(f"\nTotal sampled dataset: {len(result_df)} samples")
+    print("  By split:")
+    for split in ["train", "val", "test"]:
+        split_count = len(result_df[result_df["split"] == split])
+        print(f"    {split}: {split_count}")
+
+    return result_df
