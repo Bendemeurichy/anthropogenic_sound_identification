@@ -88,6 +88,59 @@ def optimize(train_df, val_df, test_df, n_trials=20):
     for key, value in study.best_params.items():
         print(f"  {key}: {value}")
 
+    # Save optimization results
+    import json
+
+    results_dir = Path("./optuna_results")
+    results_dir.mkdir(exist_ok=True)
+
+    results = {
+        "best_value": study.best_value,
+        "best_params": study.best_params,
+        "n_trials": len(study.trials),
+        "study_name": study.study_name,
+    }
+
+    results_path = results_dir / "best_hyperparameters.json"
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"\n✅ Best hyperparameters saved to: {results_path}")
+
+    # Generate and save Optuna visualization plots
+    print("\nGenerating optimization plots...")
+    try:
+        import optuna.visualization as vis
+
+        # 1. Optimization history plot
+        fig = vis.plot_optimization_history(study)
+        fig.write_html(str(results_dir / "optimization_history.html"))
+
+        # 2. Parameter importances
+        fig = vis.plot_param_importances(study)
+        fig.write_html(str(results_dir / "param_importances.html"))
+
+        # 3. Parallel coordinate plot
+        fig = vis.plot_parallel_coordinate(study)
+        fig.write_html(str(results_dir / "parallel_coordinate.html"))
+
+        # 4. Slice plot
+        fig = vis.plot_slice(study)
+        fig.write_html(str(results_dir / "slice_plot.html"))
+
+        # 5. Contour plot (for pair-wise parameter relationships)
+        fig = vis.plot_contour(study)
+        fig.write_html(str(results_dir / "contour_plot.html"))
+
+        print(f"✅ Optimization plots saved to: {results_dir}/")
+        print("   - optimization_history.html")
+        print("   - param_importances.html")
+        print("   - parallel_coordinate.html")
+        print("   - slice_plot.html")
+        print("   - contour_plot.html")
+    except Exception as e:
+        print(f"⚠️  Could not generate plots: {e}")
+
     return study
 
 

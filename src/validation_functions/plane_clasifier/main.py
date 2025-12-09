@@ -238,7 +238,8 @@ def main(optimize_hyperparams=False, n_trials=20):
 
         study = run_optuna(train_df, val_df, test_df, n_trials=n_trials)
         config = get_best_config(study)
-        print("\nUsing optimized hyperparameters for training...")
+        print("\nUsing optimized hyperparameters for final training...")
+        print(f"Best validation PR-AUC from optimization: {study.best_value:.4f}")
     else:
         # 8. Create training configuration
         config = TrainingConfig(
