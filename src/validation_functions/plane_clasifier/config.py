@@ -1,7 +1,7 @@
 """Configuration settings for training"""
 
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 
 @dataclass
@@ -71,6 +71,11 @@ class TrainingConfig:
 
     # Random seed for reproducibility
     random_seed: int = 42
+
+    # Class weight mode: 'balanced', 'sqrt_balanced', 'manual', or None
+    class_weight_mode: Optional[str] = "sqrt_balanced"
+    # Manual class weights (used only if class_weight_mode='manual')
+    manual_class_weights: Optional[Dict[int, float]] = None
 
     def __post_init__(self):
         if self.hidden_units is None:

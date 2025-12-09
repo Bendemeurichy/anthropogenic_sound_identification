@@ -322,10 +322,32 @@ def train_plane_classifier(
     # Calculate class weights for imbalanced data
     label_counts = train_df[config.label_column].value_counts()
     total = len(train_df)
-    class_weight = {
-        0: total / (2 * label_counts.get(0, total)),
-        1: total / (2 * label_counts.get(1, total)),
-    }
+
+    if config.class_weight_mode == "balanced":
+        # Standard sklearn balanced: n_samples / (n_classes * n_samples_per_class)
+        class_weight = {
+            0: total / (2 * label_counts.get(0, total)),
+            1: total / (2 * label_counts.get(1, total)),
+        }
+    elif config.class_weight_mode == "sqrt_balanced":
+        # Square root balanced: less aggressive, better for moderate imbalance
+        n_classes = 2
+        weights = {}
+        for cls in [0, 1]:
+            count = label_counts.get(cls, total)
+            # Compute standard balanced weight
+            balanced_weight = total / (n_classes * count)
+            # Take square root to reduce the weight difference
+            weights[cls] = np.sqrt(balanced_weight)
+        # Normalize so the average weight is 1.0
+        avg_weight = sum(weights.values()) / len(weights)
+        class_weight = {cls: w / avg_weight for cls, w in weights.items()}
+    elif config.class_weight_mode == "manual" and config.manual_class_weights:
+        # Use manually specified weights
+        class_weight = config.manual_class_weights
+    else:
+        # No class weighting
+        class_weight = None
 
     print(f"Train samples: {len(train_df)}")
     if config.use_augmentation:
