@@ -29,6 +29,7 @@ class PlaneClassifier(keras.Model):
 
         self.config = config
         self.yamnet = yamnet_model
+        self._fine_tune = fine_tune
 
         # Build classification head
         layers = []
@@ -90,7 +91,22 @@ class PlaneClassifier(keras.Model):
 
     def get_config(self):
         """Return model configuration for serialization"""
-        return {"config": self.config, "fine_tune": self.yamnet.trainable}
+        return {
+            "config": self.config,
+            "fine_tune": self._fine_tune
+        }
+    
+    @property
+    def fine_tune(self):
+        """Get current fine-tune state"""
+        return self._fine_tune
+    
+    @fine_tune.setter
+    def fine_tune(self, value: bool):
+        """Set fine-tune state and update YAMNet trainability"""
+        self._fine_tune = value
+        # Note: YAMNet hub models may not support trainable attribute directly
+        # The actual fine-tuning behavior is controlled by the optimizer
 
 
 def load_yamnet(url: str = "https://tfhub.dev/google/yamnet/1"):

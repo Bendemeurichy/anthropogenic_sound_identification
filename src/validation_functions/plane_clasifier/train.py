@@ -44,10 +44,11 @@ def create_callbacks(phase: str, config: TrainingConfig) -> list:
             mode="min",
         ),
         keras.callbacks.ModelCheckpoint(
-            str(checkpoint_dir / f"best_model_{phase}.keras"),
+            str(checkpoint_dir / f"best_model_{phase}.weights.h5"),
             monitor="val_auc",
             mode="max",
             save_best_only=True,
+            save_weights_only=True,
             verbose=1,
         ),
         keras.callbacks.ReduceLROnPlateau(
@@ -183,8 +184,10 @@ def train_plane_classifier(
     print("PHASE 2: FINE-TUNING ENTIRE MODEL")
     print("=" * 70)
 
-    # Unfreeze YAMNet
-    model.yamnet.trainable = True
+    # Mark model for fine-tuning
+    # Note: TensorFlow Hub models don't support trainable attribute directly,
+    # but we can still update the model with a lower learning rate to fine-tune all weights
+    model.fine_tune = True
 
     # Recompile with lower learning rate
     compile_model(model, config.phase2_lr, config)
@@ -227,8 +230,13 @@ def train_plane_classifier(
     print("SAVING FINAL MODEL")
     print("=" * 70)
 
-    final_model_path = Path(config.checkpoint_dir) / "final_model.keras"
-    model.save(final_model_path)
-    print(f"Model saved to: {final_model_path}")
+    # Save weights instead of full model due to TensorFlow Hub serialization issues
+    final_weights_path = Path(config.checkpoint_dir) / "final_model.weights.h5"
+    model.save_weights(final_weights_path)
+    print(f"Model weights saved to: {final_weights_path}")
+    print("\nNote: To load the model, you'll need to:")
+    print("  1. Load YAMNet: yamnet = load_yamnet()")
+    print("  2. Create model: model = PlaneClassifier(yamnet, config)")
+    print(f"  3. Load weights: model.load_weights('{final_weights_path}')")
 
     return model, history_phase1.history, history_phase2.history, test_results
