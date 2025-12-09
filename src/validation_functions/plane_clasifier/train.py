@@ -258,16 +258,33 @@ def train_plane_classifier(
     test_results = model.evaluate(test_dataset, steps=test_steps, verbose=1)
 
     print("\nTest Results:")
-    for metric_name, value in zip(model.metrics_names, test_results):
-        print(f"  {metric_name}: {value:.4f}")
+    # Handle both list and dict return types from evaluate
+    if isinstance(test_results, dict):
+        # If evaluate returns a dict, use it directly
+        for metric_name, value in test_results.items():
+            print(f"  {metric_name}: {value:.4f}")
 
-    # Calculate F1 score
-    precision_idx = model.metrics_names.index("precision")
-    recall_idx = model.metrics_names.index("recall")
-    precision = test_results[precision_idx]
-    recall = test_results[recall_idx]
-    f1_score = 2 * (precision * recall) / (precision + recall + 1e-7)
-    print(f"  F1 Score: {f1_score:.4f}")
+        # Calculate F1 score if precision and recall are available
+        if "precision" in test_results and "recall" in test_results:
+            precision = test_results["precision"]
+            recall = test_results["recall"]
+            f1_score = 2 * (precision * recall) / (precision + recall + 1e-7)
+            print(f"  F1 Score: {f1_score:.4f}")
+    else:
+        # If evaluate returns a list, zip with metric names
+        for metric_name, value in zip(model.metrics_names, test_results):
+            print(f"  {metric_name}: {value:.4f}")
+
+        # Try to calculate F1 score if precision and recall are in metrics
+        try:
+            precision_idx = model.metrics_names.index("precision")
+            recall_idx = model.metrics_names.index("recall")
+            precision = test_results[precision_idx]
+            recall = test_results[recall_idx]
+            f1_score = 2 * (precision * recall) / (precision + recall + 1e-7)
+            print(f"  F1 Score: {f1_score:.4f}")
+        except (ValueError, IndexError):
+            print("  F1 Score: Unable to calculate (precision/recall not available)")
 
     # Save final model
     print("\n" + "=" * 70)
