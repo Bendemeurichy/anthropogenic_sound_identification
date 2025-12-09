@@ -178,17 +178,25 @@ def main():
         test_df = sampled_df[sampled_df["split"] == "test"].copy()
 
     else:
-        print("\nCreating train/val/test splits...")
+        print("\nCreating train/val/test splits with stratification...")
         from sklearn.model_selection import train_test_split
 
+        # Set random seed for reproducibility
+        random_state = 42
+
+        # First split: 70% train, 30% temp (val+test)
         train_df, temp_df = train_test_split(
             sampled_df,
             test_size=0.3,
             stratify=sampled_df["binary_label"],
-            random_state=42,
+            random_state=random_state,
         )
+        # Second split: 15% val, 15% test
         val_df, test_df = train_test_split(
-            temp_df, test_size=0.5, stratify=temp_df["binary_label"], random_state=42
+            temp_df,
+            test_size=0.5,
+            stratify=temp_df["binary_label"],
+            random_state=random_state,
         )
 
         train_df["split"] = "train"
@@ -259,7 +267,9 @@ def main():
     print("\n" + "=" * 70)
     print("TRAINING COMPLETE!")
     print("=" * 70)
-    print(f"Model weights saved to: {config.checkpoint_dir}/best_model_phase2.weights.h5")
+    print(
+        f"Model weights saved to: {config.checkpoint_dir}/best_model_phase2.weights.h5"
+    )
     print(f"Final weights saved to: {config.checkpoint_dir}/final_model.weights.h5")
     print(f"Logs saved to: {config.log_dir}")
     print("\nTest Results:")

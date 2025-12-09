@@ -281,7 +281,8 @@ class KerasAudioDataLoader:
             )
 
         final_batch = batch_size or self.config.batch_size
-        ds = ds.batch(final_batch)
+        # drop_remainder=False to ensure all samples are included (especially important for validation)
+        ds = ds.batch(final_batch, drop_remainder=False)
         ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds
 

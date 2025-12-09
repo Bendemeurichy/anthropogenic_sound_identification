@@ -63,6 +63,15 @@ class TrainingConfig:
     # Model architecture
     hidden_units: Optional[List[int]] = None
 
+    # Bootstrap CI for validation metrics
+    bootstrap_enabled: bool = True
+    bootstrap_n_iterations: int = 1000
+    bootstrap_confidence_level: float = 0.95
+    bootstrap_log_frequency: int = 1  # Log bootstrap CI every N epochs
+
+    # Random seed for reproducibility
+    random_seed: int = 42
+
     def __post_init__(self):
         if self.hidden_units is None:
             self.hidden_units = [512, 256, 128]
