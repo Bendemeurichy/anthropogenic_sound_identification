@@ -3,6 +3,7 @@
 from pathlib import Path
 import sys
 import pandas as pd
+import argparse
 
 # Add parent directories to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -17,8 +18,13 @@ from label_loading.metadata_loader import (
 from common.audioset_downloader import download_missing_files_from_df
 
 
-def main():
-    """Main training function"""
+def main(optimize_hyperparams=False, n_trials=20):
+    """Main training function
+
+    Args:
+        optimize_hyperparams: Whether to run Optuna hyperparameter optimization
+        n_trials: Number of Optuna trials if optimization is enabled
+    """
 
     # 1. Load all dataset metadata
     print("Loading dataset metadata...")
@@ -226,34 +232,42 @@ def main():
     print("\nDatasets in train split:")
     print(train_df["dataset"].value_counts())
 
-    # 8. Create training configuration
-    config = TrainingConfig(
-        filename_column="filename",
-        start_time_column="start_time",
-        end_time_column="end_time",
-        label_column="label",
-        split_column="split",
-        sample_rate=16000,
-        audio_duration=5.0,
-        split_long=True,  # Split long annotations into multiple clips
-        min_clip_length=0.5,
-        batch_size=32,
-        shuffle_buffer=10000,
-        phase1_epochs=30,
-        phase2_epochs=20,
-        phase1_lr=1e-3,
-        phase2_lr=1e-5,
-        checkpoint_dir="./checkpoints",
-        log_dir="./logs",
-        # Augmentation settings (only applied during training)
-        use_augmentation=True,
-        aug_time_stretch_prob=0.5,
-        aug_time_stretch_range=(0.9, 1.1),
-        aug_noise_prob=0.3,
-        aug_noise_stddev=0.002,
-        aug_gain_prob=0.5,
-        aug_gain_range=(0.8, 1.2),
-    )
+    # 8. Optional: Run hyperparameter optimization
+    if optimize_hyperparams:
+        from optimize_hyperparams import optimize as run_optuna, get_best_config
+
+        study = run_optuna(train_df, val_df, test_df, n_trials=n_trials)
+        config = get_best_config(study)
+        print("\nUsing optimized hyperparameters for training...")
+    else:
+        # 8. Create training configuration
+        config = TrainingConfig(
+            filename_column="filename",
+            start_time_column="start_time",
+            end_time_column="end_time",
+            label_column="label",
+            split_column="split",
+            sample_rate=16000,
+            audio_duration=5.0,
+            split_long=True,  # Split long annotations into multiple clips
+            min_clip_length=0.5,
+            batch_size=32,
+            shuffle_buffer=10000,
+            phase1_epochs=30,
+            phase2_epochs=20,
+            phase1_lr=1e-3,
+            phase2_lr=1e-5,
+            checkpoint_dir="./checkpoints",
+            log_dir="./logs",
+            # Augmentation settings (only applied during training)
+            use_augmentation=True,
+            aug_time_stretch_prob=0.5,
+            aug_time_stretch_range=(0.9, 1.1),
+            aug_noise_prob=0.3,
+            aug_noise_stddev=0.002,
+            aug_gain_prob=0.5,
+            aug_gain_range=(0.8, 1.2),
+        )
 
     # 9. Train model using the lazy loader
     print("\n" + "=" * 70)
@@ -282,4 +296,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Train plane classifier")
+    parser.add_argument(
+        "--optimize",
+        action="store_true",
+        help="Run Optuna hyperparameter optimization before training",
+    )
+    parser.add_argument(
+        "--n-trials", type=int, default=20, help="Number of Optuna trials (default: 20)"
+    )
+
+    args = parser.parse_args()
+    main(optimize_hyperparams=args.optimize, n_trials=args.n_trials)
