@@ -240,6 +240,18 @@ def main(optimize_hyperparams=False, n_trials=20):
         config = get_best_config(study)
         print("\nUsing optimized hyperparameters for final training...")
         print(f"Best validation PR-AUC from optimization: {study.best_value:.4f}")
+        
+        fig1 = optuna.visualization.plot_optimization_history(study)
+        fig1.write_image("opt_history.png")
+
+        fig2 = optuna.visualization.plot_parallel_coordinate(study)
+        fig2.write_image("parallel_coord.png")
+
+        fig3 = optuna.visualization.plot_contour(study)
+        fig3.write_image("contour.png")
+
+        fig4 = optuna.visualization.plot_param_importances(study)
+        fig4.write_image("param_importance.png")
     else:
         # 8. Create training configuration
         config = TrainingConfig(
