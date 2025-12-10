@@ -235,12 +235,13 @@ def main(optimize_hyperparams=False, n_trials=20):
     # 8. Optional: Run hyperparameter optimization
     if optimize_hyperparams:
         from optimize_hyperparams import optimize as run_optuna, get_best_config
+        import optuna
 
         study = run_optuna(train_df, val_df, test_df, n_trials=n_trials)
         config = get_best_config(study)
         print("\nUsing optimized hyperparameters for final training...")
         print(f"Best validation PR-AUC from optimization: {study.best_value:.4f}")
-        
+
         fig1 = optuna.visualization.plot_optimization_history(study)
         fig1.write_image("opt_history.png")
 
