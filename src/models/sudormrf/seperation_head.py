@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics.audio import ScaleInvariantSignalNoiseRatio as SI_SNR
 from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
-    GroupCommSuDORMRFv2,
+    GroupCommSudoRmRf,
 )
 from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 
