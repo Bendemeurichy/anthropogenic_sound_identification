@@ -1,0 +1,3 @@
+[submodule "src/models/sudormrf/base"]
+	path = src/models/sudormrf/base
+	url = https://github.com/etzinis/sudo_rm_rf.git
