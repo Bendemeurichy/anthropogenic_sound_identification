@@ -25,10 +25,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics.audio import ScaleInvariantSignalNoiseRatio as SI_SNR
-from base.sudo_rm_rf.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
+from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
     GroupCommSuDORMRFv2,
 )
-from base.sudo_rm_rf.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
+from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 
 
 class COISeparationHead(nn.Module):
