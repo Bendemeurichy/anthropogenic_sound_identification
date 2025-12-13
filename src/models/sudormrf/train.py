@@ -21,7 +21,7 @@ import argparse
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from base.sudo_rm_rf.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
+from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 from src.models.sudormrf.seperation_head import wrap_model_for_coi
 from src.models.sudormrf.multi_class_seperation import wrap_model_for_multiclass
 from src.models.sudormrf.config import Config
