@@ -1,6 +1,6 @@
 """
 Training script for sudormrf model with custom serperation head and loss function.
-- Uses asteroid's PITLossWrapper for automatic permutation handling
+- Uses PITLossWrapper for automatic permutation handling
 Expected dataframe structure:
     - 'filename': path to wav file
     - 'split': train/val/test
@@ -22,6 +22,7 @@ import argparse
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
+from base.sudo_rm_rf.dnn.losses.sisdr import PITLossWrapper, PairwiseNegSDR
 from seperation_head import wrap_model_for_coi
 from multi_class_seperation import wrap_model_for_multiclass
 from config import Config
@@ -32,8 +33,6 @@ from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
 )
-
-from asteroid.losses import PITLossWrapper, pairwise_neg_sisdr
 
 
 class AudioDataset(Dataset):
@@ -317,6 +316,7 @@ def train(config: Config):
     print(f"Parameters: {n_params:.2f}M")
 
     # Setup training
+    pairwise_neg_sisdr = PairwiseNegSDR("sisdr")
     criterion = PITLossWrapper(pairwise_neg_sisdr, pit_from="pw_mtx")
     optimizer = optim.Adam(model.parameters(), lr=config.training.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
