@@ -22,11 +22,13 @@ import argparse
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
-from src.models.sudormrf.seperation_head import wrap_model_for_coi
-from src.models.sudormrf.multi_class_seperation import wrap_model_for_multiclass
-from src.models.sudormrf.config import Config
-from src.label_loading.sampler import get_coi, sample_non_coi
-from src.label_loading.metadata_loader import (
+from seperation_head import wrap_model_for_coi
+from multi_class_seperation import wrap_model_for_multiclass
+from config import Config
+
+
+from label_loading.sampler import get_coi, sample_non_coi
+from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
 )
