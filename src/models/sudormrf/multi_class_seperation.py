@@ -7,11 +7,13 @@ Supports multiple architectural strategies:
 3. Hierarchical with shared low-level features (balanced)
 """
 
-# TODO: Adapt to use proper base model imports and single seperation head
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from base.sudo_rm_rf.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
+    GroupCommSuDORMRFv2,
+)
+from base.sudo_rm_rf.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 
 
 class SharedBackgroundMultiCOI(nn.Module):
@@ -40,7 +42,7 @@ class SharedBackgroundMultiCOI(nn.Module):
         return nn.Sequential(
             nn.Conv1d(in_chan, in_chan, 3, padding=1, groups=in_chan),
             nn.Conv1d(in_chan, out_chan, 1),
-            nn.PReLU(),
+            nn.PReLU(out_chan),
             nn.Conv1d(out_chan, out_chan, 3, padding=1, groups=out_chan),
             nn.Conv1d(out_chan, out_chan, 1),
         )
@@ -50,7 +52,7 @@ class SharedBackgroundMultiCOI(nn.Module):
         Args:
             x: [B, in_channels, T]
         Returns:
-            masks: [B, n_sources, out_channels, T]
+            masks: [B, n_sources * out_channels, T]
                    sources = [coi_1, coi_2, ..., coi_n, background]
         """
         # process each COI class branch
@@ -58,7 +60,54 @@ class SharedBackgroundMultiCOI(nn.Module):
 
         bg_mask = torch.relu(self.background_branch(x))
 
-        # Stack: COI classes first, then background
-        masks = torch.stack(coi_masks + [bg_mask], dim=1)
+        # Concatenate: COI classes first, then background
+        # Shape: (B, n_sources * out_channels, T)
+        masks = torch.cat(coi_masks + [bg_mask], dim=1)
 
         return masks
+
+
+def wrap_model_for_multiclass(model, replace_head=True, n_coi_classes=3):
+    """Wraps a SuDoRM-RF model with a Multi-class COI separation head.
+    Args:
+        model: SuDoRM-RF model instance
+        replace_head: If True, replaces the existing separation head.
+        n_coi_classes: Number of classes of interest.
+    Returns:
+        model: Modified SuDoRM-RF model with Multi-class COI head
+    """
+    if replace_head:
+        if isinstance(model, SuDORMRF) or isinstance(model, GroupCommSuDORMRFv2):
+            in_channels = model.mask_net[-1].in_channels
+            out_channels = model.enc_num_basis
+            n_src = n_coi_classes + 1
+
+            # 1. Replace the mask network
+            model.mask_net = SharedBackgroundMultiCOI(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                n_coi_classes=n_coi_classes,
+            )
+
+            # 2. Update the number of sources
+            model.num_sources = n_src
+
+            # 3. Re-initialize the decoder
+            model.decoder = nn.ConvTranspose1d(
+                in_channels=model.enc_num_basis * model.num_sources,
+                out_channels=model.num_sources,
+                output_padding=(model.enc_kernel_size // 2) - 1,
+                kernel_size=model.enc_kernel_size,
+                stride=model.enc_kernel_size // 2,
+                padding=model.enc_kernel_size // 2,
+                groups=1,
+                bias=False,
+            )
+            torch.nn.init.xavier_uniform_(model.decoder.weight)
+
+        else:
+            raise TypeError(
+                "Model type not supported for Multi-class COI head replacement."
+            )
+
+    return model
