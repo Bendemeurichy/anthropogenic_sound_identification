@@ -371,7 +371,12 @@ def create_model(config: Config, compile_model: bool = False):
         print("Wrapping model for Single COI separation.")
         model = wrap_model_for_coi(base_model)
 
-    model = model.to(config.training.device)
+    try:
+        model = model.to(config.training.device)
+    except Exception as e:
+        print(f"Error moving model to device {config.training.device}: {e}")
+        print("Moving model to CPU instead.")
+        model = model.to("cpu")
 
     # Compile model for faster training (requires PyTorch 2.0+)
     # Note: torch.compile with inductor backend can be slow on WSL
