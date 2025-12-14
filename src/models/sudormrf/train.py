@@ -16,8 +16,6 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import sys
 import torch
 
-# Limit CPU threads to reduce memory overhead
-torch.set_num_threads(4)
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torchaudio
@@ -101,31 +99,7 @@ class AudioDataset(Dataset):
         return len(self.coi_files)
 
     def load_and_preprocess(self, filepath):
-        # Get file info first to determine if we need full load
-        info = torchaudio.info(filepath)
-        num_frames = info.num_frames
-        file_sr = info.sample_rate
-
-        # Calculate how many frames we need at original sample rate
-        if file_sr != self.sample_rate:
-            frames_needed = (
-                int(self.segment_samples * file_sr / self.sample_rate) + 100
-            )  # buffer
-        else:
-            frames_needed = self.segment_samples
-
-        # Random offset for augmentation - calculated BEFORE loading
-        if self.augment and num_frames > frames_needed:
-            frame_offset = np.random.randint(0, num_frames - frames_needed)
-        else:
-            frame_offset = 0
-
-        # Load only the frames we need (memory efficient)
-        waveform, sr = torchaudio.load(
-            filepath,
-            frame_offset=frame_offset,
-            num_frames=min(frames_needed, num_frames - frame_offset),
-        )
+        waveform, sr = torchaudio.load(filepath)
 
         if sr != self.sample_rate:
             waveform = torchaudio.transforms.Resample(sr, self.sample_rate)(waveform)
@@ -135,12 +109,14 @@ class AudioDataset(Dataset):
 
         waveform = waveform.squeeze(0)
 
-        # Pad if too short
         if waveform.shape[0] < self.segment_samples:
             padding = self.segment_samples - waveform.shape[0]
             waveform = torch.nn.functional.pad(waveform, (0, padding))
+
+        if self.augment and waveform.shape[0] > self.segment_samples:
+            start = np.random.randint(0, waveform.shape[0] - self.segment_samples)
+            waveform = waveform[start : start + self.segment_samples]
         else:
-            # Trim to exact length
             waveform = waveform[: self.segment_samples]
 
         return waveform
