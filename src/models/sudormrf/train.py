@@ -23,67 +23,6 @@ from pathlib import Path
 from tqdm import tqdm
 import argparse
 
-
-def setup_cuda(device: str = "cuda:0") -> torch.device:
-    """
-    Setup CUDA device with proper memory management to prevent OOM errors.
-
-    Args:
-        device: Target device string (e.g., "cuda:0", "cuda", "cpu")
-
-    Returns:
-        torch.device: Configured device
-    """
-    if not torch.cuda.is_available():
-        print("CUDA not available, using CPU")
-        return torch.device("cpu")
-
-    # Parse device string
-    if device.startswith("cuda"):
-        device_id = 0
-        if ":" in device:
-            device_id = int(device.split(":")[1])
-
-        # Check if requested GPU exists
-        if device_id >= torch.cuda.device_count():
-            print(
-                f"GPU {device_id} not found. Available GPUs: {torch.cuda.device_count()}"
-            )
-            device_id = 0
-
-        torch.cuda.set_device(device_id)
-
-        # Clear any existing GPU memory
-        torch.cuda.empty_cache()
-
-        # Get GPU properties
-        props = torch.cuda.get_device_properties(device_id)
-        total_memory = props.total_memory / 1024**3  # Convert to GB
-
-        print(f"\n{'='*50}")
-        print(f"CUDA Setup:")
-        print(f"  Device: {props.name}")
-        print(f"  Total Memory: {total_memory:.2f} GB")
-        print(f"  CUDA Version: {torch.version.cuda}")
-        print(f"  cuDNN Version: {torch.backends.cudnn.version()}")
-
-        # Check current memory usage
-        allocated = torch.cuda.memory_allocated(device_id) / 1024**3
-        reserved = torch.cuda.memory_reserved(device_id) / 1024**3
-        print(f"  Memory Allocated: {allocated:.2f} GB")
-        print(f"  Memory Reserved: {reserved:.2f} GB")
-        print(f"{'='*50}\n")
-
-        # Enable memory-efficient settings
-        torch.backends.cudnn.benchmark = True  # Optimize for fixed input sizes
-        torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 for faster matmul
-        torch.backends.cudnn.allow_tf32 = True  # Allow TF32 for cuDNN
-
-        return torch.device(f"cuda:{device_id}")
-
-    return torch.device("cpu")
-
-
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -492,10 +431,6 @@ def main():
     print("Configuration:")
     print(f"  Model: {config.model.type} ({config.model.num_blocks} blocks)")
     print(f"  Device: {config.training.device}")
-
-    # Setup CUDA device with memory management
-    device = setup_cuda(config.training.device)
-    config.training.device = str(device)  # Update config with actual device
 
     # 1. Load all dataset metadata (same as plane classifier)
     print("\nLoading dataset metadata...")
