@@ -270,8 +270,8 @@ def create_model(config: Config):
             num_sources=2,
         )
     else:
-        from base.sudo_rm_rf.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
-            GroupCommSuDORMRFv2,
+        from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
+            GroupCommSudoRmRf,
         )
 
         base_model = GroupCommSuDORMRFv2(
@@ -295,7 +295,14 @@ def create_model(config: Config):
         print("Wrapping model for Single COI separation.")
         model = wrap_model_for_coi(base_model)
 
-    return model.to(config.training.device)
+    model = model.to(config.training.device)
+
+    # Compile model for faster training (requires PyTorch 2.0+)
+    if hasattr(torch, "compile"):
+        print("Compiling model with torch.compile()...")
+        model = torch.compile(model)
+
+    return model
 
 
 def train(config: Config):

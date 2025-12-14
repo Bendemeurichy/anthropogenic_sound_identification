@@ -29,7 +29,7 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     batch_size: int = 4
-    num_epochs: int = 100
+    num_epochs: int = 50
     lr: float = 0.001
     num_workers: int = 4
     clip_grad_norm: float = 5.0
