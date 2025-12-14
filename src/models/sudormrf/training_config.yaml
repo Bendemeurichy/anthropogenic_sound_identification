@@ -24,4 +24,4 @@ training:
   clip_grad_norm: 5.0
   patience: 15 # early stopping patience
   checkpoint_dir: "checkpoints"
-  device: "cuda"
+  device: "cpu"
