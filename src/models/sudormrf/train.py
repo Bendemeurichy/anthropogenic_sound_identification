@@ -24,6 +24,7 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import argparse
+from contextlib import nullcontext
 
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -68,6 +69,9 @@ class AudioDataset(Dataset):
         self.n_coi_classes = n_coi_classes
         self.augment = augment
 
+        # Cache resamplers by (orig_sr -> target_sr) to avoid repeatedly creating modules
+        self._resamplers: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
+
         # Store only file paths as lists instead of DataFrames (more memory efficient)
         coi_mask = split_df["label"] == 1
         self.coi_files = split_df.loc[coi_mask, "filename"].tolist()
@@ -98,24 +102,73 @@ class AudioDataset(Dataset):
     def __len__(self):
         return len(self.coi_files)
 
-    def load_and_preprocess(self, filepath):
-        waveform, sr = torchaudio.load(filepath)
+    def load_and_preprocess(self, filepath: str) -> torch.Tensor:
+        """Load only the needed segment from disk to reduce RAM spikes."""
+
+        try:
+            info = torchaudio.info(filepath)
+            orig_sr = info.sample_rate
+            num_frames = info.num_frames
+        except Exception:
+            # Fallback: torchaudio.info can fail on some backends/codecs
+            waveform, orig_sr = torchaudio.load(filepath)
+            if orig_sr != self.sample_rate:
+                key = (orig_sr, self.sample_rate)
+                resampler = self._resamplers.get(key)
+                if resampler is None:
+                    resampler = torchaudio.transforms.Resample(
+                        orig_sr, self.sample_rate
+                    )
+                    self._resamplers[key] = resampler
+                waveform = resampler(waveform)
+
+            if waveform.shape[0] > 1:
+                waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+            waveform = waveform.squeeze(0)
+            if waveform.shape[0] < self.segment_samples:
+                waveform = torch.nn.functional.pad(
+                    waveform, (0, self.segment_samples - waveform.shape[0])
+                )
+            return waveform[: self.segment_samples]
+
+        # Decide how many frames to load at original sample rate
+        segment_frames_orig = int(self.segment_samples * orig_sr / self.sample_rate)
+        segment_frames_orig = max(segment_frames_orig, 1)
+
+        if num_frames <= 0:
+            waveform, sr = torchaudio.load(filepath)
+        else:
+            if self.augment and num_frames > segment_frames_orig:
+                frame_offset = int(
+                    np.random.randint(0, num_frames - segment_frames_orig)
+                )
+            else:
+                frame_offset = 0
+
+            # Load only a segment from disk
+            waveform, sr = torchaudio.load(
+                filepath, frame_offset=frame_offset, num_frames=segment_frames_orig
+            )
 
         if sr != self.sample_rate:
-            waveform = torchaudio.transforms.Resample(sr, self.sample_rate)(waveform)
+            key = (sr, self.sample_rate)
+            resampler = self._resamplers.get(key)
+            if resampler is None:
+                resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
+                self._resamplers[key] = resampler
+            waveform = resampler(waveform)
 
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
 
         waveform = waveform.squeeze(0)
 
+        # Enforce exact segment length at target SR
         if waveform.shape[0] < self.segment_samples:
-            padding = self.segment_samples - waveform.shape[0]
-            waveform = torch.nn.functional.pad(waveform, (0, padding))
-
-        if self.augment and waveform.shape[0] > self.segment_samples:
-            start = np.random.randint(0, waveform.shape[0] - self.segment_samples)
-            waveform = waveform[start : start + self.segment_samples]
+            waveform = torch.nn.functional.pad(
+                waveform, (0, self.segment_samples - waveform.shape[0])
+            )
         else:
             waveform = waveform[: self.segment_samples]
 
@@ -192,30 +245,85 @@ class AudioDataset(Dataset):
         return mixture, sources_tensor
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad_norm=5.0):
+def train_epoch(
+    model,
+    dataloader,
+    optimizer,
+    criterion,
+    device,
+    clip_grad_norm=5.0,
+    *,
+    grad_accum_steps: int = 1,
+    use_amp: bool = True,
+):
     model.train()
     running_loss = 0.0
     n_samples = 0
 
+    grad_accum_steps = max(int(grad_accum_steps), 1)
+    use_amp = bool(use_amp) and (str(device).startswith("cuda"))
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
+    autocast_ctx = (
+        torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+        if use_amp
+        else nullcontext()
+    )
+
     progress_bar = tqdm(dataloader, desc="Training", leave=False, ascii=True, ncols=100)
-    for mixtures, sources in progress_bar:
+    optimizer.zero_grad(set_to_none=True)
+    step_idx = 0
+    for step_idx, (mixtures, sources) in enumerate(progress_bar, start=1):
         mixtures = mixtures.to(device, non_blocking=True)
         sources = sources.to(device, non_blocking=True)
 
-        optimizer.zero_grad(set_to_none=True)  # More memory efficient than zero_grad()
-        estimates = model(mixtures.unsqueeze(1))
-        loss = criterion(estimates, sources)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-        optimizer.step()
+        with autocast_ctx:
+            estimates = model(mixtures.unsqueeze(1))
+            loss = criterion(estimates, sources)
+
+            # Scale loss for gradient accumulation
+            loss_to_backprop = loss / grad_accum_steps
+
+        if use_amp:
+            assert scaler is not None
+            scaler.scale(loss_to_backprop).backward()
+        else:
+            loss_to_backprop.backward()
+
+        if (step_idx % grad_accum_steps) == 0:
+            # Unscale before clipping
+            if use_amp:
+                assert scaler is not None
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+            if use_amp:
+                assert scaler is not None
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
         batch_size = mixtures.size(0)
-        running_loss += loss.item() * batch_size
+        running_loss += float(loss.detach().cpu().item()) * batch_size
         n_samples += batch_size
-        progress_bar.set_postfix(loss=loss.item())
+        progress_bar.set_postfix(loss=float(loss.detach().cpu().item()))
 
         # Free memory explicitly
-        del mixtures, sources, estimates, loss
+        del mixtures, sources, estimates, loss, loss_to_backprop
+
+    # Flush any remaining accumulated gradients
+    if step_idx != 0 and (step_idx % grad_accum_steps) != 0:
+        if use_amp:
+            assert scaler is not None
+            scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+        if use_amp:
+            assert scaler is not None
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
     # Clear GPU cache after epoch
     if device != "cpu":
@@ -226,10 +334,17 @@ def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad_norm=
 
 
 @torch.no_grad()
-def validate_epoch(model, dataloader, criterion, device):
+def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True):
     model.eval()
     running_loss = 0.0
     n_samples = 0
+
+    use_amp = bool(use_amp) and (str(device).startswith("cuda"))
+    autocast_ctx = (
+        torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+        if use_amp
+        else nullcontext()
+    )
 
     progress_bar = tqdm(
         dataloader, desc="Validation", leave=False, ascii=True, ncols=100
@@ -238,13 +353,14 @@ def validate_epoch(model, dataloader, criterion, device):
         mixtures = mixtures.to(device, non_blocking=True)
         sources = sources.to(device, non_blocking=True)
 
-        estimates = model(mixtures.unsqueeze(1))
-        loss = criterion(estimates, sources)
+        with autocast_ctx:
+            estimates = model(mixtures.unsqueeze(1))
+            loss = criterion(estimates, sources)
 
         batch_size = mixtures.size(0)
-        running_loss += loss.item() * batch_size
+        running_loss += float(loss.detach().cpu().item()) * batch_size
         n_samples += batch_size
-        progress_bar.set_postfix(loss=loss.item())
+        progress_bar.set_postfix(loss=float(loss.detach().cpu().item()))
 
         # Free memory explicitly
         del mixtures, sources, estimates, loss
@@ -425,10 +541,18 @@ def train(config: Config):
             criterion,
             config.training.device,
             config.training.clip_grad_norm,
+            grad_accum_steps=getattr(config.training, "grad_accum_steps", 1),
+            use_amp=getattr(config.training, "use_amp", True),
         )
         history["train_loss"].append(train_loss)
 
-        val_loss = validate_epoch(model, val_loader, criterion, config.training.device)
+        val_loss = validate_epoch(
+            model,
+            val_loader,
+            criterion,
+            config.training.device,
+            use_amp=getattr(config.training, "use_amp", True),
+        )
         history["val_loss"].append(val_loss)
 
         print(f"Train: {train_loss:.4f}, Val: {val_loss:.4f}")

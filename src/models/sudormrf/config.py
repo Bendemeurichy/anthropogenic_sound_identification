@@ -29,6 +29,8 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     batch_size: int = 4
+    grad_accum_steps: int = 1
+    use_amp: bool = True
     num_epochs: int = 50
     lr: float = 0.001
     num_workers: int = 4
