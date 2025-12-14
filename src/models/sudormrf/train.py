@@ -177,7 +177,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad_norm=
     model.train()
     running_loss = 0.0
 
-    progress_bar = tqdm(dataloader, desc="Training", leave=False)
+    progress_bar = tqdm(dataloader, desc="Training", leave=False, ascii=True, ncols=100)
     for mixtures, sources in progress_bar:
         mixtures = mixtures.to(device)
         sources = sources.to(device)
@@ -201,7 +201,9 @@ def validate_epoch(model, dataloader, criterion, device):
     model.eval()
     running_loss = 0.0
 
-    progress_bar = tqdm(dataloader, desc="Validation", leave=False)
+    progress_bar = tqdm(
+        dataloader, desc="Validation", leave=False, ascii=True, ncols=100
+    )
     for mixtures, sources in progress_bar:
         mixtures = mixtures.to(device)
         sources = sources.to(device)
@@ -265,7 +267,7 @@ def get_model_args(model):
     }
 
 
-def create_model(config: Config):
+def create_model(config: Config, compile_model: bool = False):
     """Create and wrap model with aircraft separation head."""
     if config.model.type == "improved":
         base_model = SuDORMRF(
@@ -306,9 +308,14 @@ def create_model(config: Config):
     model = model.to(config.training.device)
 
     # Compile model for faster training (requires PyTorch 2.0+)
-    if hasattr(torch, "compile"):
-        print("Compiling model with torch.compile()...")
-        model = torch.compile(model)
+    # Note: torch.compile with inductor backend can be slow on WSL
+    # Use 'eager' backend or disable compilation if experiencing slowness
+    if hasattr(torch, "compile") and config.training.compile_model:
+        backend = getattr(config.training, "compile_backend", "inductor")
+        print(f"Compiling model with torch.compile() using '{backend}' backend...")
+        model = torch.compile(model, backend=backend)
+    elif hasattr(torch, "compile"):
+        print("Model compilation disabled (set compile_model=True in config to enable)")
 
     return model
 

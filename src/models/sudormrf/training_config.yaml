@@ -20,8 +20,10 @@ training:
   batch_size: 4
   num_epochs: 50
   lr: 0.001
-  num_workers: 4
+  num_workers: 0 # WSL1: must be 0, multiprocessing causes major slowdowns
   clip_grad_norm: 5.0
   patience: 15 # early stopping patience
   checkpoint_dir: "checkpoints"
-  device: "cpu"
+  device: "cpu" # WSL1: no CUDA support, only WSL2 supports GPU
+  compile_model: false # WSL1: torch.compile adds overhead with no benefit
+

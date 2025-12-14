@@ -36,6 +36,8 @@ class TrainingConfig:
     patience: int = 15
     checkpoint_dir: str = "checkpoints"
     device: str = "cuda"
+    compile_model: bool = False  # torch.compile can be slow on WSL with inductor
+    compile_backend: str = "inductor"  # Options: 'inductor', 'eager', 'aot_eager'
 
 
 @dataclass
