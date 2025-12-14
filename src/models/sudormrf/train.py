@@ -8,6 +8,7 @@ Expected dataframe structure:
 """
 
 import os
+import gc
 
 # Pin to single GPU before importing torch (prevents multi-GPU OOM issues)
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -54,36 +55,47 @@ class AudioDataset(Dataset):
         augment: bool = True,
     ):
         self.split = split
-        self.dataframe = dataframe[dataframe["split"] == split].reset_index(drop=True)
+        # Only keep necessary columns to reduce memory
+        split_df = dataframe[dataframe["split"] == split][["filename", "label"]].copy()
+        if "coi_class" in dataframe.columns:
+            split_df["coi_class"] = dataframe.loc[split_df.index, "coi_class"]
+        split_df = split_df.reset_index(drop=True)
+
         self.sample_rate = sample_rate
         self.segment_samples = int(segment_length * sample_rate)
         self.snr_range = snr_range
         self.n_coi_classes = n_coi_classes
         self.augment = augment
 
-        self.coi_df = self.dataframe[self.dataframe["label"] == 1].reset_index(
-            drop=True
-        )
-        self.non_coi_df = self.dataframe[self.dataframe["label"] == 0].reset_index(
-            drop=True
-        )
+        # Store only file paths as lists instead of DataFrames (more memory efficient)
+        coi_mask = split_df["label"] == 1
+        self.coi_files = split_df.loc[coi_mask, "filename"].tolist()
+        self.non_coi_files = split_df.loc[~coi_mask, "filename"].tolist()
 
         if n_coi_classes > 1:
+            # Store file lists per class instead of DataFrames
             self.coi_by_class = [
-                self.coi_df[self.coi_df.get("coi_class", 0) == i].reset_index(drop=True)
+                split_df.loc[
+                    (split_df["label"] == 1) & (split_df.get("coi_class", 0) == i),
+                    "filename",
+                ].tolist()
                 for i in range(n_coi_classes)
             ]
             print(
                 f"{split} set: {[len(c) for c in self.coi_by_class]} per class, "
-                f"{len(self.non_coi_df)} non-COI"
+                f"{len(self.non_coi_files)} non-COI"
             )
         else:
             print(
-                f"{split} set: {len(self.coi_df)} COI, {len(self.non_coi_df)} non-COI"
+                f"{split} set: {len(self.coi_files)} COI, {len(self.non_coi_files)} non-COI"
             )
 
+        # Clear the temporary DataFrame
+        del split_df
+        gc.collect()
+
     def __len__(self):
-        return len(self.coi_df)
+        return len(self.coi_files)
 
     def load_and_preprocess(self, filepath):
         waveform, sr = torchaudio.load(filepath)
@@ -131,8 +143,8 @@ class AudioDataset(Dataset):
         # Select COI class
         if self.n_coi_classes == 1:
             # Binary case
-            coi_idx = idx % len(self.coi_df)
-            coi_file = self.coi_df.iloc[coi_idx]["filename"]
+            coi_idx = idx % len(self.coi_files)
+            coi_file = self.coi_files[coi_idx]
             coi_audio = self.load_and_preprocess(coi_file)
 
             # Create zero tensors for other classes
@@ -141,7 +153,7 @@ class AudioDataset(Dataset):
             # Multi-class case: randomly select one COI class
             class_idx = np.random.randint(0, self.n_coi_classes)
             coi_idx = np.random.randint(0, len(self.coi_by_class[class_idx]))
-            coi_file = self.coi_by_class[class_idx].iloc[coi_idx]["filename"]
+            coi_file = self.coi_by_class[class_idx][coi_idx]
             coi_audio = self.load_and_preprocess(coi_file)
 
             # Create sources list with zeros for other classes
@@ -149,8 +161,8 @@ class AudioDataset(Dataset):
             sources[class_idx] = coi_audio
 
         # Sample background
-        noncoi_idx = np.random.randint(0, len(self.non_coi_df))
-        noncoi_file = self.non_coi_df.iloc[noncoi_idx]["filename"]
+        noncoi_idx = np.random.randint(0, len(self.non_coi_files))
+        noncoi_file = self.non_coi_files[noncoi_idx]
         background = self.load_and_preprocess(noncoi_file)
 
         # Normalize sources FIRST
@@ -181,23 +193,33 @@ class AudioDataset(Dataset):
 def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad_norm=5.0):
     model.train()
     running_loss = 0.0
+    n_samples = 0
 
     progress_bar = tqdm(dataloader, desc="Training", leave=False, ascii=True, ncols=100)
     for mixtures, sources in progress_bar:
-        mixtures = mixtures.to(device)
-        sources = sources.to(device)
+        mixtures = mixtures.to(device, non_blocking=True)
+        sources = sources.to(device, non_blocking=True)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)  # More memory efficient than zero_grad()
         estimates = model(mixtures.unsqueeze(1))
         loss = criterion(estimates, sources)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
         optimizer.step()
 
-        running_loss += loss.item() * mixtures.size(0)
+        batch_size = mixtures.size(0)
+        running_loss += loss.item() * batch_size
+        n_samples += batch_size
         progress_bar.set_postfix(loss=loss.item())
 
-    epoch_loss = running_loss / len(dataloader.dataset)
+        # Free memory explicitly
+        del mixtures, sources, estimates, loss
+
+    # Clear GPU cache after epoch
+    if device != "cpu":
+        torch.cuda.empty_cache()
+
+    epoch_loss = running_loss / n_samples
     return epoch_loss
 
 
@@ -205,21 +227,31 @@ def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad_norm=
 def validate_epoch(model, dataloader, criterion, device):
     model.eval()
     running_loss = 0.0
+    n_samples = 0
 
     progress_bar = tqdm(
         dataloader, desc="Validation", leave=False, ascii=True, ncols=100
     )
     for mixtures, sources in progress_bar:
-        mixtures = mixtures.to(device)
-        sources = sources.to(device)
+        mixtures = mixtures.to(device, non_blocking=True)
+        sources = sources.to(device, non_blocking=True)
 
         estimates = model(mixtures.unsqueeze(1))
         loss = criterion(estimates, sources)
 
-        running_loss += loss.item() * mixtures.size(0)
+        batch_size = mixtures.size(0)
+        running_loss += loss.item() * batch_size
+        n_samples += batch_size
         progress_bar.set_postfix(loss=loss.item())
 
-    epoch_loss = running_loss / len(dataloader.dataset)
+        # Free memory explicitly
+        del mixtures, sources, estimates, loss
+
+    # Clear GPU cache after validation
+    if device != "cpu":
+        torch.cuda.empty_cache()
+
+    epoch_loss = running_loss / n_samples
     return epoch_loss
 
 
@@ -249,16 +281,27 @@ def create_dataloaders(config: Config):
         augment=False,
     )
 
+    # Memory-optimized DataLoader settings
+    # - persistent_workers=False: Don't keep worker processes alive (saves RAM)
+    # - prefetch_factor=1: Reduce prefetching to minimize memory usage
+    # - drop_last=True for training: Avoid small batches that waste memory
     loader_kwargs = {
         "batch_size": config.training.batch_size,
         "num_workers": config.training.num_workers,
         "pin_memory": True,
-        "persistent_workers": config.training.num_workers > 0,
-        "prefetch_factor": 2 if config.training.num_workers > 0 else None,
+        "persistent_workers": False,  # Saves significant RAM
+        "prefetch_factor": 1 if config.training.num_workers > 0 else None,
     }
 
-    train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+    train_loader = DataLoader(
+        train_dataset, shuffle=True, drop_last=True, **loader_kwargs
+    )
+    val_loader = DataLoader(
+        val_dataset, shuffle=False, drop_last=False, **loader_kwargs
+    )
+
+    # Force garbage collection after creating datasets
+    gc.collect()
 
     return train_loader, val_loader
 
@@ -341,6 +384,7 @@ def train(config: Config):
 
     print("Creating dataloaders...")
     train_loader, val_loader = create_dataloaders(config)
+    gc.collect()  # Clean up after dataloader creation
 
     print("Creating model...")
     model = create_model(config)
@@ -514,7 +558,12 @@ def main():
     config.data.df_path = str(df_save_path)
     print(f"  Data: {config.data.df_path}")
 
-    # 10. Train
+    # 10. Clean up large DataFrames before training
+    del all_metadata, separation_metadata, coi_df, sampled_df
+    gc.collect()
+    print("Cleaned up metadata DataFrames from memory.")
+
+    # 11. Train
     train(config)
 
 
