@@ -18,7 +18,7 @@ model:
 # Training settings
 training:
   batch_size: 4
-  num_epochs: 50
+  num_epochs: 20
   lr: 0.001
   num_workers: 2
   clip_grad_norm: 5.0
