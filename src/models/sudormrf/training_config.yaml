@@ -5,25 +5,24 @@ data:
   snr_range: [-5, 5] # dB range for mixing
   n_coi_classes: 1
 
-# Model settings
+# Model settings (using base model defaults)
 model:
   type: "improved" # 'improved' or 'groupcomm'
-  out_channels: 256
-  in_channels: 512
-  num_blocks: 16
-  upsampling_depth: 5
-  enc_kernel_size: 21
-  enc_num_basis: 512
+  out_channels: 128 # base model default
+  in_channels: 512 # base model default
+  num_blocks: 16 # base model default
+  upsampling_depth: 4 # base model default
+  enc_kernel_size: 21 # base model default
+  enc_num_basis: 512 # base model default
 
 # Training settings
 training:
   batch_size: 4
   num_epochs: 50
   lr: 0.001
-  num_workers: 0 # WSL1: must be 0, multiprocessing causes major slowdowns
+  num_workers: 2
   clip_grad_norm: 5.0
   patience: 15 # early stopping patience
   checkpoint_dir: "checkpoints"
-  device: "cpu" # WSL1: no CUDA support, only WSL2 supports GPU
-  compile_model: false # WSL1: torch.compile adds overhead with no benefit
-
+  device: "cuda:0" # pin to first GPU
+  compile_model: false

@@ -7,6 +7,11 @@ Expected dataframe structure:
     - 'label': 1 for aircraft (COI), 0 for background (non-COI)
 """
 
+import os
+
+# Pin to single GPU before importing torch (prevents multi-GPU OOM issues)
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 import sys
 import torch
 import torch.optim as optim
