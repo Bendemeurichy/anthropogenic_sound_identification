@@ -148,18 +148,26 @@ class AudioDataset(Dataset):
         noncoi_file = self.non_coi_df.iloc[noncoi_idx]["filename"]
         background = self.load_and_preprocess(noncoi_file)
 
-        # Mix all COI classes with background
-        total_coi = sum(sources)
-        snr_db = np.random.uniform(*self.snr_range)
-        mixture = self.create_mixture(total_coi, background, snr_db)
-
-        # Normalize
-        mixture = self.normalize(mixture)
+        # Normalize sources FIRST
         sources = [self.normalize(s) for s in sources]
         background = self.normalize(background)
 
-        # Stack: [coi_class_1, ..., coi_class_n, background]
-        sources.append(background)
+        # Create mixture from normalized sources
+        total_coi = sum(sources)
+        snr_db = np.random.uniform(*self.snr_range)
+
+        # Scale background for target SNR
+        coi_power = torch.mean(total_coi**2) + 1e-8
+        bg_power = torch.mean(background**2) + 1e-8
+        snr_linear = 10 ** (snr_db / 10)
+        scaling_factor = torch.sqrt(coi_power / (snr_linear * bg_power))
+        scaled_background = background * scaling_factor
+
+        # Mixture is now sum of sources
+        mixture = total_coi + scaled_background
+
+        # Update background to the scaled version (what's actually in mixture)
+        sources.append(scaled_background)
         sources_tensor = torch.stack(sources, dim=0)
 
         return mixture, sources_tensor
@@ -274,7 +282,7 @@ def create_model(config: Config):
             GroupCommSudoRmRf,
         )
 
-        base_model = GroupCommSuDORMRFv2(
+        base_model = GroupCommSudoRmRf(
             out_channels=config.model.out_channels,
             in_channels=config.model.in_channels,
             num_blocks=config.model.num_blocks,
@@ -410,7 +418,7 @@ def main():
     # 1. Load all dataset metadata (same as plane classifier)
     print("\nLoading dataset metadata...")
     project_root = Path(__file__).parent.parent.parent.parent
-    datasets_path = str(project_root / "data" / "metadata")
+    datasets_path = str(project_root / "data")
     audio_base_path = str(project_root.parent / "datasets")
 
     all_metadata = load_metadata_datasets(datasets_path, audio_base_path)
