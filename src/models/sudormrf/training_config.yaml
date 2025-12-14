@@ -20,7 +20,7 @@ training:
   batch_size: 4
   num_epochs: 20
   lr: 0.001
-  num_workers: 2
+  num_workers: 0 # Set to 0 to save ~10-15GB RAM (workers duplicate dataset in memory)
   clip_grad_norm: 5.0
   patience: 15 # early stopping patience
   checkpoint_dir: "checkpoints"
