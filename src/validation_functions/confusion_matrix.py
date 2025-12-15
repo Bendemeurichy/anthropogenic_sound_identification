@@ -241,19 +241,33 @@ class ValidationPipeline:
         return (waveform - waveform.mean()) / (waveform.std() + 1e-8)
 
     def validate_clean(
-        self, df_coi: pd.DataFrame, use_separation: bool
+        self, df_coi: pd.DataFrame, df_bg: pd.DataFrame, use_separation: bool
     ) -> ClassificationMetrics:
-        """Validate on clean (unmixed) COI audio."""
+        """Validate on clean (unmixed) audio - both COI and background."""
         y_true, y_pred, y_scores = [], [], []
         desc = "Clean (sep+cls)" if use_separation else "Clean (cls only)"
 
-        for _, row in tqdm(df_coi.iterrows(), total=len(df_coi), desc=desc):
+        # Process COI samples (label=1)
+        for _, row in tqdm(df_coi.iterrows(), total=len(df_coi), desc=f"{desc} - COI"):
             try:
                 waveform = self._load_audio(row["filename"])
                 if use_separation:
                     waveform = self._separate(waveform)
                 pred, conf = self._classify(waveform)
                 y_true.append(1)
+                y_pred.append(pred)
+                y_scores.append(conf)
+            except Exception as e:
+                print(f"Error: {row['filename']}: {e}")
+
+        # Process background samples (label=0)
+        for _, row in tqdm(df_bg.iterrows(), total=len(df_bg), desc=f"{desc} - BG"):
+            try:
+                waveform = self._load_audio(row["filename"])
+                if use_separation:
+                    waveform = self._separate(waveform)
+                pred, conf = self._classify(waveform)
+                y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
             except Exception as e:
@@ -270,12 +284,15 @@ class ValidationPipeline:
         snr_range: Tuple[float, float],
         use_separation: bool,
     ) -> ClassificationMetrics:
-        """Validate on mixtures at random SNR."""
+        """Validate on mixtures at random SNR (COI+BG) and clean background (BG only)."""
         y_true, y_pred, y_scores = [], [], []
         desc = "Mixtures (sep+cls)" if use_separation else "Mixtures (cls only)"
         bg_files = df_bg["filename"].tolist()
 
-        for _, row in tqdm(df_coi.iterrows(), total=len(df_coi), desc=desc):
+        # Process COI + background mixtures (label=1)
+        for _, row in tqdm(
+            df_coi.iterrows(), total=len(df_coi), desc=f"{desc} - COI+BG"
+        ):
             try:
                 coi = self._normalize(self._load_audio(row["filename"]))
                 bg = self._normalize(
@@ -288,6 +305,22 @@ class ValidationPipeline:
                     mixture = self._separate(mixture)
                 pred, conf = self._classify(mixture)
                 y_true.append(1)
+                y_pred.append(pred)
+                y_scores.append(conf)
+            except Exception as e:
+                print(f"Error: {e}")
+
+        # Process background-only samples (label=0)
+        for _, row in tqdm(
+            df_bg.iterrows(), total=len(df_bg), desc=f"{desc} - BG only"
+        ):
+            try:
+                waveform = self._load_audio(row["filename"])
+
+                if use_separation:
+                    waveform = self._separate(waveform)
+                pred, conf = self._classify(waveform)
+                y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
             except Exception as e:
@@ -322,12 +355,14 @@ class ValidationPipeline:
 
         # 1. Clean - classification only
         print("\n[1/4] Clean audio - classification only")
-        results["clean_cls"] = self.validate_clean(df_coi, use_separation=False)
+        results["clean_cls"] = self.validate_clean(df_coi, df_bg, use_separation=False)
         print(results["clean_cls"])
 
         # 2. Clean - separation + classification
         print("\n[2/4] Clean audio - separation + classification")
-        results["clean_sep_cls"] = self.validate_clean(df_coi, use_separation=True)
+        results["clean_sep_cls"] = self.validate_clean(
+            df_coi, df_bg, use_separation=True
+        )
         print(results["clean_sep_cls"])
 
         # 3. Mixtures - classification only
