@@ -25,6 +25,9 @@ from src.models.sudormrf.inference import SeparationInference
 from src.validation_functions.plane_clasifier.inference import PlaneClassifierInference
 from src.validation_functions.plane_clasifier.config import TrainingConfig
 
+# Project root (code directory)
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+
 
 # ============================================================================
 # METRICS
@@ -130,9 +133,12 @@ class ValidationPipeline:
     """Pipeline for validating separation + classification."""
 
     # Default paths (relative to project root)
-    SEP_CHECKPOINT = "src/models/sudormrf/checkpoints/best_model.pt"
-    CLS_WEIGHTS = "src/validation_functions/plane_clasifier/results/checkpoints/final_model.weights.h5"
-    DATA_CSV = "src/models/sudormrf/checkpoints/separation_dataset.csv"
+    SEP_CHECKPOINT = PROJECT_ROOT / "src/models/sudormrf/checkpoints/best_model.pt"
+    CLS_WEIGHTS = (
+        PROJECT_ROOT
+        / "src/validation_functions/plane_clasifier/results/checkpoints/final_model.weights.h5"
+    )
+    DATA_CSV = PROJECT_ROOT / "src/models/sudormrf/checkpoints/separation_dataset.csv"
 
     def __init__(self, base_path: str = None):
         """
@@ -351,9 +357,12 @@ class ValidationPipeline:
 
 def main():
     # ============ CONFIGURE PATHS HERE ============
-    SEP_CHECKPOINT = "src/models/sudormrf/checkpoints/best_model.pt"
-    CLS_WEIGHTS = "src/validation_functions/plane_clasifier/results/checkpoints/final_model.weights.h5"
-    DATA_CSV = "src/models/sudormrf/checkpoints/separation_dataset.csv"
+    SEP_CHECKPOINT = PROJECT_ROOT / "src/models/sudormrf/checkpoints/best_model.pt"
+    CLS_WEIGHTS = (
+        PROJECT_ROOT
+        / "src/validation_functions/plane_clasifier/results/checkpoints/final_model.weights.h5"
+    )
+    DATA_CSV = PROJECT_ROOT / "src/models/sudormrf/checkpoints/separation_dataset.csv"
     BASE_PATH = "/path/to/your/datasets"  # For converting Windows paths in CSV
     # ==============================================
 
