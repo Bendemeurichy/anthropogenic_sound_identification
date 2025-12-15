@@ -57,7 +57,7 @@ def load_trained_model(weights_path: str, config: TrainingConfig = None):
 
     # Create dummy input with correct shape (batch_size, samples)
     dummy_input = tf.constant(
-        np.zeros((1, config.sample_rate * config.audio_duration), dtype=np.float32)
+        np.zeros((1, int(config.sample_rate * config.audio_duration)), dtype=np.float32)
     )
     _ = model(dummy_input, training=False)
 
