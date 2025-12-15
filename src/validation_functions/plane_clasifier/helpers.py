@@ -5,6 +5,45 @@ from data_config import DataLoaderConfig
 import os
 
 
+def load_audio(
+    file_path: str, sample_rate: int = 16000, duration: float = 5.0
+) -> tf.Tensor:
+    """Load audio file and preprocess to target sample rate and duration.
+
+    Args:
+        file_path: Path to audio file
+        sample_rate: Target sample rate (default: 16000 for YAMNet)
+        duration: Target duration in seconds
+
+    Returns:
+        1D tensor of shape (sample_rate * duration,)
+    """
+    target_samples = int(sample_rate * duration)
+
+    # Read and decode
+    audio_binary = tf.io.read_file(file_path)
+    waveform, file_sr = tf.audio.decode_wav(audio_binary, desired_channels=1)
+    waveform = _to_mono(waveform)
+
+    # Resample if needed
+    file_sr_int = tf.cast(tf.squeeze(file_sr), tf.int32)
+    if file_sr_int != sample_rate:
+        waveform = _resample_tensor(waveform, file_sr_int, sample_rate)
+
+    # Pad or crop to target length
+    current_len = tf.shape(waveform)[0]
+    if current_len < target_samples:
+        padding = target_samples - current_len
+        waveform = tf.concat([waveform, tf.zeros([padding], dtype=waveform.dtype)], 0)
+    elif current_len > target_samples:
+        # Center crop
+        start = (current_len - target_samples) // 2
+        waveform = waveform[start : start + target_samples]
+
+    waveform.set_shape([target_samples])
+    return waveform
+
+
 def validate_audio_file(file_path: str) -> tuple[bool, str]:
     """Validate that a file is a proper WAV file that TensorFlow can decode.
 
