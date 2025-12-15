@@ -9,6 +9,8 @@ Expected dataframe structure:
 
 import os
 import gc
+import json
+from datetime import datetime
 
 # Pin to single GPU before importing torch (prevents multi-GPU OOM issues)
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -79,9 +81,14 @@ class AudioDataset(Dataset):
 
         if n_coi_classes > 1:
             # Store file lists per class instead of DataFrames
+            coi_class_col = (
+                split_df["coi_class"]
+                if "coi_class" in split_df.columns
+                else pd.Series(0, index=split_df.index)
+            )
             self.coi_by_class = [
                 split_df.loc[
-                    (split_df["label"] == 1) & (split_df.get("coi_class", 0) == i),
+                    (split_df["label"] == 1) & (coi_class_col == i),
                     "filename",
                 ].tolist()
                 for i in range(n_coi_classes)
@@ -225,7 +232,7 @@ class AudioDataset(Dataset):
         background = self.normalize(background)
 
         # Create mixture from normalized sources
-        total_coi = sum(sources)
+        total_coi = torch.stack(sources).sum(dim=0)
         snr_db = np.random.uniform(*self.snr_range)
 
         # Scale background for target SNR
@@ -262,9 +269,9 @@ def train_epoch(
 
     grad_accum_steps = max(int(grad_accum_steps), 1)
     use_amp = bool(use_amp) and (str(device).startswith("cuda"))
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
     autocast_ctx = (
-        torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+        torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
         if use_amp
         else nullcontext()
     )
@@ -341,7 +348,7 @@ def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True
 
     use_amp = bool(use_amp) and (str(device).startswith("cuda"))
     autocast_ctx = (
-        torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+        torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
         if use_amp
         else nullcontext()
     )
@@ -500,11 +507,30 @@ def create_model(config: Config, compile_model: bool = False):
     return model
 
 
-def train(config: Config):
+def set_seed(seed: int = 42):
+    """Set random seeds for reproducibility."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    # For deterministic behavior (may impact performance)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def train(config: Config, timestamp: str = None):
     """Main training function."""
-    # Setup
-    checkpoint_dir = Path(config.training.checkpoint_dir)
-    checkpoint_dir.mkdir(exist_ok=True)
+    # Set seed for reproducibility
+    seed = getattr(config.training, "seed", 42)
+    set_seed(seed)
+    print(f"Random seed set to: {seed}")
+
+    # Setup - create timestamped subdirectory
+    if timestamp is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_dir = Path(config.training.checkpoint_dir) / timestamp
+    checkpoint_dir.mkdir(exist_ok=True, parents=True)
 
     # Save config
     config.save(checkpoint_dir / "config.yaml")
@@ -584,8 +610,6 @@ def train(config: Config):
             break
 
     # Save training history
-    import json
-
     with open(checkpoint_dir / "training_history.json", "w") as f:
         json.dump(history, f, indent=2)
 
@@ -683,7 +707,8 @@ def main():
         )
 
     # 8. Save the prepared dataframe for reproducibility
-    checkpoint_dir = Path(config.training.checkpoint_dir)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_dir = Path(config.training.checkpoint_dir) / timestamp
     checkpoint_dir.mkdir(exist_ok=True, parents=True)
     df_save_path = checkpoint_dir / "separation_dataset.csv"
     sampled_df.to_csv(df_save_path, index=False)
@@ -699,7 +724,7 @@ def main():
     print("Cleaned up metadata DataFrames from memory.")
 
     # 11. Train
-    train(config)
+    train(config, timestamp=timestamp)
 
 
 if __name__ == "__main__":

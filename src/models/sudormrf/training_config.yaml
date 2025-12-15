@@ -19,7 +19,7 @@ model:
 training:
   batch_size: 4
   grad_accum_steps: 1
-  use_amp: true
+  use_amp: false
   num_epochs: 20
   lr: 0.001
   num_workers: 0 # Set to 0 to save ~10-15GB RAM (workers duplicate dataset in memory)
