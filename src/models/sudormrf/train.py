@@ -63,10 +63,19 @@ class AudioDataset(Dataset):
     ):
         self.split = split
         # Only keep necessary columns to reduce memory
-        split_df = dataframe[dataframe["split"] == split][["filename", "label"]].copy()
-        if "coi_class" in dataframe.columns:
-            split_df["coi_class"] = dataframe.loc[split_df.index, "coi_class"]
-        split_df = split_df.reset_index(drop=True)
+        # Silently skip test split (no samples loaded)
+        if split == "test":
+            split_df = dataframe.iloc[0:0][["filename", "label"]].copy()
+            if "coi_class" in dataframe.columns:
+                split_df["coi_class"] = dataframe.iloc[0:0]["coi_class"]
+            split_df = split_df.reset_index(drop=True)
+        else:
+            split_df = dataframe[dataframe["split"] == split][
+                ["filename", "label"]
+            ].copy()
+            if "coi_class" in dataframe.columns:
+                split_df["coi_class"] = dataframe.loc[split_df.index, "coi_class"]
+            split_df = split_df.reset_index(drop=True)
 
         self.sample_rate = sample_rate
         self.segment_samples = int(segment_length * sample_rate)
@@ -537,24 +546,19 @@ def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True
 
 def create_dataloaders(config: Config):
     """Create train and validation dataloaders."""
-    df = pd.read_csv(config.data.df_path)
+    # Load minimal columns for train dataset creation
+    usecols = ["filename", "label", "split"]
+    if getattr(config.data, "n_coi_classes", 1) > 1:
+        usecols.append("coi_class")
 
-    if config.data.n_coi_classes > 1 and "coi_class" not in df.columns:
-        # Only load required columns to reduce memory usage
-        usecols = ["filename", "label", "split"]
-        if getattr(config.data, "n_coi_classes", 1) > 1:
-            usecols.append("coi_class")
-        df = pd.read_csv(config.data.df_path, usecols=usecols)
+    df = pd.read_csv(config.data.df_path, usecols=usecols)
+    # Optimize dtypes
+    df["label"] = df["label"].astype("uint8")
+    df["split"] = df["split"].astype("category")
+    if "coi_class" in df.columns:
+        df["coi_class"] = df["coi_class"].astype("category")
 
-        # Optimize dtypes
-        df["label"] = df["label"].astype("uint8")
-        df["split"] = df["split"].astype("category")
-        if "coi_class" in df.columns:
-            df["coi_class"] = df["coi_class"].astype("category")
-
-        if config.data.n_coi_classes > 1 and "coi_class" not in df.columns:
-            raise ValueError("Multi-class requires 'coi_class' column in dataframe")
-
+    # Create train dataset only (val loader created on demand)
     train_dataset = AudioDataset(
         df,
         split="train",
@@ -563,10 +567,50 @@ def create_dataloaders(config: Config):
         snr_range=tuple(config.data.snr_range),
         n_coi_classes=config.data.n_coi_classes,
         augment=True,
-        segment_stride=getattr(config.data, "segment_stride", None),
         background_only_prob=getattr(config.data, "background_only_prob", 0.0),
         background_mix_n=getattr(config.data, "background_mix_n", 2),
     )
+
+    # Memory-optimized DataLoader settings: default to 0 workers
+    num_workers = int(getattr(config.training, "num_workers", 0))
+    pin_memory = (
+        bool(getattr(config.training, "pin_memory", False))
+        and torch.cuda.is_available()
+    )
+
+    loader_kwargs = {
+        "batch_size": config.training.batch_size,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = False
+        loader_kwargs["prefetch_factor"] = 1
+
+    # Free the dataframe before creating the loader
+    del df
+    gc.collect()
+
+    train_loader = DataLoader(
+        train_dataset, shuffle=True, drop_last=True, **loader_kwargs
+    )
+    gc.collect()
+
+    return train_loader
+
+
+def create_val_dataloader(config: Config):
+    """Create validation dataloader on demand to avoid holding val dataset in memory."""
+    usecols = ["filename", "label", "split"]
+    if getattr(config.data, "n_coi_classes", 1) > 1:
+        usecols.append("coi_class")
+
+    df = pd.read_csv(config.data.df_path, usecols=usecols)
+    df["label"] = df["label"].astype("uint8")
+    df["split"] = df["split"].astype("category")
+    if "coi_class" in df.columns:
+        df["coi_class"] = df["coi_class"].astype("category")
+
     val_dataset = AudioDataset(
         df,
         split="val",
@@ -575,42 +619,31 @@ def create_dataloaders(config: Config):
         snr_range=tuple(config.data.snr_range),
         n_coi_classes=config.data.n_coi_classes,
         augment=False,
-        segment_stride=getattr(config.data, "segment_stride", None),
         background_only_prob=0.0,
     )
 
-    # Memory-optimized DataLoader settings
-    # CRITICAL: num_workers=0 saves ~10-15GB RAM by avoiding worker process memory duplication
-    # Each worker copies the dataset and loads audio into its own memory space
-    # With num_workers=0, all loading happens in main process (slower but much less RAM)
-    num_workers = config.training.num_workers
-
+    num_workers = int(getattr(config.training, "num_workers", 0))
+    pin_memory = (
+        bool(getattr(config.training, "pin_memory", False))
+        and torch.cuda.is_available()
+    )
     loader_kwargs = {
         "batch_size": config.training.batch_size,
         "num_workers": num_workers,
-        "pin_memory": bool(getattr(config.training, "pin_memory", False)),
+        "pin_memory": pin_memory,
     }
-
-    # Only add worker-specific options if using workers
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = False
         loader_kwargs["prefetch_factor"] = 1
 
-    # Delete dataframe after creating datasets
     del df
     gc.collect()
 
-    train_loader = DataLoader(
-        train_dataset, shuffle=True, drop_last=True, **loader_kwargs
-    )
     val_loader = DataLoader(
         val_dataset, shuffle=False, drop_last=False, **loader_kwargs
     )
-
-    # Force garbage collection after creating datasets
     gc.collect()
-
-    return train_loader, val_loader
+    return val_loader
 
 
 def get_model_args(model):
@@ -708,8 +741,8 @@ def train(config: Config, timestamp: str = None):
     # Save config
     config.save(checkpoint_dir / "config.yaml")
 
-    print("Creating dataloaders...")
-    train_loader, val_loader = create_dataloaders(config)
+    print("Creating train dataloader...")
+    train_loader = create_dataloaders(config)
     gc.collect()  # Clean up after dataloader creation
 
     print("Creating model...")
@@ -745,6 +778,8 @@ def train(config: Config, timestamp: str = None):
         )
         history["train_loss"].append(train_loss)
 
+        # Create validation dataloader on demand to save memory
+        val_loader = create_val_dataloader(config)
         val_loss = validate_epoch(
             model,
             val_loader,
@@ -752,6 +787,14 @@ def train(config: Config, timestamp: str = None):
             config.training.device,
             use_amp=getattr(config.training, "use_amp", True),
         )
+        # Free validation loader/dataset memory immediately
+        try:
+            del val_loader
+        except Exception:
+            pass
+        gc.collect()
+        if config.training.device != "cpu":
+            torch.cuda.empty_cache()
         history["val_loss"].append(val_loss)
 
         print(f"Train: {train_loss:.4f}, Val: {val_loss:.4f}")
