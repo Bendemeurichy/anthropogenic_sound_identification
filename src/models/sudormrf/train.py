@@ -512,19 +512,44 @@ def train_epoch(
     progress_bar = tqdm(dataloader, desc="Training", leave=False, ascii=True, ncols=100)
     optimizer.zero_grad(set_to_none=True)
     step_idx = 0
+
     for step_idx, (mixtures, sources) in enumerate(progress_bar, start=1):
+        # mixtures: (B, T), sources: (B, n_src, T)
         mixtures = mixtures.to(device, non_blocking=True)
         sources = sources.to(device, non_blocking=True)
 
-        with autocast_ctx:
-            estimates = model(mixtures.unsqueeze(1))
-            loss = criterion(estimates, sources)
-            # Cast loss to FP32 for stability of reductions/checks
-            loss = loss.float()
-            # Add small epsilon to avoid exact-zero divisions inside losses
-            loss = loss + LOSS_EPS
+        # --- In-batch online mixing (memory-efficient) ---
+        # Assume sources shape: (B, 2, T) for (COI, BG)
+        clean_wavs = sources.clone().to(device)  # (B, 2, T)
+        m1wavs = mixtures.to(device)  # (B, T)
 
-            # Scale loss for gradient accumulation
+        # Online mixing over samples of the batch
+        # Keep the exact same SNR distribution with the initial mixtures
+        energies = torch.sum(clean_wavs**2, dim=-1, keepdim=True)  # (B, 2, 1)
+        # Permute over batch and source dims
+        B, n_src, T = clean_wavs.shape
+        # Randomly permute batch for each source
+        idx1 = torch.randperm(B, device=device)
+        idx2 = torch.randperm(B, device=device)
+        new_s1 = clean_wavs[idx1, 0, :]
+        new_s2 = clean_wavs[idx2, 1, :]
+        # Rescale to match original energies
+        new_s1 = new_s1 * torch.sqrt(energies[:, 0] / (new_s1**2).sum(-1, keepdim=True))
+        new_s2 = new_s2 * torch.sqrt(energies[:, 1] / (new_s2**2).sum(-1, keepdim=True))
+
+        def normalize_tensor_wav(wav):
+            mean = wav.mean(dim=-1, keepdim=True)
+            std = wav.std(dim=-1, keepdim=True) + 1e-8
+            return (wav - mean) / std
+
+        m1wavs = normalize_tensor_wav(new_s1 + new_s2)
+        clean_wavs[:, 0, :] = normalize_tensor_wav(new_s1)
+        clean_wavs[:, 1, :] = normalize_tensor_wav(new_s2)
+
+        with autocast_ctx:
+            rec_sources_wavs = model(m1wavs.unsqueeze(1))
+            loss = criterion(rec_sources_wavs, clean_wavs)
+            loss = loss.float() + LOSS_EPS
             loss_to_backprop = loss / grad_accum_steps
 
         if use_amp:
@@ -534,24 +559,17 @@ def train_epoch(
             loss_to_backprop.backward()
 
         if (step_idx % grad_accum_steps) == 0:
-            # Unscale before clipping and check grads for non-finite values
             if use_amp:
                 assert scaler is not None
                 scaler.unscale_(optimizer)
-
-            # If any gradients are non-finite, skip this optimizer step
             grads_finite = True
             for p in model.parameters():
                 if p.grad is not None:
                     if not torch.isfinite(p.grad).all():
                         grads_finite = False
                         break
-
-            # Also ensure loss is finite
             loss_finite = torch.isfinite(loss)
-
             if not grads_finite or not loss_finite:
-                # Skip update: update scaler so it decreases scale on overflow
                 if use_amp:
                     try:
                         scaler.update()
@@ -562,7 +580,6 @@ def train_epoch(
                     "Warning: non-finite loss or gradients detected; skipping optimizer step this batch."
                 )
             else:
-                # Clip and step as normal
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
                 if use_amp:
                     assert scaler is not None
@@ -578,7 +595,15 @@ def train_epoch(
         progress_bar.set_postfix(loss=float(loss.detach().cpu().item()))
 
         # Free memory explicitly
-        del mixtures, sources, estimates, loss, loss_to_backprop
+        del (
+            mixtures,
+            sources,
+            rec_sources_wavs,
+            loss,
+            loss_to_backprop,
+            clean_wavs,
+            m1wavs,
+        )
 
     # Flush any remaining accumulated gradients
     if step_idx != 0 and (step_idx % grad_accum_steps) != 0:
