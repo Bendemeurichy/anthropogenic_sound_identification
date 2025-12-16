@@ -48,6 +48,72 @@ from label_loading.metadata_loader import (
 LOSS_EPS = 1e-8
 
 
+def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Compute scale-invariant SNR (dB) per example.
+
+    Args:
+        est: (B, T) or (B, 1, T)
+        target: (B, T) or (B, 1, T)
+    Returns:
+        sisnr_db: (B,) tensor of SI-SNR in dB
+    """
+    # ensure shape (B, T)
+    if est.ndim == 3:
+        est = est.squeeze(1)
+    if target.ndim == 3:
+        target = target.squeeze(1)
+
+    # zero-mean
+    est_zm = est - est.mean(dim=-1, keepdim=True)
+    target_zm = target - target.mean(dim=-1, keepdim=True)
+
+    # projection of est onto target
+    s_target = (est_zm * target_zm).sum(dim=-1, keepdim=True) / (
+        target_zm.pow(2).sum(dim=-1, keepdim=True) + eps
+    )
+    s_true = s_target * target_zm
+    e_noise = est_zm - s_true
+
+    # energies
+    true_energy = s_true.pow(2).sum(dim=-1)
+    noise_energy = e_noise.pow(2).sum(dim=-1) + eps
+
+    sisnr_lin = true_energy / noise_energy
+    sisnr_db = 10.0 * torch.log10(sisnr_lin + eps)
+    return sisnr_db
+
+
+class COIWeightedLoss(torch.nn.Module):
+    """Fixed-order, class-of-interest weighted SI-SNR loss.
+
+    This compares `est[:,0]` to `target[:,0]` (COI) and `est[:,1]` to
+    `target[:,1]` (background) and returns a negative weighted SI-SNR.
+    """
+
+    def __init__(self, class_weight: float = 1.5, eps: float = 1e-8):
+        super().__init__()
+        self.class_weight = float(class_weight)
+        self.eps = float(eps)
+
+    def forward(
+        self, est_sources: torch.Tensor, target_sources: torch.Tensor
+    ) -> torch.Tensor:
+        # Expect (B, n_src, T)
+        if est_sources.ndim != 3 or target_sources.ndim != 3:
+            raise ValueError("est_sources and target_sources must be (B, n_src, T)")
+
+        # Compute per-example SI-SNR (dB) for each source using stateless sisnr
+        coi_sisnr = sisnr(est_sources[:, 0, :], target_sources[:, 0, :], eps=self.eps)
+        bg_sisnr = sisnr(est_sources[:, 1, :], target_sources[:, 1, :], eps=self.eps)
+
+        # Weighted average and negate (we minimize loss)
+        weighted = (self.class_weight * coi_sisnr + bg_sisnr) / (
+            self.class_weight + 1.0
+        )
+        loss = -weighted.mean()
+        return loss
+
+
 class AudioDataset(Dataset):
     """pytorch dataset handler for wav files."""
 
@@ -805,8 +871,10 @@ def train(config: Config, timestamp: str = None):
     print(f"Parameters: {n_params:.2f}M")
 
     # Setup training
-    pairwise_neg_sisdr = PairwiseNegSDR("sisdr")
-    criterion = PITLossWrapper(pairwise_neg_sisdr, pit_from="pw_mtx")
+    # Use fixed-order COI-weighted SI-SNR loss (no PIT) to preserve semantic heads
+    criterion = COIWeightedLoss(
+        class_weight=getattr(config.training, "coi_weight", 1.5)
+    )
     optimizer = optim.AdamW(model.parameters(), lr=float(config.training.lr))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=5
