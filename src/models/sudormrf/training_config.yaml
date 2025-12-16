@@ -17,8 +17,8 @@ model:
 
 # Training settings
 training:
-  batch_size: 4
-  grad_accum_steps: 1
+  batch_size: 2
+  grad_accum_steps: 2
   use_amp: false
   num_epochs: 20
   lr: 0.001
