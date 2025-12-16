@@ -450,6 +450,8 @@ def train_epoch(
         with autocast_ctx:
             estimates = model(mixtures.unsqueeze(1))
             loss = criterion(estimates, sources)
+            # Cast loss to FP32 for stability of reductions/checks
+            loss = loss.float()
 
             # Scale loss for gradient accumulation
             loss_to_backprop = loss / grad_accum_steps
@@ -461,18 +463,44 @@ def train_epoch(
             loss_to_backprop.backward()
 
         if (step_idx % grad_accum_steps) == 0:
-            # Unscale before clipping
+            # Unscale before clipping and check grads for non-finite values
             if use_amp:
                 assert scaler is not None
                 scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+
+            # If any gradients are non-finite, skip this optimizer step
+            grads_finite = True
             if use_amp:
-                assert scaler is not None
-                scaler.step(optimizer)
-                scaler.update()
+                for p in model.parameters():
+                    if p.grad is not None:
+                        if not torch.isfinite(p.grad).all():
+                            grads_finite = False
+                            break
+
+            # Also ensure loss is finite
+            loss_finite = torch.isfinite(loss)
+
+            if not grads_finite or not loss_finite:
+                # Skip update: update scaler so it decreases scale on overflow
+                if use_amp:
+                    try:
+                        scaler.update()
+                    except Exception:
+                        pass
+                optimizer.zero_grad(set_to_none=True)
+                print(
+                    "Warning: non-finite loss or gradients detected; skipping optimizer step this batch."
+                )
             else:
-                optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+                # Clip and step as normal
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+                if use_amp:
+                    assert scaler is not None
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
         batch_size = mixtures.size(0)
         running_loss += float(loss.detach().cpu().item()) * batch_size
@@ -487,14 +515,37 @@ def train_epoch(
         if use_amp:
             assert scaler is not None
             scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+
+        # Check grads and loss for finiteness before final update
+        grads_finite = True
         if use_amp:
-            assert scaler is not None
-            scaler.step(optimizer)
-            scaler.update()
+            for p in model.parameters():
+                if p.grad is not None:
+                    if not torch.isfinite(p.grad).all():
+                        grads_finite = False
+                        break
+
+        loss_finite = torch.isfinite(loss) if "loss" in locals() else True
+
+        if not grads_finite or not loss_finite:
+            if use_amp:
+                try:
+                    scaler.update()
+                except Exception:
+                    pass
+            optimizer.zero_grad(set_to_none=True)
+            print(
+                "Warning: non-finite loss or gradients detected; skipping final optimizer step."
+            )
         else:
-            optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+            if use_amp:
+                assert scaler is not None
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
     # Clear GPU cache after epoch
     if device != "cpu":
