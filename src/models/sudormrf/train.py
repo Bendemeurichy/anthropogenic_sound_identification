@@ -44,6 +44,9 @@ from label_loading.metadata_loader import (
     split_seperation_classification,
 )
 
+# Small epsilon added to losses to avoid exact-zero divisions
+LOSS_EPS = 1e-8
+
 
 class AudioDataset(Dataset):
     """pytorch dataset handler for wav files."""
@@ -452,6 +455,8 @@ def train_epoch(
             loss = criterion(estimates, sources)
             # Cast loss to FP32 for stability of reductions/checks
             loss = loss.float()
+            # Add small epsilon to avoid exact-zero divisions inside losses
+            loss = loss + LOSS_EPS
 
             # Scale loss for gradient accumulation
             loss_to_backprop = loss / grad_accum_steps
@@ -470,12 +475,11 @@ def train_epoch(
 
             # If any gradients are non-finite, skip this optimizer step
             grads_finite = True
-            if use_amp:
-                for p in model.parameters():
-                    if p.grad is not None:
-                        if not torch.isfinite(p.grad).all():
-                            grads_finite = False
-                            break
+            for p in model.parameters():
+                if p.grad is not None:
+                    if not torch.isfinite(p.grad).all():
+                        grads_finite = False
+                        break
 
             # Also ensure loss is finite
             loss_finite = torch.isfinite(loss)
@@ -518,12 +522,11 @@ def train_epoch(
 
         # Check grads and loss for finiteness before final update
         grads_finite = True
-        if use_amp:
-            for p in model.parameters():
-                if p.grad is not None:
-                    if not torch.isfinite(p.grad).all():
-                        grads_finite = False
-                        break
+        for p in model.parameters():
+            if p.grad is not None:
+                if not torch.isfinite(p.grad).all():
+                    grads_finite = False
+                    break
 
         loss_finite = torch.isfinite(loss) if "loss" in locals() else True
 
