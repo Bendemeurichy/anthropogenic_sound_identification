@@ -11,6 +11,7 @@ class DataConfig:
     df_path: str = "data/aircraft_data.csv"
     sample_rate: int = 16000
     segment_length: float = 5.0
+    segment_stride: float = 4.0
     snr_range: List[float] = field(default_factory=lambda: [-5, 5])
     n_coi_classes: int = 1
 
