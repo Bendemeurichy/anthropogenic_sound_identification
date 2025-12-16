@@ -807,7 +807,7 @@ def train(config: Config, timestamp: str = None):
     # Setup training
     pairwise_neg_sisdr = PairwiseNegSDR("sisdr")
     criterion = PITLossWrapper(pairwise_neg_sisdr, pit_from="pw_mtx")
-    optimizer = optim.Adam(model.parameters(), lr=config.training.lr)
+    optimizer = optim.AdamW(model.parameters(), lr=float(config.training.lr))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=5
     )
