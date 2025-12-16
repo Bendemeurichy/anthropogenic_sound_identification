@@ -1,9 +1,13 @@
 data:
   df_path: "data/aircraft_data.csv"
   sample_rate: 16000
-  segment_length: 5.0 # seconds
+  segment_length: 4.0 # seconds
   snr_range: [-5, 5] # dB range for mixing
   n_coi_classes: 1
+  # Probability of returning a background-only example during training (0.0..1.0)
+  background_only_prob: 0.25
+  # How many non-COI files to sum for background-only examples
+  background_mix_n: 2
 
 # Model settings (using base model defaults)
 model:
@@ -17,12 +21,13 @@ model:
 
 # Training settings
 training:
-  batch_size: 2
-  grad_accum_steps: 2
+  batch_size: 4
+  grad_accum_steps: 1
   use_amp: false
-  num_epochs: 20
+  num_epochs: 100
   lr: 0.001
   num_workers: 0 # Set to 0 to save ~10-15GB RAM (workers duplicate dataset in memory)
+  pin_memory: true
   clip_grad_norm: 5.0
   patience: 15 # early stopping patience
   checkpoint_dir: "checkpoints"

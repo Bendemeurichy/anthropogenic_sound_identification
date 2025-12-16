@@ -13,6 +13,10 @@ class DataConfig:
     segment_length: float = 5.0
     snr_range: List[float] = field(default_factory=lambda: [-5, 5])
     n_coi_classes: int = 1
+    # Probability (0..1) of returning a background-only example during training
+    background_only_prob: float = 0.0
+    # How many non-COI files to mix together when creating a background-only example
+    background_mix_n: int = 2
 
 
 @dataclass
@@ -33,7 +37,7 @@ class TrainingConfig:
     use_amp: bool = True
     num_epochs: int = 50
     lr: float = 0.001
-    num_workers: int = 4
+    num_workers: int = 0
     clip_grad_norm: float = 5.0
     patience: int = 15
     checkpoint_dir: str = "checkpoints"
@@ -46,6 +50,8 @@ class TrainingConfig:
     # Optional auxiliary L1 weight on waveforms to stabilize early training.
     # Set to 0.0 to disable.
     aux_waveform_weight: float = 0.0
+    # Whether to enable DataLoader pin_memory. Set True when training on GPU
+    pin_memory: bool = False
 
 
 @dataclass

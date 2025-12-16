@@ -58,6 +58,8 @@ class AudioDataset(Dataset):
         n_coi_classes: int = 1,
         augment: bool = True,
         segment_stride: float | None = None,
+        background_only_prob: float = 0.0,
+        background_mix_n: int = 2,
     ):
         self.split = split
         # Only keep necessary columns to reduce memory
@@ -71,6 +73,12 @@ class AudioDataset(Dataset):
         self.snr_range = snr_range
         self.n_coi_classes = n_coi_classes
         self.augment = augment
+        # Probability (0..1) of returning a background-only example during
+        # training. Background-only examples have zeroed COI targets and the
+        # background in the last source slot.
+        self.background_only_prob = float(background_only_prob)
+        # How many background files to mix together for background-only examples
+        self.background_mix_n = int(background_mix_n)
 
         # Cache resamplers by (orig_sr -> target_sr) to avoid repeatedly creating modules
         self._resamplers: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
@@ -79,6 +87,27 @@ class AudioDataset(Dataset):
         coi_mask = split_df["label"] == 1
         self.coi_files = split_df.loc[coi_mask, "filename"].tolist()
         self.non_coi_files = split_df.loc[~coi_mask, "filename"].tolist()
+
+        # Compute number of extra background-only samples to append per epoch.
+        # Interpret `background_only_prob` as a ratio of COI-count to add as
+        # extra background-only examples (e.g. 0.25 means 25% extra backgrounds).
+        if len(self.coi_files) > 0:
+            self._extra_background_count = int(
+                self.background_only_prob * len(self.coi_files) + 0.5
+            )
+        else:
+            self._extra_background_count = 0
+
+        # Compute number of extra background-only samples to append per epoch.
+        # Interpret `background_only_prob` as a ratio of COI-count to add as
+        # extra background-only examples (e.g. 0.25 means 25% extra backgrounds).
+        if len(self.coi_files) > 0:
+            self._extra_background_count = int(
+                self.background_only_prob * len(self.coi_files) + 0.5
+            )
+        else:
+            # If no COI files, we will iterate over backgrounds only.
+            self._extra_background_count = 0
 
         # Segment stride (seconds). If None, default to non-overlapping windows
         # equal to `segment_length`.
@@ -96,36 +125,37 @@ class AudioDataset(Dataset):
                 info = torchaudio.info(filepath)
                 orig_sr = info.sample_rate
                 num_frames_orig = int(info.num_frames)
-            except Exception:
-                # If info fails, load whole file to determine length
-                waveform, orig_sr = torchaudio.load(filepath)
-                num_frames_orig = (
-                    waveform.shape[1] if waveform.ndim > 1 else waveform.shape[0]
+
+                # Convert target segment and stride to original-sr frames
+                seg_frames_orig = max(
+                    1, int(self.segment_samples * orig_sr / self.sample_rate)
+                )
+                stride_frames_orig = max(
+                    1, int(self.segment_stride * orig_sr / self.sample_rate)
                 )
 
-            # Convert target segment and stride to original-sr frames
-            seg_frames_orig = max(
-                1, int(self.segment_samples * orig_sr / self.sample_rate)
-            )
-            stride_frames_orig = max(
-                1, int(self.segment_stride * orig_sr / self.sample_rate)
-            )
-
-            if num_frames_orig <= 0:
-                n_segs = 1
-            else:
-                if num_frames_orig <= seg_frames_orig:
+                if num_frames_orig <= 0:
                     n_segs = 1
                 else:
-                    # cover the file with sliding windows using stride
-                    n_segs = 1 + max(
-                        0, (num_frames_orig - seg_frames_orig) // stride_frames_orig
-                    )
+                    if num_frames_orig <= seg_frames_orig:
+                        n_segs = 1
+                    else:
+                        # cover the file with sliding windows using stride
+                        n_segs = 1 + max(
+                            0, (num_frames_orig - seg_frames_orig) // stride_frames_orig
+                        )
 
-            for s in range(n_segs):
-                offset = s * stride_frames_orig
-                # ensure we don't go past file end; `load_and_preprocess` will pad
-                self.coi_segments.append((filepath, offset, seg_frames_orig))
+                for s in range(n_segs):
+                    offset = s * stride_frames_orig
+                    # ensure we don't go past file end; `load_and_preprocess` will pad
+                    self.coi_segments.append((filepath, offset, seg_frames_orig))
+            except Exception:
+                # If we cannot obtain file info at init time, do NOT load the
+                # full file here (would spike memory). Instead, defer any
+                # expensive operations to __getitem__ where audio is loaded on
+                # demand. Treat the file as having one segment and let
+                # `load_and_preprocess` determine actual frames when called.
+                self.coi_segments.append((filepath, 0, None))
 
         if n_coi_classes > 1:
             # Store file lists per class instead of DataFrames
@@ -156,7 +186,13 @@ class AudioDataset(Dataset):
 
     def __len__(self):
         if self.split == "train":
-            return len(self.coi_files)
+            # Always use each COI file once per epoch. Optionally append
+            # extra background-only examples computed from
+            # `background_only_prob`.
+            if len(self.coi_files) > 0:
+                return len(self.coi_files) + self._extra_background_count
+            # Fallback: no COI files -> iterate over backgrounds
+            return len(self.non_coi_files)
         return len(self.coi_segments)
 
     def load_and_preprocess(
@@ -261,38 +297,55 @@ class AudioDataset(Dataset):
         if self.n_coi_classes == 1:
             # Binary case: for TRAIN create one random-offset mixture per COI file.
             if self.split == "train":
-                coi_idx = idx % max(1, len(self.coi_files))
-                coi_file = self.coi_files[coi_idx]
+                # We changed dataset length to include all COI files followed
+                # by `_extra_background_count` background-only entries. If
+                # `idx` points to a COI entry, use that COI file; otherwise
+                # create a background-only mixed example.
+                coi_count = len(self.coi_files)
+                if coi_count > 0 and idx < coi_count:
+                    coi_file = self.coi_files[idx]
 
-                # Determine original file info to compute valid offsets
-                try:
-                    file_info = torchaudio.info(coi_file)
-                    orig_sr = int(file_info.sample_rate)
-                    total_frames = int(file_info.num_frames)
-                except Exception:
-                    waveform_full, orig_sr = torchaudio.load(coi_file)
-                    total_frames = (
-                        waveform_full.shape[1]
-                        if waveform_full.ndim > 1
-                        else waveform_full.shape[0]
-                    )
+                    # Determine original file info to compute valid offsets
+                    try:
+                        file_info = torchaudio.info(coi_file)
+                        orig_sr = int(file_info.sample_rate)
+                        total_frames = int(file_info.num_frames)
 
-                # Number of frames to load at original SR corresponding to segment length
-                segment_frames_orig = int(
-                    self.segment_samples * orig_sr / self.sample_rate
-                )
-                segment_frames_orig = max(segment_frames_orig, 1)
+                        # Number of frames to load at original SR corresponding to segment length
+                        segment_frames_orig = int(
+                            self.segment_samples * orig_sr / self.sample_rate
+                        )
+                        segment_frames_orig = max(segment_frames_orig, 1)
 
-                max_offset = max(0, total_frames - segment_frames_orig)
-                frame_offset = (
-                    int(np.random.randint(0, max_offset + 1)) if max_offset > 0 else 0
-                )
+                        max_offset = max(0, total_frames - segment_frames_orig)
+                        frame_offset = (
+                            int(np.random.randint(0, max_offset + 1))
+                            if max_offset > 0
+                            else 0
+                        )
 
-                # Load the COI segment at the random offset
-                coi_audio = self.load_and_preprocess(
-                    coi_file, frame_offset=frame_offset, num_frames=segment_frames_orig
-                )
-                sources = [coi_audio]
+                        # Load the COI segment at the random offset
+                        coi_audio = self.load_and_preprocess(
+                            coi_file,
+                            frame_offset=frame_offset,
+                            num_frames=segment_frames_orig,
+                        )
+                    except Exception:
+                        coi_audio = self.load_and_preprocess(coi_file)
+                    sources = [coi_audio]
+                else:
+                    # Background-only extra sample: mix `background_mix_n` random
+                    # non-COI files together.
+                    mix_n = max(1, int(self.background_mix_n))
+                    idxs = np.random.choice(len(self.non_coi_files), size=mix_n)
+                    bg_list = []
+                    for i in idxs:
+                        nf = self.non_coi_files[int(i)]
+                        bg_list.append(self.load_and_preprocess(nf))
+
+                    background = torch.stack(bg_list, dim=0).sum(dim=0)
+                    coi_audio = torch.zeros_like(background)
+                    sources = [coi_audio]
             else:
                 # Use the precomputed segment mapping for validation/test
                 filepath, frame_offset, num_frames = self.coi_segments[idx]
@@ -311,10 +364,11 @@ class AudioDataset(Dataset):
             sources = [torch.zeros_like(coi_audio) for _ in range(self.n_coi_classes)]
             sources[class_idx] = coi_audio
 
-        # Sample background
-        noncoi_idx = np.random.randint(0, len(self.non_coi_files))
-        noncoi_file = self.non_coi_files[noncoi_idx]
-        background = self.load_and_preprocess(noncoi_file)
+        # Sample background if not already prepared (background-only branch)
+        if "background" not in locals():
+            noncoi_idx = np.random.randint(0, len(self.non_coi_files))
+            noncoi_file = self.non_coi_files[noncoi_idx]
+            background = self.load_and_preprocess(noncoi_file)
 
         # Create mixture from sources and background. Do not pre-normalize
         # individual sources here — instead normalize the whole mixture (and
@@ -323,15 +377,21 @@ class AudioDataset(Dataset):
         total_coi = torch.stack(sources).sum(dim=0)
         snr_db = np.random.uniform(*self.snr_range)
 
-        # Scale background for target SNR
+        # Scale background for target SNR. If total COI is all zeros (i.e.
+        # background-only example) then keep the background unscaled so the
+        # mixture is simply the background.
         coi_power = torch.mean(total_coi**2) + 1e-8
         bg_power = torch.mean(background**2) + 1e-8
         snr_linear = 10 ** (snr_db / 10)
-        scaling_factor = torch.sqrt(coi_power / (snr_linear * bg_power))
-        scaled_background = background * scaling_factor
+        if torch.allclose(total_coi, torch.zeros_like(total_coi)):
+            scaled_background = background
+            mixture = scaled_background
+        else:
+            scaling_factor = torch.sqrt(coi_power / (snr_linear * bg_power))
+            scaled_background = background * scaling_factor
 
-        # Mixture is now sum of sources (in original waveform scale)
-        mixture = total_coi + scaled_background
+            # Mixture is now sum of sources (in original waveform scale)
+            mixture = total_coi + scaled_background
 
         # Update background to the scaled version (what's actually in mixture)
         sources.append(scaled_background)
@@ -491,6 +551,8 @@ def create_dataloaders(config: Config):
         n_coi_classes=config.data.n_coi_classes,
         augment=True,
         segment_stride=getattr(config.data, "segment_stride", None),
+        background_only_prob=getattr(config.data, "background_only_prob", 0.0),
+        background_mix_n=getattr(config.data, "background_mix_n", 2),
     )
     val_dataset = AudioDataset(
         df,
@@ -501,6 +563,7 @@ def create_dataloaders(config: Config):
         n_coi_classes=config.data.n_coi_classes,
         augment=False,
         segment_stride=getattr(config.data, "segment_stride", None),
+        background_only_prob=0.0,
     )
 
     # Memory-optimized DataLoader settings
@@ -512,7 +575,7 @@ def create_dataloaders(config: Config):
     loader_kwargs = {
         "batch_size": config.training.batch_size,
         "num_workers": num_workers,
-        "pin_memory": True,  # weird fix, works
+        "pin_memory": bool(getattr(config.training, "pin_memory", False)),
     }
 
     # Only add worker-specific options if using workers
