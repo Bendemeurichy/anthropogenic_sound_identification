@@ -32,8 +32,8 @@ from contextlib import nullcontext
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
-from .base.sudo_rm_rf.dnn.losses.sisdr import PairwiseNegSDR
-from .seperation_head import wrap_model_for_coi, COILoss
+from .base.sudo_rm_rf.dnn.losses.sisdr import PITLossWrapper, PairwiseNegSDR
+from .seperation_head import wrap_model_for_coi
 from .multi_class_seperation import wrap_model_for_multiclass
 from .config import Config
 
@@ -49,83 +49,83 @@ class AudioDataset(Dataset):
     """pytorch dataset handler for wav files."""
 
     def __init__(
-        # Select epoch item (one per COI file and one per non-COI file)
-        item = self.epoch_index[idx]
+        self,
+        dataframe: pd.DataFrame,
+        split: str = "train",
+        sample_rate: int = 16000,
+        segment_length: float = 5.0,
+        snr_range: tuple = (-5, 5),
+        n_coi_classes: int = 1,
+        augment: bool = True,
+        segment_stride: float | None = None,
+    ):
+        self.split = split
+        # Only keep necessary columns to reduce memory
+        split_df = dataframe[dataframe["split"] == split][["filename", "label"]].copy()
+        if "coi_class" in dataframe.columns:
+            split_df["coi_class"] = dataframe.loc[split_df.index, "coi_class"]
+        split_df = split_df.reset_index(drop=True)
 
-        if item["type"] == "coi":
-            # COI entry: may contain class_idx for multi-class
-            filepath = item["filepath"]
-            orig_sr = item["orig_sr"]
-            num_frames_orig = item["num_frames_orig"]
+        self.sample_rate = sample_rate
+        self.segment_samples = int(segment_length * sample_rate)
+        self.snr_range = snr_range
+        self.n_coi_classes = n_coi_classes
+        self.augment = augment
 
-            seg_frames_orig = max(
-                1, int(self.segment_samples * orig_sr / self.sample_rate)
-            )
-            max_offset = max(0, num_frames_orig - seg_frames_orig)
-            frame_offset = int(np.random.randint(0, max_offset + 1)) if max_offset > 0 else 0
+        # Cache resamplers by (orig_sr -> target_sr) to avoid repeatedly creating modules
+        self._resamplers: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
 
-            coi_audio = self.load_and_preprocess(
-                filepath, frame_offset=frame_offset, num_frames=seg_frames_orig
-            )
+        # Store only file paths as lists instead of DataFrames (more memory efficient)
+        coi_mask = split_df["label"] == 1
+        self.coi_files = split_df.loc[coi_mask, "filename"].tolist()
+        self.non_coi_files = split_df.loc[~coi_mask, "filename"].tolist()
 
-            if self.n_coi_classes > 1:
-                # multi-class: place coi_audio in correct class slot
-                class_idx = item.get("class_idx", 0)
-                sources = [torch.zeros_like(coi_audio) for _ in range(self.n_coi_classes)]
-                sources[class_idx] = coi_audio
-            else:
-                sources = [coi_audio]
+        # Segment stride (seconds). If None, default to non-overlapping windows
+        # equal to `segment_length`.
+        self.segment_stride = (
+            segment_stride if segment_stride is not None else segment_length
+        )
 
-        else:
-            # non-COI entry: use this file as the background, COI targets are zeros
-            filepath = item["filepath"]
-            orig_sr = item["orig_sr"]
-            num_frames_orig = item["num_frames_orig"]
-
-            seg_frames_orig = max(
-                1, int(self.segment_samples * orig_sr / self.sample_rate)
-            )
-            max_offset = max(0, num_frames_orig - seg_frames_orig)
-            frame_offset = int(np.random.randint(0, max_offset + 1)) if max_offset > 0 else 0
-
-            background = self.load_and_preprocess(
-                filepath, frame_offset=frame_offset, num_frames=seg_frames_orig
-            )
-
-            if self.n_coi_classes > 1:
-                sources = [torch.zeros_like(background) for _ in range(self.n_coi_classes)]
-            else:
-                sources = [torch.zeros_like(background)]
-            # append background later after scaling
+        # Precompute available COI segments (file, frame_offset, num_frames)
+        # so that each epoch can iterate over all segments deterministically for
+        # validation/test. For training we will instead produce one random-offset
+        # mixture per COI file in __getitem__.
+        self.coi_segments: list[tuple[str, int, int]] = []
+        for filepath in self.coi_files:
+            try:
+                info = torchaudio.info(filepath)
+                orig_sr = info.sample_rate
+                num_frames_orig = int(info.num_frames)
+            except Exception:
                 # If info fails, load whole file to determine length
                 waveform, orig_sr = torchaudio.load(filepath)
                 num_frames_orig = (
                     waveform.shape[1] if waveform.ndim > 1 else waveform.shape[0]
                 )
 
-            self.coi_files_info.append(
-                {
-                    "filepath": filepath,
-                    "orig_sr": orig_sr,
-                    "num_frames_orig": num_frames_orig,
-                }
+            # Convert target segment and stride to original-sr frames
+            seg_frames_orig = max(
+                1, int(self.segment_samples * orig_sr / self.sample_rate)
+            )
+            stride_frames_orig = max(
+                1, int(self.segment_stride * orig_sr / self.sample_rate)
             )
 
-        # Build non-COI per-file info as well (sampled backgrounds)
-        self.noncoi_files_info: list[dict] = []
-        for filepath in self.non_coi_files:
-            try:
-                info = torchaudio.info(filepath)
-                orig_sr = info.sample_rate
-                num_frames_orig = int(info.num_frames)
-            except Exception:
-                waveform, orig_sr = torchaudio.load(filepath)
-                num_frames_orig = (
-                    waveform.shape[1] if waveform.ndim > 1 else waveform.shape[0]
-                )
-            self.noncoi_files_info.append(
-                {"filepath": filepath, "orig_sr": orig_sr, "num_frames_orig": num_frames_orig}
-            )
+            if num_frames_orig <= 0:
+                n_segs = 1
+            else:
+                if num_frames_orig <= seg_frames_orig:
+                    n_segs = 1
+                else:
+                    # cover the file with sliding windows using stride
+                    n_segs = 1 + max(
+                        0, (num_frames_orig - seg_frames_orig) // stride_frames_orig
+                    )
+
+            for s in range(n_segs):
+                offset = s * stride_frames_orig
+                # ensure we don't go past file end; `load_and_preprocess` will pad
+                self.coi_segments.append((filepath, offset, seg_frames_orig))
 
         if n_coi_classes > 1:
             # Store file lists per class instead of DataFrames
@@ -141,31 +141,6 @@ class AudioDataset(Dataset):
                 ].tolist()
                 for i in range(n_coi_classes)
             ]
-            # Also build per-class file info lists for random sampling
-            self.coi_by_class_info = []
-            for i in range(n_coi_classes):
-                files = self.coi_by_class[i]
-                info_list = []
-                for fp in files:
-                    try:
-                        info = torchaudio.info(fp)
-                        orig_sr = info.sample_rate
-                        num_frames_orig = int(info.num_frames)
-                    except Exception:
-                        waveform, orig_sr = torchaudio.load(fp)
-                        num_frames_orig = (
-                            waveform.shape[1]
-                            if waveform.ndim > 1
-                            else waveform.shape[0]
-                        )
-                    info_list.append(
-                        {
-                            "filepath": fp,
-                            "orig_sr": orig_sr,
-                            "num_frames_orig": num_frames_orig,
-                        }
-                    )
-                self.coi_by_class_info.append(info_list)
             print(
                 f"{split} set: {[len(c) for c in self.coi_by_class]} per class, "
                 f"{len(self.non_coi_files)} non-COI"
@@ -179,54 +154,10 @@ class AudioDataset(Dataset):
         del split_df
         gc.collect()
 
-            # Build epoch index: one entry per COI file and one per non-COI file
-            # Each epoch will therefore yield exactly len(coi_files)+len(non_coi_files)
-            # random mixtures (with randomized offsets at each __getitem__ call).
-            self.epoch_index: list[dict] = []
-            if self.n_coi_classes > 1:
-                for class_idx, info_list in enumerate(self.coi_by_class_info):
-                    for info in info_list:
-                        entry = {
-                            "type": "coi",
-                            "filepath": info["filepath"],
-                            "orig_sr": info["orig_sr"],
-                            "num_frames_orig": info["num_frames_orig"],
-                            "class_idx": class_idx,
-                        }
-                        self.epoch_index.append(entry)
-            else:
-                for info in self.coi_files_info:
-                    entry = {
-                        "type": "coi",
-                        "filepath": info["filepath"],
-                        "orig_sr": info["orig_sr"],
-                        "num_frames_orig": info["num_frames_orig"],
-                    }
-                    self.epoch_index.append(entry)
-
-            for info in self.noncoi_files_info:
-                entry = {
-                    "type": "noncoi",
-                    "filepath": info["filepath"],
-                    "orig_sr": info["orig_sr"],
-                    "num_frames_orig": info["num_frames_orig"],
-                }
-                self.epoch_index.append(entry)
-
     def __len__(self):
-        # One item per entry in epoch_index (COI files + non-COI files)
-        return max(1, len(self.epoch_index))
-
-    def regenerate_epoch_index(self):
-        """Shuffle / rebuild the epoch index so each epoch yields different mixtures.
-
-        This method keeps the same set of files but shuffles their order. It can
-        be extended to sample subsets or alter class balancing per epoch.
-        """
-        import random
-
-        # For now just shuffle in-place to vary order each epoch
-        random.shuffle(self.epoch_index)
+        if self.split == "train":
+            return len(self.coi_files)
+        return len(self.coi_segments)
 
     def load_and_preprocess(
         self, filepath: str, frame_offset: int = 0, num_frames: int | None = None
@@ -328,59 +259,62 @@ class AudioDataset(Dataset):
     def __getitem__(self, idx):
         # Select COI class
         if self.n_coi_classes == 1:
-            # Binary case: one sample per COI file per epoch. Randomize
-            # offset within the file to produce varied segments.
-            info = self.coi_files_info[idx]
-            filepath = info["filepath"]
-            orig_sr = info["orig_sr"]
-            num_frames_orig = info["num_frames_orig"]
+            # Binary case: for TRAIN create one random-offset mixture per COI file.
+            if self.split == "train":
+                coi_idx = idx % max(1, len(self.coi_files))
+                coi_file = self.coi_files[coi_idx]
 
-            seg_frames_orig = max(
-                1, int(self.segment_samples * orig_sr / self.sample_rate)
-            )
-            max_offset = max(0, num_frames_orig - seg_frames_orig)
-            frame_offset = (
-                int(np.random.randint(0, max_offset + 1)) if max_offset > 0 else 0
-            )
+                # Determine original file info to compute valid offsets
+                try:
+                    file_info = torchaudio.info(coi_file)
+                    orig_sr = int(file_info.sample_rate)
+                    total_frames = int(file_info.num_frames)
+                except Exception:
+                    waveform_full, orig_sr = torchaudio.load(coi_file)
+                    total_frames = (
+                        waveform_full.shape[1]
+                        if waveform_full.ndim > 1
+                        else waveform_full.shape[0]
+                    )
 
-            coi_audio = self.load_and_preprocess(
-                filepath, frame_offset=frame_offset, num_frames=seg_frames_orig
-            )
+                # Number of frames to load at original SR corresponding to segment length
+                segment_frames_orig = int(
+                    self.segment_samples * orig_sr / self.sample_rate
+                )
+                segment_frames_orig = max(segment_frames_orig, 1)
 
-            # Create zero tensors for other classes
-            sources = [coi_audio]
+                max_offset = max(0, total_frames - segment_frames_orig)
+                frame_offset = (
+                    int(np.random.randint(0, max_offset + 1)) if max_offset > 0 else 0
+                )
+
+                # Load the COI segment at the random offset
+                coi_audio = self.load_and_preprocess(
+                    coi_file, frame_offset=frame_offset, num_frames=segment_frames_orig
+                )
+                sources = [coi_audio]
+            else:
+                # Use the precomputed segment mapping for validation/test
+                filepath, frame_offset, num_frames = self.coi_segments[idx]
+                coi_audio = self.load_and_preprocess(
+                    filepath, frame_offset=frame_offset, num_frames=num_frames
+                )
+                sources = [coi_audio]
         else:
-            # Multi-class case: randomly select one COI class and file,
-            # then sample a random offset inside that file.
+            # Multi-class case: randomly select one COI class
             class_idx = np.random.randint(0, self.n_coi_classes)
-            info_list = self.coi_by_class_info[class_idx]
-            chosen = info_list[np.random.randint(0, len(info_list))]
-            filepath = chosen["filepath"]
-            orig_sr = chosen["orig_sr"]
-            num_frames_orig = chosen["num_frames_orig"]
-
-            seg_frames_orig = max(
-                1, int(self.segment_samples * orig_sr / self.sample_rate)
-            )
-            max_offset = max(0, num_frames_orig - seg_frames_orig)
-            frame_offset = (
-                int(np.random.randint(0, max_offset + 1)) if max_offset > 0 else 0
-            )
-
-            coi_audio = self.load_and_preprocess(
-                filepath, frame_offset=frame_offset, num_frames=seg_frames_orig
-            )
+            coi_idx = np.random.randint(0, len(self.coi_by_class[class_idx]))
+            coi_file = self.coi_by_class[class_idx][coi_idx]
+            coi_audio = self.load_and_preprocess(coi_file)
 
             # Create sources list with zeros for other classes
             sources = [torch.zeros_like(coi_audio) for _ in range(self.n_coi_classes)]
             sources[class_idx] = coi_audio
 
-        # Sample background: for COI entries, draw a random non-COI file;
-        # for non-COI entries, `background` is already loaded above.
-        if item["type"] == "coi":
-            noncoi_idx = np.random.randint(0, len(self.non_coi_files))
-            noncoi_file = self.non_coi_files[noncoi_idx]
-            background = self.load_and_preprocess(noncoi_file)
+        # Sample background
+        noncoi_idx = np.random.randint(0, len(self.non_coi_files))
+        noncoi_file = self.non_coi_files[noncoi_idx]
+        background = self.load_and_preprocess(noncoi_file)
 
         # Create mixture from sources and background. Do not pre-normalize
         # individual sources here — instead normalize the whole mixture (and
@@ -393,12 +327,8 @@ class AudioDataset(Dataset):
         coi_power = torch.mean(total_coi**2) + 1e-8
         bg_power = torch.mean(background**2) + 1e-8
         snr_linear = 10 ** (snr_db / 10)
-        if item["type"] == "noncoi":
-            # For pure-background samples, keep background as-is
-            scaled_background = background
-        else:
-            scaling_factor = torch.sqrt(coi_power / (snr_linear * bg_power))
-            scaled_background = background * scaling_factor
+        scaling_factor = torch.sqrt(coi_power / (snr_linear * bg_power))
+        scaled_background = background * scaling_factor
 
         # Mixture is now sum of sources (in original waveform scale)
         mixture = total_coi + scaled_background
@@ -713,48 +643,7 @@ def train(config: Config, timestamp: str = None):
 
     # Setup training
     pairwise_neg_sisdr = PairwiseNegSDR("sisdr")
-
-    # Primary loss: use class-aware COI loss for binary case, or an
-    # ordered-pairwise diagonal for multi-class (no PIT).
-    if config.data.n_coi_classes == 1:
-        primary_loss = COILoss(
-            class_weight=getattr(config.training, "class_weight", 1.5)
-        )
-    else:
-
-        class OrderedPairwiseNegSDR(torch.nn.Module):
-            def __init__(self, pw_module):
-                super().__init__()
-                self.pw = pw_module
-
-            def forward(self, est, tgt):
-                # PairwiseNegSDR returns (B, n_src, n_src) pairwise losses.
-                pw = self.pw(est, tgt)
-                # Use ordered diagonal (assumes head produces fixed ordering).
-                diag = torch.diagonal(pw, dim1=1, dim2=2)
-                return diag.mean()
-
-        primary_loss = OrderedPairwiseNegSDR(pairwise_neg_sisdr)
-
-    # Optional auxiliary L1 on waveform to stabilize early training
-    aux_weight = getattr(config.training, "aux_waveform_weight", 0.0)
-
-    if aux_weight and aux_weight > 0.0:
-
-        class CompositeLoss(torch.nn.Module):
-            def __init__(self, primary, aux_w):
-                super().__init__()
-                self.primary = primary
-                self.aux_w = aux_w
-
-            def forward(self, est, tgt):
-                loss = self.primary(est, tgt)
-                aux = torch.nn.functional.l1_loss(est, tgt)
-                return loss + self.aux_w * aux
-
-        criterion = CompositeLoss(primary_loss, aux_weight)
-    else:
-        criterion = primary_loss
+    criterion = PITLossWrapper(pairwise_neg_sisdr, pit_from="pw_mtx")
     optimizer = optim.Adam(model.parameters(), lr=config.training.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=5
@@ -768,14 +657,6 @@ def train(config: Config, timestamp: str = None):
     for epoch in range(1, config.training.num_epochs + 1):
         print(f"\nEpoch {epoch}/{config.training.num_epochs}")
 
-        # Regenerate / shuffle epoch index so each epoch produces different
-        # random mixtures (one per COI file + one per sampled non-COI file).
-        try:
-            if hasattr(train_loader.dataset, "regenerate_epoch_index"):
-                train_loader.dataset.regenerate_epoch_index()
-        except Exception:
-            pass
-
         train_loss = train_epoch(
             model,
             train_loader,
@@ -787,13 +668,6 @@ def train(config: Config, timestamp: str = None):
             use_amp=getattr(config.training, "use_amp", True),
         )
         history["train_loss"].append(train_loss)
-
-        # Shuffle / regenerate validation mixtures as well for variability
-        try:
-            if hasattr(val_loader.dataset, "regenerate_epoch_index"):
-                val_loader.dataset.regenerate_epoch_index()
-        except Exception:
-            pass
 
         val_loss = validate_epoch(
             model,
