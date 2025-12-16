@@ -540,7 +540,20 @@ def create_dataloaders(config: Config):
     df = pd.read_csv(config.data.df_path)
 
     if config.data.n_coi_classes > 1 and "coi_class" not in df.columns:
-        raise ValueError("Multi-class requires 'coi_class' column in dataframe")
+        # Only load required columns to reduce memory usage
+        usecols = ["filename", "label", "split"]
+        if getattr(config.data, "n_coi_classes", 1) > 1:
+            usecols.append("coi_class")
+        df = pd.read_csv(config.data.df_path, usecols=usecols)
+
+        # Optimize dtypes
+        df["label"] = df["label"].astype("uint8")
+        df["split"] = df["split"].astype("category")
+        if "coi_class" in df.columns:
+            df["coi_class"] = df["coi_class"].astype("category")
+
+        if config.data.n_coi_classes > 1 and "coi_class" not in df.columns:
+            raise ValueError("Multi-class requires 'coi_class' column in dataframe")
 
     train_dataset = AudioDataset(
         df,
@@ -866,10 +879,15 @@ def main():
             f"  {split}: {len(split_df)} samples (COI: {coi_count}, non-COI: {non_coi_count})"
         )
 
-    # 8. Save the prepared dataframe for reproducibility
+    # 8. Save the prepared dataframe for reproducibility (with optimized dtypes)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     checkpoint_dir = Path(config.training.checkpoint_dir) / timestamp
     checkpoint_dir.mkdir(exist_ok=True, parents=True)
+    # Downcast dtypes before saving
+    sampled_df["label"] = sampled_df["label"].astype("uint8")
+    if "coi_class" in sampled_df.columns:
+        sampled_df["coi_class"] = sampled_df["coi_class"].astype("category")
+    sampled_df["split"] = sampled_df["split"].astype("category")
     df_save_path = checkpoint_dir / "separation_dataset.csv"
     sampled_df.to_csv(df_save_path, index=False)
     print(f"\nSaved prepared dataset to: {df_save_path}")
