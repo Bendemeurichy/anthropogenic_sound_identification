@@ -11,7 +11,6 @@ class DataConfig:
     df_path: str = "data/aircraft_data.csv"
     sample_rate: int = 16000
     segment_length: float = 5.0
-    segment_stride: float = 4.0
     snr_range: List[float] = field(default_factory=lambda: [-5, 5])
     n_coi_classes: int = 1
 
@@ -41,6 +40,12 @@ class TrainingConfig:
     device: str = "cuda"
     compile_model: bool = False  # torch.compile can be slow on WSL with inductor
     compile_backend: str = "inductor"  # Options: 'inductor', 'eager', 'aot_eager'
+    # Class-weight for COI-focused loss (used by COILoss). Higher -> more
+    # emphasis on COI reconstruction. Default 1.5 matches prior code.
+    class_weight: float = 1.5
+    # Optional auxiliary L1 weight on waveforms to stabilize early training.
+    # Set to 0.0 to disable.
+    aux_waveform_weight: float = 0.0
 
 
 @dataclass
