@@ -478,6 +478,7 @@ def create_dataloaders(config: Config):
     loader_kwargs = {
         "batch_size": config.training.batch_size,
         "num_workers": num_workers,
+        "pin_memory": True, # weird fix, works
     }
 
     # Only add worker-specific options if using workers
