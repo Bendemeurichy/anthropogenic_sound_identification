@@ -2,6 +2,7 @@ data:
   df_path: "data/aircraft_data.csv"
   sample_rate: 16000
   segment_length: 5.0 # seconds
+  segment_stride: 4.0 # seconds; set < segment_length for overlap (2.5 -> 50% overlap)
   snr_range: [-5, 5] # dB range for mixing
   n_coi_classes: 1
 

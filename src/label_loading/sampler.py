@@ -1,6 +1,6 @@
 """Sampler function that samples all samples from the datasets containing the class of interest and sample non-interest samples to the desired ratio."""
 
-from metadata_loader import load_metadata_datasets, split_seperation_classification
+from .metadata_loader import load_metadata_datasets, split_seperation_classification
 import pandas as pd
 
 

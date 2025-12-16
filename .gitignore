@@ -212,3 +212,12 @@ src/tags/metadata/
 /data/
 src/validation_functions/plane_clasifier/results
 src/models/sudormrf/checkpoints
+*.wav
+*.jpg
+*.npy
+*.jpeg
+*.png
+*.pt
+*.pth
+*.mp3
+__pycache__/

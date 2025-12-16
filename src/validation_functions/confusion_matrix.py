@@ -213,14 +213,70 @@ class ValidationPipeline:
 
     def _separate(self, waveform: torch.Tensor) -> torch.Tensor:
         """Run separation model. Returns COI source."""
-        mean, std = waveform.mean(), waveform.std() + 1e-8
-        x = ((waveform - mean) / std).unsqueeze(0).unsqueeze(0).to(self.device)
+        orig_len = waveform.shape[0]
 
+        # If waveform is the expected segment length, run as before
+        if orig_len <= self.segment_samples:
+            mean, std = waveform.mean(), waveform.std() + 1e-8
+            x = ((waveform - mean) / std).unsqueeze(0).unsqueeze(0).to(self.device)
+
+            with torch.inference_mode():
+                estimates = self.separator.model(x)
+
+            # estimates shape: (1, n_sources, T)
+            sources = estimates[0].cpu() * std + mean
+            # Return all sources (n_sources, T) trimmed to original length
+            return sources[:, :orig_len]
+
+        # For longer waveforms: split into non-overlapping segment windows,
+        # run separation per-window, then concatenate and trim to original length.
+        n_chunks = int(np.ceil(orig_len / self.segment_samples))
+        # determine number of sources from model
         with torch.inference_mode():
-            estimates = self.separator.model(x)
+            # try to get num_sources attribute, fallback to a dummy forward
+            n_sources = getattr(self.separator.model, "num_sources", None)
+            if n_sources is None:
+                # run a dummy pass to get shape
+                dummy = torch.zeros(1, 1, self.segment_samples).to(self.device)
+                est = self.separator.model(dummy)
+                n_sources = est.shape[1]
 
-        sources = estimates[0].cpu() * std + mean
-        return sources[0]
+        # Prepare lists to collect chunks per source
+        outputs_per_source: List[List[torch.Tensor]] = [[] for _ in range(n_sources)]
+
+        for i in range(n_chunks):
+            start = i * self.segment_samples
+            end = min((i + 1) * self.segment_samples, orig_len)
+            chunk = waveform[start:end]
+
+            # If last chunk is shorter, pad to segment size
+            if chunk.shape[0] < self.segment_samples:
+                chunk = torch.nn.functional.pad(
+                    chunk, (0, self.segment_samples - chunk.shape[0])
+                )
+
+            mean, std = chunk.mean(), chunk.std() + 1e-8
+            x = ((chunk - mean) / std).unsqueeze(0).unsqueeze(0).to(self.device)
+
+            with torch.inference_mode():
+                estimates = self.separator.model(x)
+
+            # estimates[0].cpu() -> (n_sources, segment_samples)
+            src_chunk_all = estimates[0].cpu() * std + mean
+
+            # Trim if last chunk shorter
+            length = end - start
+            if length < self.segment_samples:
+                src_chunk_all = src_chunk_all[:, :length]
+
+            for s in range(n_sources):
+                outputs_per_source[s].append(src_chunk_all[s])
+
+        # Concatenate per-source and stack
+        concatenated = [
+            torch.cat(chunks, dim=0)[:orig_len] for chunks in outputs_per_source
+        ]
+        return torch.stack(concatenated, dim=0)
 
     def _classify(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Run classification. Returns (prediction, confidence)."""
@@ -252,8 +308,22 @@ class ValidationPipeline:
             try:
                 waveform = self._load_audio(row["filename"])
                 if use_separation:
-                    waveform = self._separate(waveform)
-                pred, conf = self._classify(waveform)
+                    separated = self._separate(waveform)
+                    # If multiple sources returned, pick the source with highest
+                    # plane-confidence from the classifier
+                    if separated.dim() == 1:
+                        pred, conf = self._classify(separated)
+                    else:
+                        best_conf = -1.0
+                        best_pred = 0
+                        for s_idx in range(separated.shape[0]):
+                            p, c = self._classify(separated[s_idx])
+                            if c > best_conf:
+                                best_conf = c
+                                best_pred = p
+                        pred, conf = best_pred, best_conf
+                else:
+                    pred, conf = self._classify(waveform)
                 y_true.append(1)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -265,8 +335,20 @@ class ValidationPipeline:
             try:
                 waveform = self._load_audio(row["filename"])
                 if use_separation:
-                    waveform = self._separate(waveform)
-                pred, conf = self._classify(waveform)
+                    separated = self._separate(waveform)
+                    if separated.dim() == 1:
+                        pred, conf = self._classify(separated)
+                    else:
+                        best_conf = -1.0
+                        best_pred = 0
+                        for s_idx in range(separated.shape[0]):
+                            p, c = self._classify(separated[s_idx])
+                            if c > best_conf:
+                                best_conf = c
+                                best_pred = p
+                        pred, conf = best_pred, best_conf
+                else:
+                    pred, conf = self._classify(waveform)
                 y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -300,10 +382,21 @@ class ValidationPipeline:
                 )
                 snr = np.random.uniform(*snr_range)
                 mixture = self._create_mixture(coi, bg, snr)
-
                 if use_separation:
-                    mixture = self._separate(mixture)
-                pred, conf = self._classify(mixture)
+                    separated = self._separate(mixture)
+                    if separated.dim() == 1:
+                        pred, conf = self._classify(separated)
+                    else:
+                        best_conf = -1.0
+                        best_pred = 0
+                        for s_idx in range(separated.shape[0]):
+                            p, c = self._classify(separated[s_idx])
+                            if c > best_conf:
+                                best_conf = c
+                                best_pred = p
+                        pred, conf = best_pred, best_conf
+                else:
+                    pred, conf = self._classify(mixture)
                 y_true.append(1)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -316,10 +409,21 @@ class ValidationPipeline:
         ):
             try:
                 waveform = self._load_audio(row["filename"])
-
                 if use_separation:
-                    waveform = self._separate(waveform)
-                pred, conf = self._classify(waveform)
+                    separated = self._separate(waveform)
+                    if separated.dim() == 1:
+                        pred, conf = self._classify(separated)
+                    else:
+                        best_conf = -1.0
+                        best_pred = 0
+                        for s_idx in range(separated.shape[0]):
+                            p, c = self._classify(separated[s_idx])
+                            if c > best_conf:
+                                best_conf = c
+                                best_pred = p
+                        pred, conf = best_pred, best_conf
+                else:
+                    pred, conf = self._classify(waveform)
                 y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -390,6 +494,135 @@ class ValidationPipeline:
         return results
 
 
+def demo_two_wav_separation(
+    src_path: str,
+    noise_path: str,
+    snr_db: float = 0.0,
+    sep_checkpoint: str = None,
+    out_dir: str = None,
+) -> Dict[str, str]:
+    """Create a mixture from two WAV paths, run the separation model on the
+    mixture, and save the results.
+
+    Args:
+        src_path: Path to the source (COI) WAV file.
+        noise_path: Path to the noise/background WAV file.
+        snr_db: Desired SNR for the mixture.
+        sep_checkpoint: Optional checkpoint path to load separator from.
+        out_dir: Directory to save outputs. Defaults to ./separation_output.
+
+    Returns:
+        Dict with saved file paths.
+    """
+    src_path = Path(src_path)
+    noise_path = Path(noise_path)
+
+    if not src_path.exists() or not noise_path.exists():
+        raise ValueError(
+            "Both src_path and noise_path must exist and point to .wav files"
+        )
+
+    pipeline = ValidationPipeline()
+
+    # Load separator (and classifier) if a checkpoint is provided or if not loaded
+    if sep_checkpoint is not None or pipeline.separator is None:
+        pipeline.load_models(sep_checkpoint=sep_checkpoint)
+
+    # Load full audio without truncation (demo should preserve full 10s clips)
+    def _load_full(path: Path) -> torch.Tensor:
+        wav, sr = torchaudio.load(str(path))
+        if sr != pipeline.sample_rate:
+            key = (sr, pipeline.sample_rate)
+            resampler = torchaudio.transforms.Resample(sr, pipeline.sample_rate)
+            wav = resampler(wav)
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0)
+        else:
+            wav = wav.squeeze(0)
+        return wav
+
+    print(f"Loading source (full): {src_path}")
+    src = _load_full(src_path)
+    print(f"Loading noise (full): {noise_path}")
+    noise = _load_full(noise_path)
+
+    # Align lengths: extend/trim noise to match source length
+    src_len = src.shape[0]
+    noise_len = noise.shape[0]
+    if noise_len < src_len:
+        repeats = int((src_len + noise_len - 1) // noise_len)
+        noise = noise.repeat(repeats)[:src_len]
+    elif noise_len > src_len:
+        noise = noise[:src_len]
+
+    # Normalize before mixing
+    src_n = pipeline._normalize(src)
+    noise_n = pipeline._normalize(noise)
+
+    mixture = pipeline._create_mixture(src_n, noise_n, snr_db)
+
+    print("Running separation on the mixture...")
+    separated = pipeline._separate(mixture)
+
+    out_dir = Path(out_dir or Path.cwd() / "separation_output")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Prepare tensors for saving: (channels, samples)
+    def _prep(t: torch.Tensor) -> torch.Tensor:
+        t = t.detach().cpu()
+        if t.dim() == 1:
+            t = t.unsqueeze(0)
+        return t
+
+    mix_t = _prep(mixture)
+    sep_t = _prep(separated)
+    src_t = _prep(src)
+    noise_t = _prep(noise)
+
+    mix_path = out_dir / f"mixture_{ts}.wav"
+    sep_path = out_dir / f"separated_{ts}.wav"
+    src_out = out_dir / f"source_{ts}.wav"
+    noise_out = out_dir / f"noise_{ts}.wav"
+
+    torchaudio.save(str(mix_path), mix_t, pipeline.sample_rate)
+    # Print shape for debugging and save each separated source individually
+    print(f"Separated tensor shape: {tuple(sep_t.shape)}")
+    separated_files = []
+    if sep_t.dim() == 1:
+        # single channel
+        single_path = out_dir / f"separated_{ts}_src0.wav"
+        torchaudio.save(str(single_path), sep_t.unsqueeze(0), pipeline.sample_rate)
+        separated_files.append(str(single_path))
+    elif sep_t.dim() == 2:
+        for i in range(sep_t.shape[0]):
+            single_path = out_dir / f"separated_{ts}_src{i}.wav"
+            torchaudio.save(str(single_path), sep_t[i : i + 1, :], pipeline.sample_rate)
+            separated_files.append(str(single_path))
+    else:
+        # Unexpected shape: save as single file
+        single_path = out_dir / f"separated_{ts}.wav"
+        torchaudio.save(str(single_path), sep_t, pipeline.sample_rate)
+        separated_files.append(str(single_path))
+    torchaudio.save(str(src_out), src_t, pipeline.sample_rate)
+    torchaudio.save(str(noise_out), noise_t, pipeline.sample_rate)
+
+    print(f"Saved mixture -> {mix_path}")
+    print("Saved separated source files:")
+    for p in separated_files:
+        print(" ", p)
+
+    return {
+        "mixture": str(mix_path),
+        "separated_files": separated_files,
+        "source": str(src_out),
+        "noise": str(noise_out),
+    }
+
+
+
+
 def main():
     # ============ CONFIGURE PATHS HERE ============
     SEP_CHECKPOINT = PROJECT_ROOT / "src/models/sudormrf/checkpoints/best_model.pt"
@@ -412,4 +645,25 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    import random
+
+    example_src = Path("./ho6sg-47RD0.wav")
+    example_noise = Path("./6PQQPzEhCjM.wav")
+
+    if not example_src.exists() or not example_noise.exists():
+        missing = []
+        if not example_src.exists():
+            missing.append(str(example_src))
+        if not example_noise.exists():
+            missing.append(str(example_noise))
+        print("Example WAV files not found; skipping demo. Missing:", *missing)
+    else:
+        demo_two_wav_separation(
+            src_path=str(example_src),
+            noise_path=str(example_noise),
+            snr_db=random.uniform(-5, 5),
+            sep_checkpoint=PROJECT_ROOT
+            / "src/models/sudormrf/checkpoints/20251215_234806/best_model.pt",
+            out_dir="./separation_output_demo",
+        )

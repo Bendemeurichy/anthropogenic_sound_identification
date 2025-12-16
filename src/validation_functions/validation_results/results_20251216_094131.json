@@ -1,0 +1,62 @@
+{
+  "Clean sounds classification": {
+    "confusion_matrix": {
+      "tp": 353,
+      "tn": 1021,
+      "fp": 190,
+      "fn": 51
+    },
+    "accuracy": 0.8507739938080495,
+    "precision": 0.6500920810313076,
+    "recall": 0.8737623762376238,
+    "f1_score": 0.7455121436114045,
+    "specificity": 0.8431048720066061,
+    "balanced_accuracy": 0.8584336241221149,
+    "mcc": 0.6572100344538558
+  },
+  "Clean sounds separation + classification": {
+    "confusion_matrix": {
+      "tp": 76,
+      "tn": 1130,
+      "fp": 81,
+      "fn": 328
+    },
+    "accuracy": 0.746749226006192,
+    "precision": 0.4840764331210191,
+    "recall": 0.18811881188118812,
+    "f1_score": 0.27094474153297676,
+    "specificity": 0.9331131296449215,
+    "balanced_accuracy": 0.5606159707630548,
+    "mcc": 0.17723570877481118
+  },
+  "Mixtures classification": {
+    "confusion_matrix": {
+      "tp": 181,
+      "tn": 1021,
+      "fp": 190,
+      "fn": 223
+    },
+    "accuracy": 0.7442724458204334,
+    "precision": 0.48787061994609165,
+    "recall": 0.44801980198019803,
+    "f1_score": 0.4670967741935484,
+    "specificity": 0.8431048720066061,
+    "balanced_accuracy": 0.645562336993402,
+    "mcc": 0.29973994573256924
+  },
+  "Mixtures separation + classification": {
+    "confusion_matrix": {
+      "tp": 0,
+      "tn": 1130,
+      "fp": 81,
+      "fn": 404
+    },
+    "accuracy": 0.6996904024767802,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1_score": 0.0,
+    "specificity": 0.9331131296449215,
+    "balanced_accuracy": 0.4665565648224608,
+    "mcc": -0.13272368789895475
+  }
+}

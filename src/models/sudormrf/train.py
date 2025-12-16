@@ -31,11 +31,11 @@ from contextlib import nullcontext
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
-from base.sudo_rm_rf.dnn.losses.sisdr import PITLossWrapper, PairwiseNegSDR
-from seperation_head import wrap_model_for_coi
-from multi_class_seperation import wrap_model_for_multiclass
-from config import Config
+from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
+from .base.sudo_rm_rf.dnn.losses.sisdr import PITLossWrapper, PairwiseNegSDR
+from .seperation_head import wrap_model_for_coi
+from .multi_class_seperation import wrap_model_for_multiclass
+from .config import Config
 
 
 from label_loading.sampler import get_coi, sample_non_coi
@@ -57,6 +57,7 @@ class AudioDataset(Dataset):
         snr_range: tuple = (-5, 5),
         n_coi_classes: int = 1,
         augment: bool = True,
+        segment_stride: float | None = None,
     ):
         self.split = split
         # Only keep necessary columns to reduce memory
@@ -78,6 +79,51 @@ class AudioDataset(Dataset):
         coi_mask = split_df["label"] == 1
         self.coi_files = split_df.loc[coi_mask, "filename"].tolist()
         self.non_coi_files = split_df.loc[~coi_mask, "filename"].tolist()
+
+        # Segment stride (seconds). If None, default to non-overlapping windows
+        # equal to `segment_length`.
+        self.segment_stride = (
+            segment_stride if segment_stride is not None else segment_length
+        )
+
+        # Precompute available COI segments (file, frame_offset, num_frames)
+        # so that each epoch can iterate over all segments deterministically.
+        self.coi_segments: list[tuple[str, int, int]] = []
+        for filepath in self.coi_files:
+            try:
+                info = torchaudio.info(filepath)
+                orig_sr = info.sample_rate
+                num_frames_orig = int(info.num_frames)
+            except Exception:
+                # If info fails, load whole file to determine length
+                waveform, orig_sr = torchaudio.load(filepath)
+                num_frames_orig = (
+                    waveform.shape[1] if waveform.ndim > 1 else waveform.shape[0]
+                )
+
+            # Convert target segment and stride to original-sr frames
+            seg_frames_orig = max(
+                1, int(self.segment_samples * orig_sr / self.sample_rate)
+            )
+            stride_frames_orig = max(
+                1, int(self.segment_stride * orig_sr / self.sample_rate)
+            )
+
+            if num_frames_orig <= 0:
+                n_segs = 1
+            else:
+                if num_frames_orig <= seg_frames_orig:
+                    n_segs = 1
+                else:
+                    # cover the file with sliding windows using stride
+                    n_segs = 1 + max(
+                        0, (num_frames_orig - seg_frames_orig) // stride_frames_orig
+                    )
+
+            for s in range(n_segs):
+                offset = s * stride_frames_orig
+                # ensure we don't go past file end; `load_and_preprocess` will pad
+                self.coi_segments.append((filepath, offset, seg_frames_orig))
 
         if n_coi_classes > 1:
             # Store file lists per class instead of DataFrames
@@ -107,15 +153,24 @@ class AudioDataset(Dataset):
         gc.collect()
 
     def __len__(self):
-        return len(self.coi_files)
+        return len(self.coi_segments)
 
-    def load_and_preprocess(self, filepath: str) -> torch.Tensor:
-        """Load only the needed segment from disk to reduce RAM spikes."""
+    def load_and_preprocess(
+        self, filepath: str, frame_offset: int = 0, num_frames: int | None = None
+    ) -> torch.Tensor:
+        """Load only the needed segment from disk to reduce RAM spikes.
+
+        Args:
+            filepath: path to audio file
+            frame_offset: offset in original-file frames (used with torchaudio.load)
+            num_frames: number of frames to load at original sampling rate. If
+                None, computed from target `segment_samples` and file sample rate.
+        """
 
         try:
             info = torchaudio.info(filepath)
             orig_sr = info.sample_rate
-            num_frames = info.num_frames
+            total_frames = int(info.num_frames)
         except Exception:
             # Fallback: torchaudio.info can fail on some backends/codecs
             waveform, orig_sr = torchaudio.load(filepath)
@@ -143,20 +198,16 @@ class AudioDataset(Dataset):
         segment_frames_orig = int(self.segment_samples * orig_sr / self.sample_rate)
         segment_frames_orig = max(segment_frames_orig, 1)
 
-        if num_frames <= 0:
-            waveform, sr = torchaudio.load(filepath)
+        # If caller provided num_frames use it, otherwise default to segment_frames_orig
+        if num_frames is None:
+            num_frames_to_load = segment_frames_orig
         else:
-            if self.augment and num_frames > segment_frames_orig:
-                frame_offset = int(
-                    np.random.randint(0, num_frames - segment_frames_orig)
-                )
-            else:
-                frame_offset = 0
+            num_frames_to_load = int(num_frames)
 
-            # Load only a segment from disk
-            waveform, sr = torchaudio.load(
-                filepath, frame_offset=frame_offset, num_frames=segment_frames_orig
-            )
+        # Load only a segment from disk at the requested offset
+        waveform, sr = torchaudio.load(
+            filepath, frame_offset=int(frame_offset), num_frames=int(num_frames_to_load)
+        )
 
         if sr != self.sample_rate:
             key = (sr, self.sample_rate)
@@ -171,7 +222,7 @@ class AudioDataset(Dataset):
 
         waveform = waveform.squeeze(0)
 
-        # Enforce exact segment length at target SR
+        # Enforce exact segment length at target SR (pad or trim)
         if waveform.shape[0] < self.segment_samples:
             waveform = torch.nn.functional.pad(
                 waveform, (0, self.segment_samples - waveform.shape[0])
@@ -204,10 +255,14 @@ class AudioDataset(Dataset):
     def __getitem__(self, idx):
         # Select COI class
         if self.n_coi_classes == 1:
-            # Binary case
-            coi_idx = idx % len(self.coi_files)
-            coi_file = self.coi_files[coi_idx]
-            coi_audio = self.load_and_preprocess(coi_file)
+            # Binary case: use the precomputed segment mapping so each index
+            # corresponds to a specific file and offset (covers all segments
+            # of all COI files deterministically). DataLoader shuffle will
+            # randomize order per-epoch when desired.
+            filepath, frame_offset, num_frames = self.coi_segments[idx]
+            coi_audio = self.load_and_preprocess(
+                filepath, frame_offset=frame_offset, num_frames=num_frames
+            )
 
             # Create zero tensors for other classes
             sources = [coi_audio]
@@ -227,11 +282,10 @@ class AudioDataset(Dataset):
         noncoi_file = self.non_coi_files[noncoi_idx]
         background = self.load_and_preprocess(noncoi_file)
 
-        # Normalize sources FIRST
-        sources = [self.normalize(s) for s in sources]
-        background = self.normalize(background)
-
-        # Create mixture from normalized sources
+        # Create mixture from sources and background. Do not pre-normalize
+        # individual sources here — instead normalize the whole mixture (and
+        # targets) using the mixture mean/std so training matches inference
+        # where inputs are normalized per-chunk before passing to the model.
         total_coi = torch.stack(sources).sum(dim=0)
         snr_db = np.random.uniform(*self.snr_range)
 
@@ -242,12 +296,19 @@ class AudioDataset(Dataset):
         scaling_factor = torch.sqrt(coi_power / (snr_linear * bg_power))
         scaled_background = background * scaling_factor
 
-        # Mixture is now sum of sources
+        # Mixture is now sum of sources (in original waveform scale)
         mixture = total_coi + scaled_background
 
         # Update background to the scaled version (what's actually in mixture)
         sources.append(scaled_background)
         sources_tensor = torch.stack(sources, dim=0)
+
+        # Normalize mixture and targets using mixture statistics to match
+        # inference-time normalization (per-chunk mean/std).
+        mean = mixture.mean()
+        std = mixture.std() + 1e-8
+        mixture = (mixture - mean) / std
+        sources_tensor = (sources_tensor - mean) / std
 
         return mixture, sources_tensor
 
@@ -395,6 +456,7 @@ def create_dataloaders(config: Config):
         snr_range=tuple(config.data.snr_range),
         n_coi_classes=config.data.n_coi_classes,
         augment=True,
+        segment_stride=getattr(config.data, "segment_stride", None),
     )
     val_dataset = AudioDataset(
         df,
@@ -404,6 +466,7 @@ def create_dataloaders(config: Config):
         snr_range=tuple(config.data.snr_range),
         n_coi_classes=config.data.n_coi_classes,
         augment=False,
+        segment_stride=getattr(config.data, "segment_stride", None),
     )
 
     # Memory-optimized DataLoader settings
@@ -415,7 +478,6 @@ def create_dataloaders(config: Config):
     loader_kwargs = {
         "batch_size": config.training.batch_size,
         "num_workers": num_workers,
-        "pin_memory": num_workers == 0,  # Only pin if no workers (avoids extra copies)
     }
 
     # Only add worker-specific options if using workers

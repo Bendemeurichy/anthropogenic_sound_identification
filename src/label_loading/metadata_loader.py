@@ -4,10 +4,10 @@ Filenames can be used to sample data for finetuning.
 """
 
 import pandas as pd
-from load_audioset import load_audioset
-from load_esc50 import load_esc50
-from load_fsd50k import load_fsd50k
-from load_sounddesc import load_sounddesc
+from .load_audioset import load_audioset
+from .load_esc50 import load_esc50
+from .load_fsd50k import load_fsd50k
+from .load_sounddesc import load_sounddesc
 
 # Dataset file configuration
 DATASET_CONFIG = {
