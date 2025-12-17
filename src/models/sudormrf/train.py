@@ -534,8 +534,14 @@ def train_epoch(
         new_s1 = clean_wavs[idx1, 0, :]
         new_s2 = clean_wavs[idx2, 1, :]
         # Rescale to match original energies
-        new_s1 = new_s1 * torch.sqrt(energies[:, 0] / (new_s1**2).sum(-1, keepdim=True))
-        new_s2 = new_s2 * torch.sqrt(energies[:, 1] / (new_s2**2).sum(-1, keepdim=True))
+        # Add small epsilon to avoid division by zero when rescaling
+        denom_eps = 1e-8
+        new_s1 = new_s1 * torch.sqrt(
+            energies[:, 0] / ((new_s1**2).sum(-1, keepdim=True) + denom_eps)
+        )
+        new_s2 = new_s2 * torch.sqrt(
+            energies[:, 1] / ((new_s2**2).sum(-1, keepdim=True) + denom_eps)
+        )
 
         def normalize_tensor_wav(wav):
             mean = wav.mean(dim=-1, keepdim=True)
@@ -551,6 +557,20 @@ def train_epoch(
             loss = criterion(rec_sources_wavs, clean_wavs)
             loss = loss.float() + LOSS_EPS
             loss_to_backprop = loss / grad_accum_steps
+
+            # Diagnostic: compute per-source SI-SNR (dB) for monitoring
+            try:
+                coi_sisnr_batch = sisnr(
+                    rec_sources_wavs[:, 0, :], clean_wavs[:, 0, :], eps=LOSS_EPS
+                )
+                bg_sisnr_batch = sisnr(
+                    rec_sources_wavs[:, 1, :], clean_wavs[:, 1, :], eps=LOSS_EPS
+                )
+                coi_sisnr_mean = float(coi_sisnr_batch.detach().cpu().mean().item())
+                bg_sisnr_mean = float(bg_sisnr_batch.detach().cpu().mean().item())
+            except Exception:
+                coi_sisnr_mean = float("nan")
+                bg_sisnr_mean = float("nan")
 
         if use_amp:
             assert scaler is not None
@@ -592,7 +612,11 @@ def train_epoch(
         batch_size = mixtures.size(0)
         running_loss += float(loss.detach().cpu().item()) * batch_size
         n_samples += batch_size
-        progress_bar.set_postfix(loss=float(loss.detach().cpu().item()))
+        progress_bar.set_postfix(
+            loss=float(loss.detach().cpu().item()),
+            coi=f"{coi_sisnr_mean:.3f}",
+            bg=f"{bg_sisnr_mean:.3f}",
+        )
 
         # Free memory explicitly
         del (
@@ -676,7 +700,21 @@ def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True
         batch_size = mixtures.size(0)
         running_loss += float(loss.detach().cpu().item()) * batch_size
         n_samples += batch_size
-        progress_bar.set_postfix(loss=float(loss.detach().cpu().item()))
+        # Diagnostic: compute per-source SI-SNR (dB) for validation
+        try:
+            coi_sisnr_batch = sisnr(estimates[:, 0, :], sources[:, 0, :], eps=LOSS_EPS)
+            bg_sisnr_batch = sisnr(estimates[:, 1, :], sources[:, 1, :], eps=LOSS_EPS)
+            coi_sisnr_mean = float(coi_sisnr_batch.detach().cpu().mean().item())
+            bg_sisnr_mean = float(bg_sisnr_batch.detach().cpu().mean().item())
+        except Exception:
+            coi_sisnr_mean = float("nan")
+            bg_sisnr_mean = float("nan")
+
+        progress_bar.set_postfix(
+            loss=float(loss.detach().cpu().item()),
+            coi=f"{coi_sisnr_mean:.3f}",
+            bg=f"{bg_sisnr_mean:.3f}",
+        )
 
         # Free memory explicitly
         del mixtures, sources, estimates, loss
@@ -733,13 +771,10 @@ def create_dataloaders(config: Config):
         loader_kwargs["prefetch_factor"] = 1
 
     # Free the dataframe before creating the loader
-    del df
-    gc.collect()
 
     train_loader = DataLoader(
         train_dataset, shuffle=True, drop_last=True, **loader_kwargs
     )
-    gc.collect()
 
     return train_loader
 
