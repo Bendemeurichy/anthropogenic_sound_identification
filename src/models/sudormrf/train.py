@@ -66,6 +66,11 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     est_zm = est - est.mean(dim=-1, keepdim=True)
     target_zm = target - target.mean(dim=-1, keepdim=True)
 
+    # Skip SI-SNR for silent targets (prevent numerical instability)
+    target_energy = target_zm.pow(2).sum(dim=-1)
+    min_energy_threshold = 1e-6
+    silent_mask = target_energy < min_energy_threshold
+
     # projection of est onto target
     s_target = (est_zm * target_zm).sum(dim=-1, keepdim=True) / (
         target_zm.pow(2).sum(dim=-1, keepdim=True) + eps
@@ -79,6 +84,10 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
 
     sisnr_lin = true_energy / noise_energy
     sisnr_db = 10.0 * torch.log10(sisnr_lin + eps)
+
+    # For silent targets, return a penalty value (not NaN/Inf)
+    sisnr_db = torch.where(silent_mask, torch.full_like(sisnr_db, -20.0), sisnr_db)
+
     return sisnr_db
 
 
@@ -87,6 +96,10 @@ class COIWeightedLoss(torch.nn.Module):
 
     This compares `est[:,0]` to `target[:,0]` (COI) and `est[:,1]` to
     `target[:,1]` (background) and returns a negative weighted SI-SNR.
+
+    For background-only samples (where COI target is essentially silent),
+    only the background SI-SNR is used in the loss, preventing the model
+    from trying to separate audio when there's no plane present.
     """
 
     def __init__(self, class_weight: float = 1.5, eps: float = 1e-8):
@@ -105,11 +118,21 @@ class COIWeightedLoss(torch.nn.Module):
         coi_sisnr = sisnr(est_sources[:, 0, :], target_sources[:, 0, :], eps=self.eps)
         bg_sisnr = sisnr(est_sources[:, 1, :], target_sources[:, 1, :], eps=self.eps)
 
-        # Weighted average and negate (we minimize loss)
-        weighted = (self.class_weight * coi_sisnr + bg_sisnr) / (
-            self.class_weight + 1.0
+        # Detect background-only samples (COI target is silent)
+        coi_target = target_sources[:, 0, :]
+        coi_energy = coi_target.pow(2).sum(dim=-1)
+        is_background_only = coi_energy < 1e-6
+
+        # For background-only samples, only use background SI-SNR (don't penalize COI separation)
+        # For COI-present samples, use weighted average
+        batch_loss = torch.where(
+            is_background_only,
+            -bg_sisnr,  # background-only: just penalize bad background reconstruction
+            -(self.class_weight * coi_sisnr + bg_sisnr)
+            / (self.class_weight + 1.0),  # COI-present: weighted
         )
-        loss = -weighted.mean()
+
+        loss = batch_loss.mean()
         return loss
 
 
