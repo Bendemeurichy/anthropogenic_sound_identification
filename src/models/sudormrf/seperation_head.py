@@ -23,8 +23,6 @@ Usage:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torchmetrics.audio import ScaleInvariantSignalNoiseRatio as SI_SNR
 from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
     GroupCommSudoRmRf,
 )
@@ -116,34 +114,3 @@ def wrap_model_for_coi(model, replace_head=True):
             raise TypeError("Model type not supported for COI head replacement.")
 
     return model
-
-
-class COILoss(nn.Module):
-    """Loss function for class of interest separation.
-    Combines SI-SNR for COI and background with class-aware weighting.
-    """
-
-    def __init__(self, class_weight=1.5, eps=1e-8):
-        super().__init__()
-        self.class_weight = class_weight
-        self.eps = eps
-
-    def forward(self, est_sources, target_sources):
-        """
-        Args:
-            est_sources: (B, n_src, T)
-            target_sources: (B, n_src, T)
-        Returns:
-            loss: Scalar loss value
-        """
-        coi_sisnr = SI_SNR(est_sources[:, 0, :], target_sources[:, 0, :], eps=self.eps)
-        background_sisnr = SI_SNR(
-            est_sources[:, 1, :], target_sources[:, 1, :], eps=self.eps
-        )
-
-        weighted_sisnr = (self.class_weight * coi_sisnr + background_sisnr) / (
-            self.class_weight + 1
-        )
-
-        loss = -weighted_sisnr.mean()
-        return loss

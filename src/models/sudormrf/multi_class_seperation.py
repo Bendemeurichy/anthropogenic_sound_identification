@@ -77,7 +77,7 @@ def wrap_model_for_multiclass(model, replace_head=True, n_coi_classes=3):
         model: Modified SuDoRM-RF model with Multi-class COI head
     """
     if replace_head:
-        if isinstance(model, SuDORMRF) or isinstance(model, GroupCommSuDORMRFv2):
+        if isinstance(model, SuDORMRF) or isinstance(model, GroupCommSudoRmRf):
             in_channels = model.mask_net[-1].in_channels
             out_channels = model.enc_num_basis
             n_src = n_coi_classes + 1

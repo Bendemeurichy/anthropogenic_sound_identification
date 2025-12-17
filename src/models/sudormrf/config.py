@@ -17,6 +17,9 @@ class DataConfig:
     background_only_prob: float = 0.0
     # How many non-COI files to mix together when creating a background-only example
     background_mix_n: int = 2
+    # Augmentation multiplier: each COI sample is seen this many times per epoch
+    # with different random augmentations (e.g., 3 = 3x more COI samples)
+    augment_multiplier: int = 1
 
 
 @dataclass

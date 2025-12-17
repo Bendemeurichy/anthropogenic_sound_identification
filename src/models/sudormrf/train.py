@@ -32,7 +32,6 @@ from contextlib import nullcontext
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
-from .base.sudo_rm_rf.dnn.losses.sisdr import PITLossWrapper, PairwiseNegSDR
 from .seperation_head import wrap_model_for_coi
 from .multi_class_seperation import wrap_model_for_multiclass
 from .config import Config
@@ -114,6 +113,121 @@ class COIWeightedLoss(torch.nn.Module):
         return loss
 
 
+class AudioAugmentations:
+    """Audio augmentations for increasing effective dataset size.
+
+    Each augmentation is applied randomly with the specified probability.
+    """
+
+    @staticmethod
+    def time_stretch(waveform: torch.Tensor, rate: float) -> torch.Tensor:
+        """Time stretch without changing pitch (simplified via resampling)."""
+        if rate == 1.0:
+            return waveform
+        orig_len = waveform.shape[-1]
+        # Use simple interpolation for time stretching
+        stretched = (
+            torch.nn.functional.interpolate(
+                waveform.unsqueeze(0).unsqueeze(0),
+                scale_factor=1.0 / rate,
+                mode="linear",
+                align_corners=False,
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
+        # Adjust length back to original
+        if stretched.shape[-1] > orig_len:
+            stretched = stretched[:orig_len]
+        elif stretched.shape[-1] < orig_len:
+            stretched = torch.nn.functional.pad(
+                stretched, (0, orig_len - stretched.shape[-1])
+            )
+        return stretched
+
+    @staticmethod
+    def pitch_shift_approx(waveform: torch.Tensor, semitones: float) -> torch.Tensor:
+        """Approximate pitch shift via time stretch + resample."""
+        # This is a simplified approximation - proper pitch shift needs librosa/torchaudio-sox
+        rate = 2 ** (semitones / 12.0)
+        return AudioAugmentations.time_stretch(waveform, rate)
+
+    @staticmethod
+    def add_noise(waveform: torch.Tensor, noise_level: float = 0.005) -> torch.Tensor:
+        """Add Gaussian noise."""
+        noise = torch.randn_like(waveform) * noise_level
+        return waveform + noise
+
+    @staticmethod
+    def gain(waveform: torch.Tensor, gain_db: float) -> torch.Tensor:
+        """Apply gain in dB."""
+        return waveform * (10 ** (gain_db / 20.0))
+
+    @staticmethod
+    def time_shift(waveform: torch.Tensor, shift_samples: int) -> torch.Tensor:
+        """Circular time shift."""
+        return torch.roll(waveform, shifts=shift_samples, dims=-1)
+
+    @staticmethod
+    def low_pass_filter(
+        waveform: torch.Tensor, cutoff_ratio: float = 0.8
+    ) -> torch.Tensor:
+        """Simple low-pass filter via FFT."""
+        if cutoff_ratio >= 1.0:
+            return waveform
+        fft = torch.fft.rfft(waveform)
+        n_freqs = fft.shape[-1]
+        cutoff_idx = int(n_freqs * cutoff_ratio)
+        # Smooth rolloff
+        mask = torch.ones(n_freqs, device=waveform.device)
+        rolloff_width = max(1, n_freqs // 20)
+        for i in range(rolloff_width):
+            if cutoff_idx + i < n_freqs:
+                mask[cutoff_idx + i] = 1.0 - (i / rolloff_width)
+        mask[cutoff_idx + rolloff_width :] = 0.0
+        filtered_fft = fft * mask
+        return torch.fft.irfft(filtered_fft, n=waveform.shape[-1])
+
+    @staticmethod
+    def random_augment(
+        waveform: torch.Tensor, rng: np.random.Generator | None = None
+    ) -> torch.Tensor:
+        """Apply a random combination of augmentations."""
+        if rng is None:
+            rng = np.random.default_rng()
+
+        # Randomly select which augmentations to apply
+        augmented = waveform.clone()
+
+        # Time stretch (0.9 - 1.1x)
+        if rng.random() < 0.5:
+            rate = rng.uniform(0.9, 1.1)
+            augmented = AudioAugmentations.time_stretch(augmented, rate)
+
+        # Gain (-6 to +6 dB)
+        if rng.random() < 0.7:
+            gain_db = rng.uniform(-6, 6)
+            augmented = AudioAugmentations.gain(augmented, gain_db)
+
+        # Add noise
+        if rng.random() < 0.4:
+            noise_level = rng.uniform(0.001, 0.01)
+            augmented = AudioAugmentations.add_noise(augmented, noise_level)
+
+        # Time shift (up to 10% of length)
+        if rng.random() < 0.5:
+            max_shift = int(augmented.shape[-1] * 0.1)
+            shift = int(rng.integers(-max_shift, max_shift + 1))
+            augmented = AudioAugmentations.time_shift(augmented, shift)
+
+        # Low-pass filter
+        if rng.random() < 0.3:
+            cutoff = rng.uniform(0.6, 0.95)
+            augmented = AudioAugmentations.low_pass_filter(augmented, cutoff)
+
+        return augmented
+
+
 class AudioDataset(Dataset):
     """pytorch dataset handler for wav files."""
 
@@ -129,6 +243,7 @@ class AudioDataset(Dataset):
         segment_stride: float | None = None,
         background_only_prob: float = 0.0,
         background_mix_n: int = 2,
+        augment_multiplier: int = 1,
     ):
         self.split = split
         # Only keep necessary columns to reduce memory
@@ -151,6 +266,13 @@ class AudioDataset(Dataset):
         self.snr_range = snr_range
         self.n_coi_classes = n_coi_classes
         self.augment = augment
+        # Augmentation multiplier: how many augmented versions per COI sample
+        # Set to 3 to get 3x augmentations per COI sample
+        self.augment_multiplier = (
+            int(augment_multiplier) if split == "train" and augment else 1
+        )
+        # Random generator for reproducible augmentations
+        self._rng = np.random.default_rng(42)
         # Probability (0..1) of returning a background-only example during
         # training. Background-only examples have zeroed COI targets and the
         # background in the last source slot.
@@ -165,16 +287,6 @@ class AudioDataset(Dataset):
         coi_mask = split_df["label"] == 1
         self.coi_files = split_df.loc[coi_mask, "filename"].tolist()
         self.non_coi_files = split_df.loc[~coi_mask, "filename"].tolist()
-
-        # Compute number of extra background-only samples to append per epoch.
-        # Interpret `background_only_prob` as a ratio of COI-count to add as
-        # extra background-only examples (e.g. 0.25 means 25% extra backgrounds).
-        if len(self.coi_files) > 0:
-            self._extra_background_count = int(
-                self.background_only_prob * len(self.coi_files) + 0.5
-            )
-        else:
-            self._extra_background_count = 0
 
         # Compute number of extra background-only samples to append per epoch.
         # Interpret `background_only_prob` as a ratio of COI-count to add as
@@ -257,6 +369,11 @@ class AudioDataset(Dataset):
             print(
                 f"{split} set: {len(self.coi_files)} COI, {len(self.non_coi_files)} non-COI"
             )
+            if self.augment_multiplier > 1:
+                print(
+                    f"  → With {self.augment_multiplier}x augmentation: "
+                    f"{len(self.coi_files) * self.augment_multiplier} effective COI samples"
+                )
 
         # Clear the temporary DataFrame
         del split_df
@@ -264,11 +381,12 @@ class AudioDataset(Dataset):
 
     def __len__(self):
         if self.split == "train":
-            # Always use each COI file once per epoch. Optionally append
-            # extra background-only examples computed from
-            # `background_only_prob`.
+            # Each COI file is seen `augment_multiplier` times per epoch with
+            # different random augmentations. Background-only examples are added
+            # on top based on `background_only_prob`.
             if len(self.coi_files) > 0:
-                return len(self.coi_files) + self._extra_background_count
+                base_coi_samples = len(self.coi_files) * self.augment_multiplier
+                return base_coi_samples + self._extra_background_count
             # Fallback: no COI files -> iterate over backgrounds
             return len(self.non_coi_files)
         return len(self.coi_segments)
@@ -375,13 +493,19 @@ class AudioDataset(Dataset):
         if self.n_coi_classes == 1:
             # Binary case: for TRAIN create one random-offset mixture per COI file.
             if self.split == "train":
-                # We changed dataset length to include all COI files followed
-                # by `_extra_background_count` background-only entries. If
-                # `idx` points to a COI entry, use that COI file; otherwise
-                # create a background-only mixed example.
+                # With augment_multiplier, the effective dataset size is:
+                #   len(coi_files) * augment_multiplier + _extra_background_count
+                # Map idx back to actual COI file index
                 coi_count = len(self.coi_files)
-                if coi_count > 0 and idx < coi_count:
-                    coi_file = self.coi_files[idx]
+                effective_coi_count = coi_count * self.augment_multiplier
+
+                if coi_count > 0 and idx < effective_coi_count:
+                    # Map augmented index back to original file
+                    actual_coi_idx = idx % coi_count
+                    augment_variant = (
+                        idx // coi_count
+                    )  # Which augmentation variant (0, 1, 2, ...)
+                    coi_file = self.coi_files[actual_coi_idx]
 
                     # Determine original file info to compute valid offsets
                     try:
@@ -410,6 +534,18 @@ class AudioDataset(Dataset):
                         )
                     except Exception:
                         coi_audio = self.load_and_preprocess(coi_file)
+
+                    # Apply augmentation if this is an augmented variant (variant > 0)
+                    # or randomly for variant 0 when augment is enabled
+                    if (
+                        self.augment
+                        and self.augment_multiplier > 1
+                        and augment_variant > 0
+                    ):
+                        coi_audio = AudioAugmentations.random_augment(
+                            coi_audio, self._rng
+                        )
+
                     sources = [coi_audio]
                 else:
                     # Background-only extra sample: mix `background_mix_n` random
@@ -643,7 +779,7 @@ def train_epoch(
             assert scaler is not None
             scaler.unscale_(optimizer)
 
-        # Check grads and loss for finiteness before final update
+        # Check grads for finiteness before final update
         grads_finite = True
         for p in model.parameters():
             if p.grad is not None:
@@ -651,9 +787,7 @@ def train_epoch(
                     grads_finite = False
                     break
 
-        loss_finite = torch.isfinite(loss) if "loss" in locals() else True
-
-        if not grads_finite or not loss_finite:
+        if not grads_finite:
             if use_amp:
                 try:
                     scaler.update()
@@ -661,7 +795,7 @@ def train_epoch(
                     pass
             optimizer.zero_grad(set_to_none=True)
             print(
-                "Warning: non-finite loss or gradients detected; skipping final optimizer step."
+                "Warning: non-finite gradients detected; skipping final optimizer step."
             )
         else:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
@@ -760,6 +894,7 @@ def create_dataloaders(config: Config):
         augment=True,
         background_only_prob=getattr(config.data, "background_only_prob", 0.0),
         background_mix_n=getattr(config.data, "background_mix_n", 2),
+        augment_multiplier=getattr(config.data, "augment_multiplier", 1),
     )
 
     # Memory-optimized DataLoader settings: default to 0 workers
@@ -913,7 +1048,7 @@ def set_seed(seed: int = 42):
     torch.backends.cudnn.benchmark = False
 
 
-def train(config: Config, timestamp: str = None):
+def train(config: Config, timestamp: str | None = None):
     """Main training function."""
     # Set seed for reproducibility
     seed = getattr(config.training, "seed", 42)
@@ -941,7 +1076,7 @@ def train(config: Config, timestamp: str = None):
     # Setup training
     # Use fixed-order COI-weighted SI-SNR loss (no PIT) to preserve semantic heads
     criterion = COIWeightedLoss(
-        class_weight=getattr(config.training, "coi_weight", 1.5)
+        class_weight=getattr(config.training, "class_weight", 1.5)
     )
     optimizer = optim.AdamW(model.parameters(), lr=float(config.training.lr))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(

@@ -8,6 +8,8 @@ data:
   background_only_prob: 2.0
   # How many non-COI files to sum for background-only examples
   background_mix_n: 2
+  # Augmentation multiplier: each COI sample seen 3x with random augmentations
+  augment_multiplier: 3
 
 # Model settings (using base model defaults)
 model:
