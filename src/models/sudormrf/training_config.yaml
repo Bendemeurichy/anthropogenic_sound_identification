@@ -14,7 +14,7 @@ model:
   type: "improved" # 'improved' or 'groupcomm'
   out_channels: 128 # base model default
   in_channels: 512 # base model default
-  num_blocks: 16 # base model default
+  num_blocks: 18 # base model default
   upsampling_depth: 4 # base model default
   enc_kernel_size: 21 # base model default
   enc_num_basis: 512 # base model default
@@ -24,12 +24,12 @@ training:
   batch_size: 4
   grad_accum_steps: 1
   use_amp: true
-  num_epochs: 100
+  num_epochs: 200
   lr: 1e-4
   num_workers: 0 # Set to 0 to save ~10-15GB RAM (workers duplicate dataset in memory)
   pin_memory: true
   clip_grad_norm: 5.0
-  patience: 15 # early stopping patience
+  patience: 35 # early stopping patience
   checkpoint_dir: "checkpoints"
   device: "cuda:0" # pin to first GPU
   compile_model: false
