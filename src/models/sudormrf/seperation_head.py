@@ -85,7 +85,7 @@ def wrap_model_for_coi(model, replace_head=True):
     """
 
     if replace_head:
-        if isinstance(model, SuDORMRF) or isinstance(model, GroupCommSuDORMRFv2):
+        if isinstance(model, SuDORMRF) or isinstance(model, GroupCommSudoRmRf):
             in_channels = model.mask_net[-1].in_channels
             # Use enc_num_basis as out_channels for each source branch
             out_channels = model.enc_num_basis

@@ -548,9 +548,17 @@ def train_epoch(
             std = wav.std(dim=-1, keepdim=True) + 1e-8
             return (wav - mean) / std
 
-        m1wavs = normalize_tensor_wav(new_s1 + new_s2)
-        clean_wavs[:, 0, :] = normalize_tensor_wav(new_s1)
-        clean_wavs[:, 1, :] = normalize_tensor_wav(new_s2)
+        # Create mixture first (unnormalized)
+        m1wavs = new_s1 + new_s2
+
+        # Normalize everything using the MIXTURE's statistics (matching dataset behavior)
+        mean = m1wavs.mean(dim=-1, keepdim=True)
+        std = m1wavs.std(dim=-1, keepdim=True) + 1e-8
+
+        # Apply mixture normalization to everything
+        m1wavs = (m1wavs - mean) / std
+        clean_wavs[:, 0, :] = (new_s1 - mean) / std
+        clean_wavs[:, 1, :] = (new_s2 - mean) / std
 
         with autocast_ctx:
             rec_sources_wavs = model(m1wavs.unsqueeze(1))
