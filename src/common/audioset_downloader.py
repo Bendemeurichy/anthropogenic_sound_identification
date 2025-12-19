@@ -81,18 +81,20 @@ def download_missing_files_from_df(
     successful = 0
     failed = 0
 
+    # Load label mapping once outside the loop for better performance
+    display_names_df = pd.read_csv(
+        "/mnt/d/Users/bdmeuric/masterproef/anthropogenic_sound_identification/data/audioset/mid_to_display_name.tsv",
+        sep="\t",
+        header=None,
+        names=["mid", "display_name"],
+    )
+    label_mapping = display_names_df.set_index("display_name")["mid"].to_dict()
+
     for _, row in df_missing.iterrows():
         # Extract YouTube ID from filename (remove path and .wav extension)
         youtube_id = Path(row["filename"]).stem
 
-        # change label to mid
-        display_names_df = pd.read_csv(
-            "/mnt/d/Users/bdmeuric/masterproef/anthropogenic_sound_identification/data/audioset/mid_to_display_name.tsv",
-            sep="\t",
-            header=None,
-            names=["mid", "display_name"],
-        )
-        label_mapping = display_names_df.set_index("display_name")["mid"].to_dict()
+        # Convert label to mid
         label = row.get("label", "")
         if isinstance(label, list):
             mids = [label_mapping.get(l, l) for l in label]

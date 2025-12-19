@@ -72,28 +72,46 @@ def add_audio_file_paths(df: pd.DataFrame, audio_base_path: str) -> pd.DataFrame
     """
     from pathlib import Path
 
-    def construct_path(row):
-        dataset = row["dataset"]
-        split = row["split"]
-        filename = row["filename"]
-
+    # Vectorized approach: process each dataset separately
+    result_paths = []
+    
+    for dataset in df["dataset"].unique():
+        dataset_mask = df["dataset"] == dataset
+        dataset_rows = df[dataset_mask]
+        
         if dataset not in DATASET_AUDIO_PATHS:
             # Fallback: just use base path + filename
-            return str(Path(audio_base_path) / filename)
-
-        dataset_config = DATASET_AUDIO_PATHS[dataset]
-        base = dataset_config["base"]
-        split_dir = dataset_config.get(split, "")
-
-        # Construct the full path
-        if split_dir:
-            full_path = Path(audio_base_path) / base / split_dir / filename
+            paths = dataset_rows["filename"].apply(
+                lambda fname: str(Path(audio_base_path) / fname)
+            )
         else:
-            full_path = Path(audio_base_path) / base / filename
-
-        return str(full_path)
-
-    df["filename"] = df.apply(construct_path, axis=1)
+            dataset_config = DATASET_AUDIO_PATHS[dataset]
+            base = dataset_config["base"]
+            
+            # Build paths based on split
+            paths_list = []
+            for split in dataset_rows["split"].unique():
+                split_mask = dataset_rows["split"] == split
+                split_rows = dataset_rows[split_mask]
+                split_dir = dataset_config.get(split, "")
+                
+                if split_dir:
+                    # Use vectorized string operations
+                    split_paths = split_rows["filename"].apply(
+                        lambda fname: str(Path(audio_base_path) / base / split_dir / fname)
+                    )
+                else:
+                    split_paths = split_rows["filename"].apply(
+                        lambda fname: str(Path(audio_base_path) / base / fname)
+                    )
+                paths_list.append(split_paths)
+            
+            paths = pd.concat(paths_list)
+        
+        result_paths.append(paths)
+    
+    # Combine all paths and assign back to dataframe
+    df["filename"] = pd.concat(result_paths)
     return df
 
 

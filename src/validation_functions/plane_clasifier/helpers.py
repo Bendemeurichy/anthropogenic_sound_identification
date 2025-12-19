@@ -84,12 +84,13 @@ def validate_dataset_files(df, filename_column: str = "filename", verbose: bool 
     invalid_files = []
     valid_indices = []
 
-    for idx, row in df.iterrows():
-        file_path = row[filename_column]
+    # Use itertuples for better performance than iterrows
+    for row in df.itertuples():
+        file_path = getattr(row, filename_column)
         is_valid, error_msg = validate_audio_file(file_path)
 
         if is_valid:
-            valid_indices.append(idx)
+            valid_indices.append(row.Index)
         else:
             invalid_files.append((file_path, error_msg))
             if verbose:

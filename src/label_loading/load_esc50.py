@@ -15,12 +15,14 @@ def load_esc50(filepath) -> pd.DataFrame:
     esc50_df["split"] = esc50_df["fold"].apply(lambda x: "test" if x == 5 else "train")
 
     # split train split in 80-20 train val split
-    train_df = esc50_df[esc50_df["split"] == "train"]
-    val_size = int(0.2 * len(train_df))
-    train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
-    train_df.loc[:val_size, "split"] = "val"
-    train_df.loc[val_size:, "split"] = "train"
-    esc50_df.update(train_df)
+    train_mask = esc50_df["split"] == "train"
+    train_indices = esc50_df[train_mask].index
+    train_shuffled = esc50_df.loc[train_indices].sample(frac=1, random_state=42)
+    val_size = int(0.2 * len(train_shuffled))
+    
+    # Update splits directly using loc with indices
+    val_indices = train_shuffled.index[:val_size]
+    esc50_df.loc[val_indices, "split"] = "val"
 
     esc50_df = esc50_df.drop(columns=["take", "esc10", "fold", "src_file", "target"])
 
