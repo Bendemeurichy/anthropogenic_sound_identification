@@ -66,10 +66,12 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     est_zm = est - est.mean(dim=-1, keepdim=True)
     target_zm = target - target.mean(dim=-1, keepdim=True)
 
-    # Detect silent targets (prevent numerical instability)
+    # Detect silent targets and estimates (prevent numerical instability)
     target_energy = target_zm.pow(2).sum(dim=-1)
+    est_energy = est_zm.pow(2).sum(dim=-1)
     min_energy_threshold = 1e-6
-    silent_mask = target_energy < min_energy_threshold
+    silent_target_mask = target_energy < min_energy_threshold
+    silent_est_mask = est_energy < min_energy_threshold
 
     # projection of est onto target
     s_target = (est_zm * target_zm).sum(dim=-1, keepdim=True) / (
@@ -85,15 +87,25 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     sisnr_lin = true_energy / noise_energy
     sisnr_db = 10.0 * torch.log10(sisnr_lin + eps)
 
-    # For silent targets, penalize based on estimate energy (want est → 0)
-    # Return negative energy ratio: -(est_energy / (est_energy + 1)), scaled to dB range
-    # This gives ~0 dB when est is silent, and decreases as est has more energy
-    est_energy = est_zm.pow(2).sum(dim=-1)
-    silence_penalty = -10.0 * torch.log10(
-        est_energy + 1.0
-    )  # Penalize non-zero estimates
+    # Handle silent targets:
+    # - If target is silent AND estimate is silent: REWARD (correct behavior) -> +20 dB
+    # - If target is silent BUT estimate has energy: PENALIZE based on estimate energy
+    # This trains the model to output silence when there's no COI present
+    both_silent = silent_target_mask & silent_est_mask
+    target_silent_est_loud = silent_target_mask & ~silent_est_mask
 
-    sisnr_db = torch.where(silent_mask, silence_penalty, sisnr_db)
+    # Reward for correctly predicting silence (bounded positive SI-SNR)
+    silence_reward = torch.full_like(sisnr_db, 20.0)
+
+    # Penalty proportional to estimate energy when target is silent
+    # -10 * log10(est_energy) gives large negative values for loud estimates
+    # Clamp to [-30, 0] to avoid extreme gradients
+    silence_penalty = -10.0 * torch.log10(est_energy + eps)
+    silence_penalty = torch.clamp(silence_penalty, min=-30.0, max=0.0)
+
+    # Apply: reward when both silent, penalize when only target is silent
+    sisnr_db = torch.where(both_silent, silence_reward, sisnr_db)
+    sisnr_db = torch.where(target_silent_est_loud, silence_penalty, sisnr_db)
 
     return sisnr_db
 
@@ -632,12 +644,14 @@ class AudioDataset(Dataset):
         sources.append(scaled_background)
         sources_tensor = torch.stack(sources, dim=0)
 
-        # Normalize mixture and targets using mixture statistics to match
-        # inference-time normalization (per-chunk mean/std).
-        mean = mixture.mean()
-        std = mixture.std() + 1e-8
-        mixture = (mixture - mean) / std
-        sources_tensor = (sources_tensor - mean) / std
+        # Normalize each waveform independently (matching original SuDORMRF)
+        def normalize_wav(wav):
+            mean = wav.mean()
+            std = wav.std() + 1e-8
+            return (wav - mean) / std
+
+        mixture = normalize_wav(mixture)
+        sources_tensor = torch.stack([normalize_wav(s) for s in sources_tensor], dim=0)
 
         return mixture, sources_tensor
 
@@ -652,10 +666,24 @@ def train_epoch(
     *,
     grad_accum_steps: int = 1,
     use_amp: bool = True,
+    warmup_steps: int = 0,
+    global_step: int = 0,
+    base_lr: float = 0.001,
 ):
+    """Train for one epoch.
+
+    Args:
+        warmup_steps: Number of steps to linearly warmup LR from 0 to base_lr
+        global_step: Current global step count (for warmup across epochs)
+        base_lr: Target learning rate after warmup
+
+    Returns:
+        tuple: (epoch_loss, final_global_step, grad_norm_history)
+    """
     model.train()
     running_loss = 0.0
     n_samples = 0
+    grad_norms: list[float] = []  # Track gradient norms for monitoring
 
     grad_accum_steps = max(int(grad_accum_steps), 1)
     use_amp = bool(use_amp) and (str(device).startswith("cuda"))
@@ -669,58 +697,65 @@ def train_epoch(
     progress_bar = tqdm(dataloader, desc="Training", leave=False, ascii=True, ncols=100)
     optimizer.zero_grad(set_to_none=True)
     step_idx = 0
+    current_step = global_step  # Track global step for warmup
+
+    # Define normalization function once outside the loop for efficiency
+    def normalize_tensor_wav(wav: torch.Tensor) -> torch.Tensor:
+        """Normalize waveforms to zero mean and unit variance per sample."""
+        mean = wav.mean(dim=-1, keepdim=True)
+        std = wav.std(dim=-1, keepdim=True) + 1e-8
+        return (wav - mean) / std
 
     for step_idx, (mixtures, sources) in enumerate(progress_bar, start=1):
+        current_step += 1
+
+        # --- Learning rate warmup ---
+        if warmup_steps > 0 and current_step <= warmup_steps:
+            warmup_lr = base_lr * (current_step / warmup_steps)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = warmup_lr
+
         # mixtures: (B, T), sources: (B, n_src, T)
-        mixtures = mixtures.to(device, non_blocking=True)
+        # Sources are pre-normalized in the dataset, but we'll re-mix online
         sources = sources.to(device, non_blocking=True)
 
-        # --- In-batch online mixing (memory-efficient) ---
-        # Assume sources shape: (B, 2, T) for (COI, BG)
-        clean_wavs = sources.clone().to(device)  # (B, 2, T)
-        m1wavs = mixtures.to(device)  # (B, T)
-
-        # Online mixing over samples of the batch
-        # Keep the exact same SNR distribution with the initial mixtures
-        energies = torch.sum(clean_wavs**2, dim=-1, keepdim=True)  # (B, 2, 1)
-        # Permute over batch and source dims
-        B, n_src, T = clean_wavs.shape
-        # Randomly permute batch for each source
-        idx1 = torch.randperm(B, device=device)
-        idx2 = torch.randperm(B, device=device)
-        new_s1 = clean_wavs[idx1, 0, :]
-        new_s2 = clean_wavs[idx2, 1, :]
-        # Rescale to match original energies
-        # Add small epsilon to avoid division by zero when rescaling
+        # --- Online mixing: shuffle sources within batch for augmentation ---
+        # This creates new source combinations each batch, improving generalization
+        # and is memory-efficient (standard technique in source separation)
+        B, n_src, T = sources.shape
         denom_eps = 1e-8
-        new_s1 = new_s1 * torch.sqrt(
-            energies[:, 0] / ((new_s1**2).sum(-1, keepdim=True) + denom_eps)
+
+        # Store original energies to preserve SNR distribution
+        energies = torch.sum(sources**2, dim=-1, keepdim=True)  # (B, 2, 1)
+
+        # Randomly permute batch indices for each source independently
+        idx_coi = torch.randperm(B, device=device)
+        idx_bg = torch.randperm(B, device=device)
+
+        # Create new source combinations by shuffling
+        new_coi = sources[idx_coi, 0, :]  # (B, T)
+        new_bg = sources[idx_bg, 1, :]  # (B, T)
+
+        # Rescale shuffled sources to match original energy distribution
+        # This preserves the SNR statistics from the dataset
+        new_coi = new_coi * torch.sqrt(
+            energies[:, 0] / ((new_coi**2).sum(-1, keepdim=True) + denom_eps)
         )
-        new_s2 = new_s2 * torch.sqrt(
-            energies[:, 1] / ((new_s2**2).sum(-1, keepdim=True) + denom_eps)
+        new_bg = new_bg * torch.sqrt(
+            energies[:, 1] / ((new_bg**2).sum(-1, keepdim=True) + denom_eps)
         )
 
-        def normalize_tensor_wav(wav):
-            mean = wav.mean(dim=-1, keepdim=True)
-            std = wav.std(dim=-1, keepdim=True) + 1e-8
-            return (wav - mean) / std
-
-        # Create mixture first (unnormalized)
-        m1wavs = new_s1 + new_s2
-
-        # Normalize everything using the MIXTURE's statistics (matching dataset behavior)
-        mean = m1wavs.mean(dim=-1, keepdim=True)
-        std = m1wavs.std(dim=-1, keepdim=True) + 1e-8
-
-        # Apply mixture normalization to everything
-        m1wavs = (m1wavs - mean) / std
-        clean_wavs[:, 0, :] = (new_s1 - mean) / std
-        clean_wavs[:, 1, :] = (new_s2 - mean) / std
+        # Create mixture and normalize all waveforms consistently
+        m1wavs = normalize_tensor_wav(new_coi + new_bg)  # (B, T)
+        clean_wavs = torch.stack(
+            [normalize_tensor_wav(new_coi), normalize_tensor_wav(new_bg)], dim=1
+        )  # (B, 2, T)
 
         with autocast_ctx:
+            # Model expects (B, 1, T) input, outputs (B, n_src, T)
             rec_sources_wavs = model(m1wavs.unsqueeze(1))
             loss = criterion(rec_sources_wavs, clean_wavs)
-            loss = loss.float() + LOSS_EPS
+            loss = loss.float()
             loss_to_backprop = loss / grad_accum_steps
 
             # Diagnostic: compute per-source SI-SNR (dB) for monitoring
@@ -762,10 +797,16 @@ def train_epoch(
                         pass
                 optimizer.zero_grad(set_to_none=True)
                 print(
-                    "Warning: non-finite loss or gradients detected; skipping optimizer step this batch."
+                    f"Warning: non-finite loss or gradients at step {current_step}; skipping optimizer step."
                 )
+                grad_norms.append(float("nan"))
             else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+                # Track gradient norm BEFORE clipping for monitoring
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), clip_grad_norm
+                )
+                grad_norms.append(float(total_norm.item()))
+
                 if use_amp:
                     assert scaler is not None
                     scaler.step(optimizer)
@@ -774,24 +815,27 @@ def train_epoch(
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
-        batch_size = mixtures.size(0)
+        batch_size = B  # Use B from online mixing
         running_loss += float(loss.detach().cpu().item()) * batch_size
         n_samples += batch_size
+
+        # Show current LR during warmup for visibility
+        current_lr = optimizer.param_groups[0]["lr"]
         progress_bar.set_postfix(
             loss=float(loss.detach().cpu().item()),
             coi=f"{coi_sisnr_mean:.3f}",
             bg=f"{bg_sisnr_mean:.3f}",
+            lr=f"{current_lr:.2e}",
         )
 
         # Free memory explicitly
         del (
-            mixtures,
             sources,
+            m1wavs,
+            clean_wavs,
             rec_sources_wavs,
             loss,
             loss_to_backprop,
-            clean_wavs,
-            m1wavs,
         )
 
     # Flush any remaining accumulated gradients
@@ -818,8 +862,12 @@ def train_epoch(
             print(
                 "Warning: non-finite gradients detected; skipping final optimizer step."
             )
+            grad_norms.append(float("nan"))
         else:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), clip_grad_norm
+            )
+            grad_norms.append(float(total_norm.item()))
             if use_amp:
                 assert scaler is not None
                 scaler.step(optimizer)
@@ -833,7 +881,17 @@ def train_epoch(
         torch.cuda.empty_cache()
 
     epoch_loss = running_loss / n_samples
-    return epoch_loss
+
+    # Compute gradient norm statistics for monitoring
+    valid_norms = [n for n in grad_norms if not np.isnan(n)]
+    if valid_norms:
+        avg_grad_norm = np.mean(valid_norms)
+        max_grad_norm = np.max(valid_norms)
+        print(
+            f"  Gradient norms - avg: {avg_grad_norm:.4f}, max: {max_grad_norm:.4f}, nan_count: {len(grad_norms) - len(valid_norms)}"
+        )
+
+    return epoch_loss, current_step, grad_norms
 
 
 @torch.no_grad()
@@ -841,6 +899,9 @@ def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True
     model.eval()
     running_loss = 0.0
     n_samples = 0
+    # Track SI-SNR metrics across all batches for epoch-level reporting
+    all_coi_sisnr: list[float] = []
+    all_bg_sisnr: list[float] = []
 
     use_amp = bool(use_amp) and (str(device).startswith("cuda"))
     autocast_ctx = (
@@ -858,17 +919,27 @@ def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True
 
         with autocast_ctx:
             estimates = model(mixtures.unsqueeze(1))
-            loss = criterion(estimates, sources)
+            # Cast to FP32 for loss computation to ensure numerical accuracy
+            loss = criterion(estimates.float(), sources.float())
 
         batch_size = mixtures.size(0)
         running_loss += float(loss.detach().cpu().item()) * batch_size
         n_samples += batch_size
-        # Diagnostic: compute per-source SI-SNR (dB) for validation
+
+        # Compute SI-SNR metrics in FP32 for accuracy
         try:
-            coi_sisnr_batch = sisnr(estimates[:, 0, :], sources[:, 0, :], eps=LOSS_EPS)
-            bg_sisnr_batch = sisnr(estimates[:, 1, :], sources[:, 1, :], eps=LOSS_EPS)
+            estimates_fp32 = estimates.float()
+            sources_fp32 = sources.float()
+            coi_sisnr_batch = sisnr(
+                estimates_fp32[:, 0, :], sources_fp32[:, 0, :], eps=LOSS_EPS
+            )
+            bg_sisnr_batch = sisnr(
+                estimates_fp32[:, 1, :], sources_fp32[:, 1, :], eps=LOSS_EPS
+            )
             coi_sisnr_mean = float(coi_sisnr_batch.detach().cpu().mean().item())
             bg_sisnr_mean = float(bg_sisnr_batch.detach().cpu().mean().item())
+            all_coi_sisnr.append(coi_sisnr_mean)
+            all_bg_sisnr.append(bg_sisnr_mean)
         except Exception:
             coi_sisnr_mean = float("nan")
             bg_sisnr_mean = float("nan")
@@ -887,6 +958,13 @@ def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True
         torch.cuda.empty_cache()
 
     epoch_loss = running_loss / n_samples
+
+    # Report epoch-level SI-SNR metrics
+    if all_coi_sisnr and all_bg_sisnr:
+        avg_coi_sisnr = np.mean(all_coi_sisnr)
+        avg_bg_sisnr = np.mean(all_bg_sisnr)
+        print(f"  Val SI-SNR - COI: {avg_coi_sisnr:.2f} dB, BG: {avg_bg_sisnr:.2f} dB")
+
     return epoch_loss
 
 
@@ -943,8 +1021,12 @@ def create_dataloaders(config: Config):
     return train_loader
 
 
-def create_val_dataloader(config: Config):
-    """Create validation dataloader on demand to avoid holding val dataset in memory."""
+def create_val_dataloader(config: Config) -> tuple[DataLoader, "AudioDataset"]:
+    """Create validation dataloader on demand to avoid holding val dataset in memory.
+
+    Returns:
+        tuple: (val_loader, val_dataset) - Both must be deleted by caller to free memory.
+    """
     usecols = ["filename", "label", "split"]
     if getattr(config.data, "n_coi_classes", 1) > 1:
         usecols.append("coi_class")
@@ -987,7 +1069,8 @@ def create_val_dataloader(config: Config):
         val_dataset, shuffle=False, drop_last=False, **loader_kwargs
     )
     gc.collect()
-    return val_loader
+    # Return both loader and dataset so caller can explicitly delete both
+    return val_loader, val_dataset
 
 
 def get_model_args(model):
@@ -999,7 +1082,7 @@ def get_model_args(model):
     }
 
 
-def create_model(config: Config, compile_model: bool = False):
+def create_model(config: Config):
     """Create and wrap model with aircraft separation head."""
     if config.model.type == "improved":
         base_model = SuDORMRF(
@@ -1099,20 +1182,35 @@ def train(config: Config, timestamp: str | None = None):
     criterion = COIWeightedLoss(
         class_weight=getattr(config.training, "class_weight", 1.5)
     )
-    optimizer = optim.AdamW(model.parameters(), lr=float(config.training.lr))
+    base_lr = float(config.training.lr)
+    optimizer = optim.AdamW(model.parameters(), lr=base_lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=5
     )
 
+    # Get warmup and validation frequency settings
+    warmup_steps = int(getattr(config.training, "warmup_steps", 500))
+    validate_every_n = int(getattr(config.training, "validate_every_n_epochs", 1))
+
+    if warmup_steps > 0:
+        print(f"Learning rate warmup: {warmup_steps} steps")
+    if validate_every_n > 1:
+        print(f"Validation frequency: every {validate_every_n} epochs")
+
     # Training loop
     best_val_loss = float("inf")
     epochs_without_improvement = 0
-    history: dict[str, list[float]] = {"train_loss": [], "val_loss": []}
+    global_step = 0  # Track steps across epochs for warmup
+    history: dict[str, list[float]] = {
+        "train_loss": [],
+        "val_loss": [],
+        "grad_norms": [],
+    }
 
     for epoch in range(1, config.training.num_epochs + 1):
         print(f"\nEpoch {epoch}/{config.training.num_epochs}")
 
-        train_loss = train_epoch(
+        train_loss, global_step, epoch_grad_norms = train_epoch(
             model,
             train_loader,
             optimizer,
@@ -1121,55 +1219,77 @@ def train(config: Config, timestamp: str | None = None):
             config.training.clip_grad_norm,
             grad_accum_steps=getattr(config.training, "grad_accum_steps", 1),
             use_amp=getattr(config.training, "use_amp", True),
+            warmup_steps=warmup_steps,
+            global_step=global_step,
+            base_lr=base_lr,
         )
         history["train_loss"].append(train_loss)
-
-        # Create validation dataloader on demand to save memory
-        val_loader = create_val_dataloader(config)
-        val_loss = validate_epoch(
-            model,
-            val_loader,
-            criterion,
-            config.training.device,
-            use_amp=getattr(config.training, "use_amp", True),
+        # Store mean grad norm per epoch for history
+        valid_norms = [n for n in epoch_grad_norms if not np.isnan(n)]
+        history["grad_norms"].append(
+            np.mean(valid_norms) if valid_norms else float("nan")
         )
-        # Free validation loader/dataset memory immediately
-        try:
-            del val_loader
-        except Exception:
-            pass
-        gc.collect()
-        if config.training.device != "cpu":
-            torch.cuda.empty_cache()
-        history["val_loss"].append(val_loss)
 
-        print(f"Train: {train_loss:.4f}, Val: {val_loss:.4f}")
+        # Validation: run every N epochs, or always on first/last epoch
+        run_validation = (
+            epoch % validate_every_n == 0
+            or epoch == 1
+            or epoch == config.training.num_epochs
+        )
 
-        scheduler.step(val_loss)
+        if run_validation:
+            # Create validation dataloader on demand to save memory
+            val_loader, val_dataset = create_val_dataloader(config)
+            val_loss = validate_epoch(
+                model,
+                val_loader,
+                criterion,
+                config.training.device,
+                use_amp=getattr(config.training, "use_amp", True),
+            )
+            # Free validation loader AND dataset memory immediately
+            del val_loader, val_dataset
+            gc.collect()
+            if config.training.device != "cpu":
+                torch.cuda.empty_cache()
+            history["val_loss"].append(val_loss)
 
-        # Save checkpoint
-        is_best = val_loss < best_val_loss
-        if is_best:
-            best_val_loss = val_loss
-            epochs_without_improvement = 0
+            print(f"Train: {train_loss:.4f}, Val: {val_loss:.4f}")
 
-            checkpoint = {
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "val_loss": val_loss,
-                "model_args": get_model_args(model),
-                "config": config.to_dict(),
-                "history": history,
-            }
-            torch.save(checkpoint, checkpoint_dir / "best_model.pt")
-            print(f"✓ Saved best model (val_loss: {val_loss:.4f})")
+            scheduler.step(val_loss)
         else:
-            epochs_without_improvement += 1
+            # No validation this epoch - use last known val_loss for logging
+            val_loss = history["val_loss"][-1] if history["val_loss"] else float("inf")
+            history["val_loss"].append(
+                val_loss
+            )  # Repeat last value for history alignment
+            print(f"Train: {train_loss:.4f} (skipping validation)")
 
-        if epochs_without_improvement >= config.training.patience:
-            print(f"\nEarly stopping after {epoch} epochs")
-            break
+        # Save checkpoint only when validation was run
+        if run_validation:
+            is_best = val_loss < best_val_loss
+            if is_best:
+                best_val_loss = val_loss
+                epochs_without_improvement = 0
+
+                checkpoint = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "val_loss": val_loss,
+                    "model_args": get_model_args(model),
+                    "config": config.to_dict(),
+                    "history": history,
+                }
+                torch.save(checkpoint, checkpoint_dir / "best_model.pt")
+                print(f"✓ Saved best model (val_loss: {val_loss:.4f})")
+            else:
+                epochs_without_improvement += 1
+
+            if epochs_without_improvement >= config.training.patience:
+                print(f"\nEarly stopping after {epoch} epochs")
+                break
 
     # Save training history
     with open(checkpoint_dir / "training_history.json", "w") as f:

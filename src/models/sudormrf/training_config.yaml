@@ -39,3 +39,9 @@ training:
   class_weight: 1.5
   # Optional auxiliary L1 waveform loss weight (0.0 disables).
   aux_waveform_weight: 0.001
+  # Learning rate warmup: ramp LR from 0 to lr over this many steps (prevents early NaN)
+  warmup_steps: 20
+  # Validation frequency: run validation every N epochs (1 = every epoch)
+  validate_every_n_epochs: 1
+  # Random seed for reproducibility
+  seed: 42

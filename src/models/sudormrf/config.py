@@ -55,6 +55,13 @@ class TrainingConfig:
     aux_waveform_weight: float = 0.0
     # Whether to enable DataLoader pin_memory. Set True when training on GPU
     pin_memory: bool = False
+    # Learning rate warmup: number of steps to linearly ramp up LR from 0 to lr
+    # Helps prevent non-finite values in early training. Set 0 to disable.
+    warmup_steps: int = 500
+    # Validation frequency: run validation every N epochs (1 = every epoch)
+    validate_every_n_epochs: int = 1
+    # Random seed for reproducibility
+    seed: int = 42
 
 
 @dataclass
