@@ -72,28 +72,57 @@ def add_audio_file_paths(df: pd.DataFrame, audio_base_path: str) -> pd.DataFrame
     """
     from pathlib import Path
 
-    def construct_path(row):
+    # Create a copy to avoid modifying the original
+    df = df.copy()
+    
+    # Build paths using a vectorized approach with groupby
+    def build_path(row):
         dataset = row["dataset"]
         split = row["split"]
         filename = row["filename"]
-
+        
         if dataset not in DATASET_AUDIO_PATHS:
-            # Fallback: just use base path + filename
             return str(Path(audio_base_path) / filename)
-
+        
         dataset_config = DATASET_AUDIO_PATHS[dataset]
         base = dataset_config["base"]
         split_dir = dataset_config.get(split, "")
-
-        # Construct the full path
+        
         if split_dir:
-            full_path = Path(audio_base_path) / base / split_dir / filename
+            return str(Path(audio_base_path) / base / split_dir / filename)
         else:
-            full_path = Path(audio_base_path) / base / filename
-
-        return str(full_path)
-
-    df["filename"] = df.apply(construct_path, axis=1)
+            return str(Path(audio_base_path) / base / filename)
+    
+    # Use vectorized operations by creating full paths with string formatting
+    # This is more efficient than apply(axis=1) for large DataFrames
+    for dataset in df["dataset"].unique():
+        dataset_mask = df["dataset"] == dataset
+        
+        if dataset not in DATASET_AUDIO_PATHS:
+            # Fallback: just use base path + filename
+            base_path_obj = Path(audio_base_path)
+            df.loc[dataset_mask, "filename"] = df.loc[dataset_mask, "filename"].apply(
+                lambda fname: str(base_path_obj / fname)
+            )
+        else:
+            dataset_config = DATASET_AUDIO_PATHS[dataset]
+            base = dataset_config["base"]
+            
+            # Process each split within this dataset
+            for split in df.loc[dataset_mask, "split"].unique():
+                split_mask = dataset_mask & (df["split"] == split)
+                split_dir = dataset_config.get(split, "")
+                
+                if split_dir:
+                    base_path_obj = Path(audio_base_path) / base / split_dir
+                else:
+                    base_path_obj = Path(audio_base_path) / base
+                
+                # Use vectorized apply on filtered series
+                df.loc[split_mask, "filename"] = df.loc[split_mask, "filename"].apply(
+                    lambda fname: str(base_path_obj / fname)
+                )
+    
     return df
 
 

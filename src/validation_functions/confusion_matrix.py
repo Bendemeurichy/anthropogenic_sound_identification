@@ -303,10 +303,10 @@ class ValidationPipeline:
         y_true, y_pred, y_scores = [], [], []
         desc = "Clean (sep+cls)" if use_separation else "Clean (cls only)"
 
-        # Process COI samples (label=1)
-        for _, row in tqdm(df_coi.iterrows(), total=len(df_coi), desc=f"{desc} - COI"):
+        # Process COI samples (label=1) - use itertuples for better performance
+        for row in tqdm(df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI"):
             try:
-                waveform = self._load_audio(row["filename"])
+                waveform = self._load_audio(row.filename)
                 if use_separation:
                     separated = self._separate(waveform)
                     # If multiple sources returned, pick the source with highest
@@ -328,12 +328,12 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
             except Exception as e:
-                print(f"Error: {row['filename']}: {e}")
+                print(f"Error: {row.filename}: {e}")
 
-        # Process background samples (label=0)
-        for _, row in tqdm(df_bg.iterrows(), total=len(df_bg), desc=f"{desc} - BG"):
+        # Process background samples (label=0) - use itertuples for better performance
+        for row in tqdm(df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG"):
             try:
-                waveform = self._load_audio(row["filename"])
+                waveform = self._load_audio(row.filename)
                 if use_separation:
                     separated = self._separate(waveform)
                     if separated.dim() == 1:
@@ -353,7 +353,7 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
             except Exception as e:
-                print(f"Error: {row['filename']}: {e}")
+                print(f"Error: {row.filename}: {e}")
 
         metrics = ClassificationMetrics()
         metrics.compute(np.array(y_true), np.array(y_pred), np.array(y_scores))
@@ -371,12 +371,12 @@ class ValidationPipeline:
         desc = "Mixtures (sep+cls)" if use_separation else "Mixtures (cls only)"
         bg_files = df_bg["filename"].tolist()
 
-        # Process COI + background mixtures (label=1)
-        for _, row in tqdm(
-            df_coi.iterrows(), total=len(df_coi), desc=f"{desc} - COI+BG"
+        # Process COI + background mixtures (label=1) - use itertuples for better performance
+        for row in tqdm(
+            df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI+BG"
         ):
             try:
-                coi = self._normalize(self._load_audio(row["filename"]))
+                coi = self._normalize(self._load_audio(row.filename))
                 bg = self._normalize(
                     self._load_audio(bg_files[np.random.randint(len(bg_files))])
                 )
@@ -403,12 +403,12 @@ class ValidationPipeline:
             except Exception as e:
                 print(f"Error: {e}")
 
-        # Process background-only samples (label=0)
-        for _, row in tqdm(
-            df_bg.iterrows(), total=len(df_bg), desc=f"{desc} - BG only"
+        # Process background-only samples (label=0) - use itertuples for better performance
+        for row in tqdm(
+            df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG only"
         ):
             try:
-                waveform = self._load_audio(row["filename"])
+                waveform = self._load_audio(row.filename)
                 if use_separation:
                     separated = self._separate(waveform)
                     if separated.dim() == 1:
