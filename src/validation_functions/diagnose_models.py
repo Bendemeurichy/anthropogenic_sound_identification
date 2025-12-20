@@ -54,7 +54,11 @@ def diagnostic_separation(
     model.eval()
 
     with torch.inference_mode():
-        inp = mix_wav.unsqueeze(0).unsqueeze(0).to(device)
+        # Normalize like inference for comparable activations
+        mix_mean = mix_wav.mean()
+        mix_std = mix_wav.std() + 1e-8
+        inp = ((mix_wav - mix_mean) / mix_std).unsqueeze(0).unsqueeze(0).to(device)
+
         # forward until masks
         padded = model.pad_to_appropriate_length(inp)
         enc = model.encoder(padded)
@@ -66,21 +70,42 @@ def diagnostic_separation(
         B = mask_pre.shape[0]
         n_src = model.num_sources
         mask_pre_view = mask_pre.view(B, n_src, model.enc_num_basis, -1)
+
+        # Model nonlinearity (typically ReLU)
         mask_post = model.mask_nl_class(mask_pre_view)
+
+        # Analysis-only normalizations for interpretability
+        mask_softmax = torch.softmax(mask_pre_view, dim=1)
+        mask_sum = mask_post.sum(dim=1, keepdim=True) + 1e-8
+        mask_norm = mask_post / mask_sum
 
         # Save mask stats and arrays
         for si in range(n_src):
+            # Raw (post model nonlinearity)
             arr = mask_post[0, si].cpu().numpy()
             np.save(out_dir / f"mask_src{si}.npy", arr)
+            # Softmax across sources (complementary)
+            arr_sm = mask_softmax[0, si].cpu().numpy()
+            np.save(out_dir / f"mask_src{si}_softmax.npy", arr_sm)
+            # Sum-normalized ReLU masks
+            arr_norm = mask_norm[0, si].cpu().numpy()
+            np.save(out_dir / f"mask_src{si}_norm.npy", arr_norm)
             print(
-                f"mask_src{si}: min={arr.min():.4f}, max={arr.max():.4f}, mean={arr.mean():.4f}"
+                f"mask_src{si}: raw[min={arr.min():.4f}, max={arr.max():.4f}, mean={arr.mean():.4f}]  "
+                f"softmax[min={arr_sm.min():.4f}, max={arr_sm.max():.4f}, mean={arr_sm.mean():.4f}]  "
+                f"norm[min={arr_norm.min():.4f}, max={arr_norm.max():.4f}, mean={arr_norm.mean():.4f}]"
             )
 
-        # Sum across sources (should indicate complementarity)
+        # Sum across sources
         sum_masks = mask_post.sum(dim=1)[0].cpu().numpy()
         np.save(out_dir / "masks_sum.npy", sum_masks)
         print(
-            f"masks_sum: min={sum_masks.min():.4f}, max={sum_masks.max():.4f}, mean={sum_masks.mean():.4f}"
+            f"masks_sum (ReLU): min={sum_masks.min():.4f}, max={sum_masks.max():.4f}, mean={sum_masks.mean():.4f}"
+        )
+        sum_sm = mask_softmax.sum(dim=1)[0].cpu().numpy()
+        np.save(out_dir / "masks_sum_softmax.npy", sum_sm)
+        print(
+            f"masks_sum (softmax): min={sum_sm.min():.4f}, max={sum_sm.max():.4f}, mean={sum_sm.mean():.4f}"
         )
 
         # Get separated outputs via pipeline helper
@@ -128,7 +153,12 @@ def diagnostic_separation(
 
     return {
         "masks": [str(out_dir / f"mask_src{i}.npy") for i in range(n_src)],
+        "masks_softmax": [
+            str(out_dir / f"mask_src{i}_softmax.npy") for i in range(n_src)
+        ],
+        "masks_norm": [str(out_dir / f"mask_src{i}_norm.npy") for i in range(n_src)],
         "masks_sum": str(out_dir / "masks_sum.npy"),
+        "masks_sum_softmax": str(out_dir / "masks_sum_softmax.npy"),
         "estimated_sources": [
             str(out_dir / f"diag_est_src{i}.wav") for i in range(separated.shape[0])
         ],
@@ -145,7 +175,7 @@ def main():
         / "models"
         / "sudormrf"
         / "checkpoints"
-        / "20251215_234806"
+        / "20251217_120142"
         / "best_model.pt"
     )
 
@@ -171,3 +201,37 @@ def main():
 
 if __name__ == "__main__":
     main()
+    import numpy as np
+
+    img_array = np.load("./separation_diagnostic/mask_src0.npy")
+
+    from matplotlib import pyplot as plt
+
+    # Improved visualization
+    plt.figure(figsize=(10, 3))
+    plt.title("Raw mask (post-nonlinearity)")
+    plt.imshow(img_array, cmap="gray", aspect="auto")
+    plt.colorbar()
+    plt.tight_layout()
+
+    try:
+        img_soft = np.load("./separation_diagnostic/mask_src0_softmax.npy")
+        plt.figure(figsize=(10, 3))
+        plt.title("Softmax across sources")
+        plt.imshow(img_soft, cmap="gray", aspect="auto", vmin=0.0, vmax=1.0)
+        plt.colorbar()
+        plt.tight_layout()
+    except Exception:
+        pass
+
+    try:
+        img_norm = np.load("./separation_diagnostic/mask_src0_norm.npy")
+        plt.figure(figsize=(10, 3))
+        plt.title("Sum-normalized (ReLU masks)")
+        plt.imshow(img_norm, cmap="gray", aspect="auto", vmin=0.0, vmax=1.0)
+        plt.colorbar()
+        plt.tight_layout()
+    except Exception:
+        pass
+
+    plt.show()

@@ -32,6 +32,9 @@ from contextlib import nullcontext
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
+from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
+    GroupCommSudoRmRf,
+)
 from .seperation_head import wrap_model_for_coi
 from .multi_class_seperation import wrap_model_for_multiclass
 from .config import Config
@@ -1009,8 +1012,12 @@ def create_dataloaders(config: Config):
         "pin_memory": pin_memory,
     }
     if num_workers > 0:
-        loader_kwargs["persistent_workers"] = False
-        loader_kwargs["prefetch_factor"] = 1
+        loader_kwargs["persistent_workers"] = bool(
+            getattr(config.training, "persistent_workers", True)
+        )
+        loader_kwargs["prefetch_factor"] = int(
+            getattr(config.training, "prefetch_factor", 2)
+        )
 
     # Free the dataframe before creating the loader
 
@@ -1095,9 +1102,6 @@ def create_model(config: Config):
             num_sources=2,
         )
     else:
-        from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
-            GroupCommSudoRmRf,
-        )
 
         base_model = GroupCommSudoRmRf(
             out_channels=config.model.out_channels,

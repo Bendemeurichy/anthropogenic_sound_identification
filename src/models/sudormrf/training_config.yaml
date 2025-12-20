@@ -13,7 +13,7 @@ data:
 
 # Model settings (using base model defaults)
 model:
-  type: "improved" # 'improved' or 'groupcomm'
+  type: "groupcomm" # 'improved' or 'groupcomm'
   out_channels: 128 # base model default
   in_channels: 512 # base model default
   num_blocks: 18 # base model default
@@ -23,25 +23,29 @@ model:
 
 # Training settings
 training:
-  batch_size: 4
+  # === PERFORMANCE OPTIMIZATIONS ===
+  batch_size: 16 # Increased from 4 for better GPU utilization
   grad_accum_steps: 1
   use_amp: true
-  num_epochs: 200
+  num_epochs: 300 # Increased from 200 for proper convergence
   lr: 1e-4
-  num_workers: 0 # Set to 0 to save ~10-15GB RAM (workers duplicate dataset in memory)
-  pin_memory: true
+  num_workers: 4 # Parallel data loading (adjust based on CPU cores, 0 saves RAM)
+  pin_memory: true # Faster CPU->GPU transfer
+  persistent_workers: true # Keep workers alive between epochs
+  prefetch_factor: 2 # Preload 2 batches per worker
   clip_grad_norm: 5.0
-  patience: 35 # early stopping patience
+  patience: 45 # early stopping patience
   checkpoint_dir: "checkpoints"
   device: "cuda:0" # pin to first GPU
-  compile_model: false
+  compile_model: true # Enable torch.compile for 2x speedup
+  compile_backend: "inductor" # or "eager" if crashes
   # Emphasize COI (class-of-interest) in loss. Higher -> more weight to COI.
-  class_weight: 1.5
+  class_weight: 1.3 # Reduced from 1.5 for better balance
   # Optional auxiliary L1 waveform loss weight (0.0 disables).
   aux_waveform_weight: 0.001
   # Learning rate warmup: ramp LR from 0 to lr over this many steps (prevents early NaN)
-  warmup_steps: 20
+  warmup_steps: 500 # Increased from 20 for stabler training
   # Validation frequency: run validation every N epochs (1 = every epoch)
-  validate_every_n_epochs: 1
+  validate_every_n_epochs: 2 # Validate less frequently to save time
   # Random seed for reproducibility
   seed: 42

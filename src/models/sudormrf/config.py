@@ -35,18 +35,18 @@ class ModelConfig:
 
 @dataclass
 class TrainingConfig:
-    batch_size: int = 4
+    batch_size: int = 16  # Increased from 4 for better GPU utilization
     grad_accum_steps: int = 1
     use_amp: bool = True
     num_epochs: int = 50
     lr: float = 0.001
-    num_workers: int = 0
+    num_workers: int = 4  # Parallel data loading (adjust based on CPU cores)
     clip_grad_norm: float = 5.0
     patience: int = 15
     checkpoint_dir: str = "checkpoints"
     device: str = "cuda"
-    compile_model: bool = False  # torch.compile can be slow on WSL with inductor
-    compile_backend: str = "inductor"  # Options: 'inductor', 'eager', 'aot_eager'
+    compile_model: bool = True 
+    compile_backend: str = "inductor"
     # Class-weight for COI-focused loss (used by COILoss). Higher -> more
     # emphasis on COI reconstruction. Default 1.5 matches prior code.
     class_weight: float = 1.5
@@ -54,7 +54,11 @@ class TrainingConfig:
     # Set to 0.0 to disable.
     aux_waveform_weight: float = 0.0
     # Whether to enable DataLoader pin_memory. Set True when training on GPU
-    pin_memory: bool = False
+    pin_memory: bool = True  # Enable for faster host->device transfer
+    # DataLoader prefetch factor - how many batches to preload per worker
+    prefetch_factor: int = 2
+    # Keep worker processes alive between epochs
+    persistent_workers: bool = True
     # Learning rate warmup: number of steps to linearly ramp up LR from 0 to lr
     # Helps prevent non-finite values in early training. Set 0 to disable.
     warmup_steps: int = 500
