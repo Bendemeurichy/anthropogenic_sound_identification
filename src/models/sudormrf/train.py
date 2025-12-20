@@ -76,7 +76,10 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     target_energy = target_zm.pow(2).sum(dim=-1)
     est_energy = est_zm.pow(2).sum(dim=-1)
     min_energy_threshold = 1e-6
-    silent_target_mask = target_energy < min_energy_threshold
+
+    # Check if target is INTENTIONALLY zero (background-only samples)
+    # These have essentially zero energy even before zero-meaning
+    target_is_zero = target.pow(2).sum(dim=-1) < 1e-10  # Much stricter threshold
     silent_est_mask = est_energy < min_energy_threshold
 
     # projection of est onto target
@@ -93,25 +96,28 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     sisnr_lin = true_energy / noise_energy
     sisnr_db = 10.0 * torch.log10(sisnr_lin + eps)
 
-    # Handle silent targets:
-    # - If target is silent AND estimate is silent: REWARD (correct behavior) -> +20 dB
-    # - If target is silent BUT estimate has energy: PENALIZE based on estimate energy
+    # Handle INTENTIONALLY zero targets (background-only samples):
+    # - If target is zero AND estimate is silent: REWARD based on how quiet
+    # - If target is zero BUT estimate has energy: PENALIZE based on estimate energy
     # This trains the model to output silence when there's no COI present
-    both_silent = silent_target_mask & silent_est_mask
-    target_silent_est_loud = silent_target_mask & ~silent_est_mask
+    both_silent = target_is_zero & silent_est_mask
+    target_zero_est_loud = target_is_zero & ~silent_est_mask
 
-    # Reward for correctly predicting silence (bounded positive SI-SNR)
-    silence_reward = 10.0 * torch.tanh(1.0 - est_energy)
+    # Reward for correctly predicting silence when target is zero - GRADIENT-BASED
+    # Quieter estimates get higher rewards (up to +20 dB)
+    # This encourages the model to progressively reduce output energy
+    silence_reward = -10.0 * torch.log10(est_energy / min_energy_threshold + eps)
+    silence_reward = torch.clamp(silence_reward, min=0.0, max=20.0)
 
-    # Penalty proportional to estimate energy when target is silent
+    # Penalty proportional to estimate energy when target is zero
     # -10 * log10(est_energy) gives large negative values for loud estimates
     # Clamp to [-30, 0] to avoid extreme gradients
     silence_penalty = -10.0 * torch.log10(est_energy + eps)
     silence_penalty = torch.clamp(silence_penalty, min=-30.0, max=0.0)
 
-    # Apply: reward when both silent, penalize when only target is silent
+    # Apply: reward when both silent, penalize when only target is zero
     sisnr_db = torch.where(both_silent, silence_reward, sisnr_db)
-    sisnr_db = torch.where(target_silent_est_loud, silence_penalty, sisnr_db)
+    sisnr_db = torch.where(target_zero_est_loud, silence_penalty, sisnr_db)
 
     return sisnr_db
 
@@ -740,11 +746,13 @@ def train_epoch(
         new_bg_scaled = new_bg * bg_scaling
 
         # Create mixture and normalize it (model expects unit variance input)
+        # NOTE: Only normalize the mixture INPUT, NOT the clean target sources!
+        # The model learns to estimate clean sources from normalized mixture.
         mixture_raw = total_coi + new_bg_scaled
         clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
 
         mixture = normalize_tensor_wav(mixture_raw)
-        clean_wavs = normalize_tensor_wav(clean_wavs)
+        # Keep clean_wavs unnormalized for loss computation
 
         with autocast_ctx:
             # Model expects (B, 1, T) input, outputs (B, n_src, T)
@@ -950,13 +958,14 @@ def validate_epoch(
         bg_scaling = torch.pow(10.0, -snr_db / 20.0)
         new_bg_scaled = new_bg * bg_scaling
 
-        # Create mixture and normalize all waveforms consistently (same as training)
+        # Create mixture and normalize ONLY mixture (same as training)
+        # Keep clean target sources unnormalized
         total_coi = torch.stack(new_cois, dim=0).sum(dim=0)
         mixture_raw = total_coi + new_bg_scaled
         clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
 
         mixture = normalize_tensor_wav(mixture_raw)
-        clean_wavs = normalize_tensor_wav(clean_wavs)
+        # Keep clean_wavs unnormalized for loss computation
 
         with autocast_ctx:
             estimates = model(mixture.unsqueeze(1))
