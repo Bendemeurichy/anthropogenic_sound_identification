@@ -690,13 +690,6 @@ def train_epoch(
     step_idx = 0
     current_step = global_step  # Track global step for warmup
 
-    # Define normalization function once outside the loop for efficiency
-    def normalize_tensor_wav(wav: torch.Tensor) -> torch.Tensor:
-        """Normalize waveforms to zero mean and unit variance per sample."""
-        mean = wav.mean(dim=-1, keepdim=True)
-        std = wav.std(dim=-1, keepdim=True) + 1e-8
-        return (wav - mean) / std
-
     for step_idx, (mixtures, sources) in enumerate(progress_bar, start=1):
         current_step += 1
 
@@ -743,8 +736,16 @@ def train_epoch(
         mixture_raw = total_coi + new_bg_scaled
         clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
 
-        mixture = normalize_tensor_wav(mixture_raw)
-        clean_wavs = normalize_tensor_wav(clean_wavs)
+        # Normalize mixture to zero mean and unit variance
+        mix_mean = mixture_raw.mean(dim=-1, keepdim=True)
+        mix_std = mixture_raw.std(dim=-1, keepdim=True) + 1e-8
+        mixture = (mixture_raw - mix_mean) / mix_std
+
+        # Normalize targets using MIXTURE statistics to preserve relative levels
+        # and additivity (mixture = sum(sources))
+        # We subtract each source's own mean, but divide by the mixture's std
+        source_means = clean_wavs.mean(dim=-1, keepdim=True)
+        clean_wavs = (clean_wavs - source_means) / mix_std.unsqueeze(1)
 
         with autocast_ctx:
             # Model expects (B, 1, T) input, outputs (B, n_src, T)
@@ -917,13 +918,6 @@ def validate_epoch(
         else nullcontext()
     )
 
-    # Define normalization function (same as training)
-    def normalize_tensor_wav(wav: torch.Tensor) -> torch.Tensor:
-        """Normalize waveforms to zero mean and unit variance per sample."""
-        mean = wav.mean(dim=-1, keepdim=True)
-        std = wav.std(dim=-1, keepdim=True) + 1e-8
-        return (wav - mean) / std
-
     progress_bar = tqdm(
         dataloader, desc="Validation", leave=False, ascii=True, ncols=100
     )
@@ -955,8 +949,16 @@ def validate_epoch(
         mixture_raw = total_coi + new_bg_scaled
         clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
 
-        mixture = normalize_tensor_wav(mixture_raw)
-        clean_wavs = normalize_tensor_wav(clean_wavs)
+        # Normalize mixture to zero mean and unit variance
+        mix_mean = mixture_raw.mean(dim=-1, keepdim=True)
+        mix_std = mixture_raw.std(dim=-1, keepdim=True) + 1e-8
+        mixture = (mixture_raw - mix_mean) / mix_std
+
+        # Normalize targets using MIXTURE statistics to preserve relative levels
+        # and additivity (mixture = sum(sources))
+        # We subtract each source's own mean, but divide by the mixture's std
+        source_means = clean_wavs.mean(dim=-1, keepdim=True)
+        clean_wavs = (clean_wavs - source_means) / mix_std.unsqueeze(1)
 
         with autocast_ctx:
             estimates = model(mixture.unsqueeze(1))
