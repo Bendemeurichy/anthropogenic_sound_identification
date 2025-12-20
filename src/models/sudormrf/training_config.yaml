@@ -24,15 +24,15 @@ model:
 # Training settings
 training:
   # === PERFORMANCE OPTIMIZATIONS ===
-  batch_size: 16 # Increased from 4 for better GPU utilization
+  batch_size: 4 # Increased from 4 for better GPU utilization
   grad_accum_steps: 1
   use_amp: true
   num_epochs: 300 # Increased from 200 for proper convergence
   lr: 1e-4
-  num_workers: 4 # Parallel data loading (adjust based on CPU cores, 0 saves RAM)
+  num_workers: 2 # Parallel data loading (adjust based on CPU cores, 0 saves RAM)
   pin_memory: true # Faster CPU->GPU transfer
   persistent_workers: true # Keep workers alive between epochs
-  prefetch_factor: 2 # Preload 2 batches per worker
+  prefetch_factor: 1 # Preload 2 batches per worker
   clip_grad_norm: 5.0
   patience: 45 # early stopping patience
   checkpoint_dir: "checkpoints"
@@ -46,6 +46,6 @@ training:
   # Learning rate warmup: ramp LR from 0 to lr over this many steps (prevents early NaN)
   warmup_steps: 500 # Increased from 20 for stabler training
   # Validation frequency: run validation every N epochs (1 = every epoch)
-  validate_every_n_epochs: 2
+  validate_every_n_epochs: 1
   # Random seed for reproducibility
   seed: 42
