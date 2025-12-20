@@ -651,6 +651,19 @@ class AudioDataset(Dataset):
         return mixture, sources_tensor
 
 
+def normalize_tensor_wav(wav: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Normalize a waveform tensor to zero mean and unit variance along the last dimension.
+    Args:
+        wav: Tensor of shape (..., T)
+        eps: Small value to avoid division by zero
+    Returns:
+        Normalized tensor of same shape as input
+    """
+    mean = wav.mean(dim=-1, keepdim=True)
+    std = wav.std(dim=-1, keepdim=True) + eps
+    return (wav - mean) / std
+
 def train_epoch(
     model,
     dataloader,
