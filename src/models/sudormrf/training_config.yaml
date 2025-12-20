@@ -13,7 +13,7 @@ data:
 
 # Model settings (using base model defaults)
 model:
-  type: "groupcomm" # 'improved' or 'groupcomm'
+  type: "improved" # 'improved' or 'groupcomm'
   out_channels: 128 # base model default
   in_channels: 512 # base model default
   num_blocks: 18 # base model default

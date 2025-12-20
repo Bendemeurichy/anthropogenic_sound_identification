@@ -116,8 +116,8 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
 class COIWeightedLoss(torch.nn.Module):
     """Fixed-order, class-of-interest weighted SI-SNR loss.
 
-    This compares `est[:,0]` to `target[:,0]` (COI) and `est[:,1]` to
-    `target[:,1]` (background) and returns a negative weighted SI-SNR.
+    This compares `est[:,i]` to `target[:,i]` for all COI classes and
+    the background source, returning a negative weighted SI-SNR.
 
     For background-only samples (where COI target is silent), the SI-SNR
     function returns a penalty based on estimate energy, training the model
@@ -136,13 +136,27 @@ class COIWeightedLoss(torch.nn.Module):
         if est_sources.ndim != 3 or target_sources.ndim != 3:
             raise ValueError("est_sources and target_sources must be (B, n_src, T)")
 
-        # Compute per-example SI-SNR (dB) for each source using stateless sisnr
-        # sisnr() handles silent targets by penalizing non-zero estimates
-        coi_sisnr = sisnr(est_sources[:, 0, :], target_sources[:, 0, :], eps=self.eps)
-        bg_sisnr = sisnr(est_sources[:, 1, :], target_sources[:, 1, :], eps=self.eps)
+        B, n_src, T = est_sources.shape
+        n_coi = n_src - 1
+        bg_idx = n_src - 1
+
+        # Compute per-example SI-SNR (dB) for each COI source
+        coi_sisnrs = []
+        for i in range(n_coi):
+            coi_sisnrs.append(
+                sisnr(est_sources[:, i, :], target_sources[:, i, :], eps=self.eps)
+            )
+
+        # Average SI-SNR across all COI heads
+        coi_sisnr_mean = torch.stack(coi_sisnrs, dim=0).mean(dim=0)
+
+        # Background SI-SNR (last head)
+        bg_sisnr = sisnr(
+            est_sources[:, bg_idx, :], target_sources[:, bg_idx, :], eps=self.eps
+        )
 
         # Always use weighted average (COI term will push toward silence when target is silent)
-        weighted = (self.class_weight * coi_sisnr + bg_sisnr) / (
+        weighted = (self.class_weight * coi_sisnr_mean + bg_sisnr) / (
             self.class_weight + 1.0
         )
         loss = -weighted.mean()
@@ -345,7 +359,19 @@ class AudioDataset(Dataset):
         # so that each epoch can iterate over all segments deterministically for
         # validation/test. For training we will instead produce one random-offset
         # mixture per COI file in __getitem__.
-        self.coi_segments: list[tuple[str, int, int]] = []
+        self.coi_segments: list[tuple[str, int, int, int]] = []
+
+        # Create a mapping from filename to class index for multi-class
+        if n_coi_classes > 1:
+            coi_class_col = (
+                split_df["coi_class"]
+                if "coi_class" in split_df.columns
+                else pd.Series(0, index=split_df.index)
+            )
+            self.file_to_class = dict(zip(split_df["filename"], coi_class_col))
+        else:
+            self.file_to_class = {}
+
         for filepath in self.coi_files:
             try:
                 info = torchaudio.info(filepath)
@@ -371,17 +397,21 @@ class AudioDataset(Dataset):
                             0, (num_frames_orig - seg_frames_orig) // stride_frames_orig
                         )
 
+                class_idx = int(self.file_to_class.get(filepath, 0))
                 for s in range(n_segs):
                     offset = s * stride_frames_orig
                     # ensure we don't go past file end; `load_and_preprocess` will pad
-                    self.coi_segments.append((filepath, offset, seg_frames_orig))
+                    self.coi_segments.append(
+                        (filepath, offset, seg_frames_orig, class_idx)
+                    )
             except Exception:
                 # If we cannot obtain file info at init time, do NOT load the
                 # full file here (would spike memory). Instead, defer any
                 # expensive operations to __getitem__ where audio is loaded on
                 # demand. Treat the file as having one segment and let
                 # `load_and_preprocess` determine actual frames when called.
-                self.coi_segments.append((filepath, 0, None))
+                class_idx = int(self.file_to_class.get(filepath, 0))
+                self.coi_segments.append((filepath, 0, None, class_idx))
 
         if n_coi_classes > 1:
             # Store file lists per class instead of DataFrames
@@ -525,136 +555,96 @@ class AudioDataset(Dataset):
         return normalized_waveform
 
     def __getitem__(self, idx):
-        # Select COI class
-        if self.n_coi_classes == 1:
-            # Binary case: for TRAIN create one random-offset mixture per COI file.
-            if self.split == "train":
-                # With augment_multiplier, the effective dataset size is:
-                #   len(coi_files) * augment_multiplier + _extra_background_count
-                # Map idx back to actual COI file index
-                coi_count = len(self.coi_files)
-                effective_coi_count = coi_count * self.augment_multiplier
+        # Select COI class and load audio
+        if self.split == "train":
+            coi_count = len(self.coi_files)
+            effective_coi_count = coi_count * self.augment_multiplier
 
-                if coi_count > 0 and idx < effective_coi_count:
-                    # Map augmented index back to original file
-                    actual_coi_idx = idx % coi_count
-                    augment_variant = (
-                        idx // coi_count
-                    )  # Which augmentation variant (0, 1, 2, ...)
-                    coi_file = self.coi_files[actual_coi_idx]
+            if coi_count > 0 and idx < effective_coi_count:
+                actual_coi_idx = idx % coi_count
+                augment_variant = idx // coi_count
+                coi_file = self.coi_files[actual_coi_idx]
+                class_idx = int(self.file_to_class.get(coi_file, 0))
 
-                    # Determine original file info to compute valid offsets
-                    try:
-                        file_info = torchaudio.info(coi_file)
-                        orig_sr = int(file_info.sample_rate)
-                        total_frames = int(file_info.num_frames)
+                # Load COI segment at random offset
+                try:
+                    file_info = torchaudio.info(coi_file)
+                    orig_sr = int(file_info.sample_rate)
+                    total_frames = int(file_info.num_frames)
+                    segment_frames_orig = max(
+                        1, int(self.segment_samples * orig_sr / self.sample_rate)
+                    )
+                    max_offset = max(0, total_frames - segment_frames_orig)
+                    frame_offset = (
+                        int(np.random.randint(0, max_offset + 1))
+                        if max_offset > 0
+                        else 0
+                    )
+                    coi_audio = self.load_and_preprocess(
+                        coi_file,
+                        frame_offset=frame_offset,
+                        num_frames=segment_frames_orig,
+                    )
+                except Exception:
+                    coi_audio = self.load_and_preprocess(coi_file)
 
-                        # Number of frames to load at original SR corresponding to segment length
-                        segment_frames_orig = int(
-                            self.segment_samples * orig_sr / self.sample_rate
-                        )
-                        segment_frames_orig = max(segment_frames_orig, 1)
+                if self.augment and self.augment_multiplier > 1 and augment_variant > 0:
+                    coi_audio = AudioAugmentations.random_augment(coi_audio, self._rng)
 
-                        max_offset = max(0, total_frames - segment_frames_orig)
-                        frame_offset = (
-                            int(np.random.randint(0, max_offset + 1))
-                            if max_offset > 0
-                            else 0
-                        )
-
-                        # Load the COI segment at the random offset
-                        coi_audio = self.load_and_preprocess(
-                            coi_file,
-                            frame_offset=frame_offset,
-                            num_frames=segment_frames_orig,
-                        )
-                    except Exception:
-                        coi_audio = self.load_and_preprocess(coi_file)
-
-                    # Apply augmentation if this is an augmented variant (variant > 0)
-                    # or randomly for variant 0 when augment is enabled
-                    if (
-                        self.augment
-                        and self.augment_multiplier > 1
-                        and augment_variant > 0
-                    ):
-                        coi_audio = AudioAugmentations.random_augment(
-                            coi_audio, self._rng
-                        )
-
+                # Create sources list
+                if self.n_coi_classes == 1:
                     sources = [coi_audio]
                 else:
-                    # Background-only extra sample: mix `background_mix_n` random
-                    # non-COI files together.
-                    mix_n = max(1, int(self.background_mix_n))
-                    idxs = np.random.choice(len(self.non_coi_files), size=mix_n)
-                    bg_list = []
-                    for i in idxs:
-                        nf = self.non_coi_files[int(i)]
-                        bg_list.append(self.load_and_preprocess(nf))
-
-                    background = torch.stack(bg_list, dim=0).sum(dim=0)
-                    coi_audio = torch.zeros_like(background)
-                    sources = [coi_audio]
+                    sources = [
+                        torch.zeros_like(coi_audio) for _ in range(self.n_coi_classes)
+                    ]
+                    sources[class_idx] = coi_audio
             else:
-                # Use the precomputed segment mapping for validation/test
-                filepath, frame_offset, num_frames = self.coi_segments[idx]
-                coi_audio = self.load_and_preprocess(
-                    filepath, frame_offset=frame_offset, num_frames=num_frames
-                )
-                sources = [coi_audio]
+                # Background-only extra sample
+                mix_n = max(1, int(self.background_mix_n))
+                idxs = np.random.choice(len(self.non_coi_files), size=mix_n)
+                bg_list = [
+                    self.load_and_preprocess(self.non_coi_files[int(i)]) for i in idxs
+                ]
+                background = torch.stack(bg_list, dim=0).sum(dim=0)
+
+                # All COI sources are silent
+                sources = [
+                    torch.zeros_like(background) for _ in range(self.n_coi_classes)
+                ]
         else:
-            # Multi-class case: randomly select one COI class
-            class_idx = np.random.randint(0, self.n_coi_classes)
-            coi_idx = np.random.randint(0, len(self.coi_by_class[class_idx]))
-            coi_file = self.coi_by_class[class_idx][coi_idx]
-            coi_audio = self.load_and_preprocess(coi_file)
+            # Validation/Test: use precomputed segments
+            filepath, frame_offset, num_frames, class_idx = self.coi_segments[idx]
+            coi_audio = self.load_and_preprocess(
+                filepath, frame_offset=frame_offset, num_frames=num_frames
+            )
 
-            # Create sources list with zeros for other classes
-            sources = [torch.zeros_like(coi_audio) for _ in range(self.n_coi_classes)]
-            sources[class_idx] = coi_audio
+            if self.n_coi_classes == 1:
+                sources = [coi_audio]
+            else:
+                sources = [
+                    torch.zeros_like(coi_audio) for _ in range(self.n_coi_classes)
+                ]
+                sources[class_idx] = coi_audio
 
-        # Sample background if not already prepared (background-only branch)
+        # Sample background if not already prepared
         if "background" not in locals():
             noncoi_idx = np.random.randint(0, len(self.non_coi_files))
             noncoi_file = self.non_coi_files[noncoi_idx]
             background = self.load_and_preprocess(noncoi_file)
 
-        # Create mixture from sources and background. Do not pre-normalize
-        # individual sources here — instead normalize the whole mixture (and
-        # targets) using the mixture mean/std so training matches inference
-        # where inputs are normalized per-chunk before passing to the model.
-        total_coi = torch.stack(sources).sum(dim=0)
-        snr_db = np.random.uniform(*self.snr_range)
-
-        # Scale background for target SNR. If total COI is all zeros (i.e.
-        # background-only example) then keep the background unscaled so the
-        # mixture is simply the background.
-        coi_power = torch.mean(total_coi**2) + 1e-8
-        bg_power = torch.mean(background**2) + 1e-8
-        snr_linear = 10 ** (snr_db / 10)
-        if torch.allclose(total_coi, torch.zeros_like(total_coi)):
-            scaled_background = background
-            mixture = scaled_background
-        else:
-            scaling_factor = torch.sqrt(coi_power / (snr_linear * bg_power))
-            scaled_background = background * scaling_factor
-
-            # Mixture is now sum of sources (in original waveform scale)
-            mixture = total_coi + scaled_background
-
-        # Update background to the scaled version (what's actually in mixture)
-        sources.append(scaled_background)
-        sources_tensor = torch.stack(sources, dim=0)
-
-        # Normalize each waveform independently (matching original SuDORMRF)
+        # Normalize each source to unit variance (building blocks for online mixing)
         def normalize_wav(wav):
-            mean = wav.mean()
             std = wav.std() + 1e-8
-            return (wav - mean) / std
+            return (wav - wav.mean()) / std
 
+        # Background is always the last source
+        sources.append(background)
+        sources_tensor = torch.stack([normalize_wav(s) for s in sources], dim=0)
+
+        # Return a dummy mixture (will be re-mixed online in train_epoch/validate_epoch)
+        mixture = sources_tensor.sum(dim=0)
         mixture = normalize_wav(mixture)
-        sources_tensor = torch.stack([normalize_wav(s) for s in sources_tensor], dim=0)
 
         return mixture, sources_tensor
 
@@ -672,6 +662,7 @@ def train_epoch(
     warmup_steps: int = 0,
     global_step: int = 0,
     base_lr: float = 0.001,
+    snr_range: tuple[float, float] = (-5.0, 5.0),
 ):
     """Train for one epoch.
 
@@ -679,6 +670,7 @@ def train_epoch(
         warmup_steps: Number of steps to linearly warmup LR from 0 to base_lr
         global_step: Current global step count (for warmup across epochs)
         base_lr: Target learning rate after warmup
+        snr_range: Range of SNR values (dB) for online mixing
 
     Returns:
         tuple: (epoch_loss, final_global_step, grad_norm_history)
@@ -728,31 +720,40 @@ def train_epoch(
         B, n_src, T = sources.shape
         denom_eps = 1e-8
 
-        # Store original energies to preserve SNR distribution
-        energies = torch.sum(sources**2, dim=-1, keepdim=True)  # (B, 2, 1)
+        # Shuffle each source independently across the batch
+        shuffled_sources = []
+        for i in range(n_src):
+            idx = torch.randperm(B, device=device)
+            shuffled_sources.append(sources[idx, i, :])
 
-        # Randomly permute batch indices for each source independently
-        idx_coi = torch.randperm(B, device=device)
-        idx_bg = torch.randperm(B, device=device)
+        # Separate COIs and Background (Background is always the last source)
+        new_cois = shuffled_sources[:-1]  # List of (B, T)
+        new_bg = shuffled_sources[-1]  # (B, T)
 
-        # Create new source combinations by shuffling
-        new_coi = sources[idx_coi, 0, :]  # (B, T)
-        new_bg = sources[idx_bg, 1, :]  # (B, T)
+        # Sum of COIs for mixture
+        total_coi = torch.stack(new_cois, dim=0).sum(dim=0)
 
-        # Rescale shuffled sources to match original energy distribution
-        # This preserves the SNR statistics from the dataset
-        new_coi = new_coi * torch.sqrt(
-            energies[:, 0] / ((new_coi**2).sum(-1, keepdim=True) + denom_eps)
-        )
-        new_bg = new_bg * torch.sqrt(
-            energies[:, 1] / ((new_bg**2).sum(-1, keepdim=True) + denom_eps)
-        )
+        # --- Apply random SNR ---
+        # Sample SNR values for the batch
+        snr_db = torch.zeros(B, 1, device=device).uniform_(*snr_range)
 
-        # Create mixture and normalize all waveforms consistently
-        m1wavs = normalize_tensor_wav(new_coi + new_bg)  # (B, T)
-        clean_wavs = torch.stack(
-            [normalize_tensor_wav(new_coi), normalize_tensor_wav(new_bg)], dim=1
-        )  # (B, 2, T)
+        # Scale background to achieve target SNR (assuming COI is unit energy)
+        # Since sources are normalized to unit variance in dataset, their energy is ~T.
+        # scaling = 10^(-SNR/20)
+        bg_scaling = torch.pow(10.0, -snr_db / 20.0)
+
+        # Handle potential silent COI (background-only samples)
+        # If COI is silent, we don't need to scale BG relative to it,
+        # but we keep the scaling for consistency or just use 1.0.
+        # Here we just apply it; if COI is 0, mixture is just scaled BG.
+        new_bg_scaled = new_bg * bg_scaling
+
+        # Create mixture and normalize it (model expects unit variance input)
+        mixture_raw = total_coi + new_bg_scaled
+        m1wavs = normalize_tensor_wav(mixture_raw)  # (B, T)
+
+        # Targets for SI-SNR: we use the relative levels from the mixture.
+        clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)  # (B, n_src, T)
 
         with autocast_ctx:
             # Model expects (B, 1, T) input, outputs (B, n_src, T)
@@ -763,11 +764,15 @@ def train_epoch(
 
             # Diagnostic: compute per-source SI-SNR (dB) for monitoring
             try:
-                coi_sisnr_batch = sisnr(
-                    rec_sources_wavs[:, 0, :], clean_wavs[:, 0, :], eps=LOSS_EPS
-                )
+                # Mean SI-SNR across all COI heads
+                coi_sisnrs = [
+                    sisnr(rec_sources_wavs[:, i, :], clean_wavs[:, i, :], eps=LOSS_EPS)
+                    for i in range(n_src - 1)
+                ]
+                coi_sisnr_batch = torch.stack(coi_sisnrs).mean(dim=0)
+
                 bg_sisnr_batch = sisnr(
-                    rec_sources_wavs[:, 1, :], clean_wavs[:, 1, :], eps=LOSS_EPS
+                    rec_sources_wavs[:, -1, :], clean_wavs[:, -1, :], eps=LOSS_EPS
                 )
                 coi_sisnr_mean = float(coi_sisnr_batch.detach().cpu().mean().item())
                 bg_sisnr_mean = float(bg_sisnr_batch.detach().cpu().mean().item())
@@ -898,7 +903,15 @@ def train_epoch(
 
 
 @torch.no_grad()
-def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True):
+def validate_epoch(
+    model,
+    dataloader,
+    criterion,
+    device,
+    *,
+    use_amp: bool = True,
+    snr_range: tuple[float, float] = (-5.0, 5.0),
+):
     model.eval()
     running_loss = 0.0
     n_samples = 0
@@ -913,31 +926,68 @@ def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True
         else nullcontext()
     )
 
+    # Define normalization function (same as training)
+    def normalize_tensor_wav(wav: torch.Tensor) -> torch.Tensor:
+        """Normalize waveforms to zero mean and unit variance per sample."""
+        mean = wav.mean(dim=-1, keepdim=True)
+        std = wav.std(dim=-1, keepdim=True) + 1e-8
+        return (wav - mean) / std
+
     progress_bar = tqdm(
         dataloader, desc="Validation", leave=False, ascii=True, ncols=100
     )
     for mixtures, sources in progress_bar:
-        mixtures = mixtures.to(device, non_blocking=True)
+        # Note: mixtures from dataset are ignored - we do online mixing like training
         sources = sources.to(device, non_blocking=True)
 
-        with autocast_ctx:
-            estimates = model(mixtures.unsqueeze(1))
-            # Cast to FP32 for loss computation to ensure numerical accuracy
-            loss = criterion(estimates.float(), sources.float())
+        # --- Online mixing: same as training but WITHOUT shuffling ---
+        # This ensures train and val use identical mixing/normalization
+        B, n_src, T = sources.shape
 
-        batch_size = mixtures.size(0)
+        # Use sources as-is (no shuffling for validation - keep deterministic)
+        new_cois = [sources[:, i, :] for i in range(n_src - 1)]
+        new_bg = sources[:, -1, :]
+
+        # Apply deterministic SNRs for validation (linspace across batch)
+        if B > 1:
+            snr_db = torch.linspace(snr_range[0], snr_range[1], B, device=device).view(
+                B, 1
+            )
+        else:
+            snr_db = torch.tensor([[sum(snr_range) / 2.0]], device=device)
+
+        bg_scaling = torch.pow(10.0, -snr_db / 20.0)
+        new_bg_scaled = new_bg * bg_scaling
+
+        # Create mixture and normalize all waveforms consistently (same as training)
+        total_coi = torch.stack(new_cois, dim=0).sum(dim=0)
+        mixture_raw = total_coi + new_bg_scaled
+        m1wavs = normalize_tensor_wav(mixture_raw)  # (B, T)
+        clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)  # (B, n_src, T)
+
+        with autocast_ctx:
+            estimates = model(m1wavs.unsqueeze(1))
+            # Cast to FP32 for loss computation to ensure numerical accuracy
+            loss = criterion(estimates.float(), clean_wavs.float())
+
+        batch_size = B
         running_loss += float(loss.detach().cpu().item()) * batch_size
         n_samples += batch_size
 
         # Compute SI-SNR metrics in FP32 for accuracy
         try:
             estimates_fp32 = estimates.float()
-            sources_fp32 = sources.float()
-            coi_sisnr_batch = sisnr(
-                estimates_fp32[:, 0, :], sources_fp32[:, 0, :], eps=LOSS_EPS
-            )
+            clean_wavs_fp32 = clean_wavs.float()
+
+            # Mean SI-SNR across all COI heads
+            coi_sisnrs = [
+                sisnr(estimates_fp32[:, i, :], clean_wavs_fp32[:, i, :], eps=LOSS_EPS)
+                for i in range(n_src - 1)
+            ]
+            coi_sisnr_batch = torch.stack(coi_sisnrs).mean(dim=0)
+
             bg_sisnr_batch = sisnr(
-                estimates_fp32[:, 1, :], sources_fp32[:, 1, :], eps=LOSS_EPS
+                estimates_fp32[:, -1, :], clean_wavs_fp32[:, -1, :], eps=LOSS_EPS
             )
             coi_sisnr_mean = float(coi_sisnr_batch.detach().cpu().mean().item())
             bg_sisnr_mean = float(bg_sisnr_batch.detach().cpu().mean().item())
@@ -954,7 +1004,7 @@ def validate_epoch(model, dataloader, criterion, device, *, use_amp: bool = True
         )
 
         # Free memory explicitly
-        del mixtures, sources, estimates, loss
+        del sources, m1wavs, clean_wavs, estimates, loss
 
     # Clear GPU cache after validation
     if device != "cpu":
@@ -1226,6 +1276,7 @@ def train(config: Config, timestamp: str | None = None):
             warmup_steps=warmup_steps,
             global_step=global_step,
             base_lr=base_lr,
+            snr_range=tuple(config.data.snr_range),
         )
         history["train_loss"].append(train_loss)
         # Store mean grad norm per epoch for history
@@ -1250,6 +1301,7 @@ def train(config: Config, timestamp: str | None = None):
                 criterion,
                 config.training.device,
                 use_amp=getattr(config.training, "use_amp", True),
+                snr_range=tuple(config.data.snr_range),
             )
             # Free validation loader AND dataset memory immediately
             del val_loader, val_dataset
