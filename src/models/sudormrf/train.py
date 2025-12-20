@@ -59,6 +59,9 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     Returns:
         sisnr_db: (B,) tensor of SI-SNR in dB
     """
+    est = est.float()
+    target = target.float()
+
     # ensure shape (B, T)
     if est.ndim == 3:
         est = est.squeeze(1)
@@ -98,7 +101,7 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     target_silent_est_loud = silent_target_mask & ~silent_est_mask
 
     # Reward for correctly predicting silence (bounded positive SI-SNR)
-    silence_reward = torch.full_like(sisnr_db, 20.0)
+    silence_reward = 10.0 * torch.tanh(1.0 - est_energy)
 
     # Penalty proportional to estimate energy when target is silent
     # -10 * log10(est_energy) gives large negative values for loud estimates
@@ -633,18 +636,11 @@ class AudioDataset(Dataset):
             noncoi_file = self.non_coi_files[noncoi_idx]
             background = self.load_and_preprocess(noncoi_file)
 
-        # Normalize each source to unit variance (building blocks for online mixing)
-        def normalize_wav(wav):
-            std = wav.std() + 1e-8
-            return (wav - wav.mean()) / std
-
-        # Background is always the last source
         sources.append(background)
-        sources_tensor = torch.stack([normalize_wav(s) for s in sources], dim=0)
+        sources_tensor = torch.stack(sources, dim=0)
 
         # Return a dummy mixture (will be re-mixed online in train_epoch/validate_epoch)
         mixture = sources_tensor.sum(dim=0)
-        mixture = normalize_wav(mixture)
 
         return mixture, sources_tensor
 
@@ -684,7 +680,7 @@ def train_epoch(
     use_amp = bool(use_amp) and (str(device).startswith("cuda"))
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
     autocast_ctx = (
-        torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+        torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True)
         if use_amp
         else nullcontext()
     )
@@ -720,16 +716,11 @@ def train_epoch(
         B, n_src, T = sources.shape
         denom_eps = 1e-8
 
-        # Shuffle each source independently across the batch
-        shuffled_sources = []
-        for i in range(n_src):
-            idx = torch.randperm(B, device=device)
-            shuffled_sources.append(sources[idx, i, :])
+        perm = torch.randperm(B, device=device)
+        shuffled = sources[perm]  # (B, n_src, T)
 
-        # Separate COIs and Background (Background is always the last source)
-        new_cois = shuffled_sources[:-1]  # List of (B, T)
-        new_bg = shuffled_sources[-1]  # (B, T)
-
+        new_cois = [shuffled[:, i, :] for i in range(n_src - 1)]
+        new_bg = shuffled[:, -1, :]
         # Sum of COIs for mixture
         total_coi = torch.stack(new_cois, dim=0).sum(dim=0)
 
@@ -750,14 +741,14 @@ def train_epoch(
 
         # Create mixture and normalize it (model expects unit variance input)
         mixture_raw = total_coi + new_bg_scaled
-        m1wavs = normalize_tensor_wav(mixture_raw)  # (B, T)
+        clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
 
-        # Targets for SI-SNR: we use the relative levels from the mixture.
-        clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)  # (B, n_src, T)
+        mixture = normalize_tensor_wav(mixture_raw)
+        clean_wavs = normalize_tensor_wav(clean_wavs)
 
         with autocast_ctx:
             # Model expects (B, 1, T) input, outputs (B, n_src, T)
-            rec_sources_wavs = model(m1wavs.unsqueeze(1))
+            rec_sources_wavs = model(mixture.unsqueeze(1))
             loss = criterion(rec_sources_wavs, clean_wavs)
             loss = loss.float()
             loss_to_backprop = loss / grad_accum_steps
@@ -839,7 +830,7 @@ def train_epoch(
         # Free memory explicitly
         del (
             sources,
-            m1wavs,
+            mixture,
             clean_wavs,
             rec_sources_wavs,
             loss,
@@ -921,7 +912,7 @@ def validate_epoch(
 
     use_amp = bool(use_amp) and (str(device).startswith("cuda"))
     autocast_ctx = (
-        torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+        torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True)
         if use_amp
         else nullcontext()
     )
@@ -962,11 +953,13 @@ def validate_epoch(
         # Create mixture and normalize all waveforms consistently (same as training)
         total_coi = torch.stack(new_cois, dim=0).sum(dim=0)
         mixture_raw = total_coi + new_bg_scaled
-        m1wavs = normalize_tensor_wav(mixture_raw)  # (B, T)
-        clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)  # (B, n_src, T)
+        clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
+
+        mixture = normalize_tensor_wav(mixture_raw)
+        clean_wavs = normalize_tensor_wav(clean_wavs)
 
         with autocast_ctx:
-            estimates = model(m1wavs.unsqueeze(1))
+            estimates = model(mixture.unsqueeze(1))
             # Cast to FP32 for loss computation to ensure numerical accuracy
             loss = criterion(estimates.float(), clean_wavs.float())
 
@@ -1004,7 +997,7 @@ def validate_epoch(
         )
 
         # Free memory explicitly
-        del sources, m1wavs, clean_wavs, estimates, loss
+        del sources, mixture, clean_wavs, estimates, loss
 
     # Clear GPU cache after validation
     if device != "cpu":
@@ -1237,7 +1230,7 @@ def train(config: Config, timestamp: str | None = None):
         class_weight=getattr(config.training, "class_weight", 1.5)
     )
     base_lr = float(config.training.lr)
-    optimizer = optim.AdamW(model.parameters(), lr=base_lr)
+    optimizer = optim.Adam(model.parameters(), lr=base_lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=5
     )
