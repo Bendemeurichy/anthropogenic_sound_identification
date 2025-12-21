@@ -73,14 +73,12 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     target_zm = target - target.mean(dim=-1, keepdim=True)
 
     # Detect silent targets and estimates (prevent numerical instability)
-    target_energy = target_zm.pow(2).sum(dim=-1)
     est_energy = est_zm.pow(2).sum(dim=-1)
     min_energy_threshold = 1e-6
 
     # Check if target is INTENTIONALLY zero (background-only samples)
-    # These have essentially zero energy even before zero-meaning
-    target_is_zero = target.pow(2).sum(dim=-1) < 1e-10  # Much stricter threshold
-    silent_est_mask = est_energy < min_energy_threshold
+    # These have essentially zero energy even before zero-meaning.
+    target_is_zero = target.pow(2).sum(dim=-1) < 1e-10
 
     # projection of est onto target
     s_target = (est_zm * target_zm).sum(dim=-1, keepdim=True) / (
@@ -96,28 +94,13 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     sisnr_lin = true_energy / noise_energy
     sisnr_db = 10.0 * torch.log10(sisnr_lin + eps)
 
-    # Handle INTENTIONALLY zero targets (background-only samples):
-    # - If target is zero AND estimate is silent: REWARD based on how quiet
-    # - If target is zero BUT estimate has energy: PENALIZE based on estimate energy
-    # This trains the model to output silence when there's no COI present
-    both_silent = target_is_zero & silent_est_mask
-    target_zero_est_loud = target_is_zero & ~silent_est_mask
-
-    # Reward for correctly predicting silence when target is zero - GRADIENT-BASED
-    # Quieter estimates get higher rewards (up to +20 dB)
-    # This encourages the model to progressively reduce output energy
-    silence_reward = -10.0 * torch.log10(est_energy / min_energy_threshold + eps)
-    silence_reward = torch.clamp(silence_reward, min=0.0, max=20.0)
-
-    # Penalty proportional to estimate energy when target is zero
-    # -10 * log10(est_energy) gives large negative values for loud estimates
-    # Clamp to [-30, 0] to avoid extreme gradients
-    silence_penalty = -10.0 * torch.log10(est_energy + eps)
-    silence_penalty = torch.clamp(silence_penalty, min=-30.0, max=0.0)
-
-    # Apply: reward when both silent, penalize when only target is zero
-    sisnr_db = torch.where(both_silent, silence_reward, sisnr_db)
-    sisnr_db = torch.where(target_zero_est_loud, silence_penalty, sisnr_db)
+    # Handle intentionally-zero targets (background-only samples):
+    # Encourage silence by penalizing estimate energy, but DO NOT provide
+    # positive "rewards" that can dominate the overall objective.
+    # Score is clamped to [-30, 0] (0 means sufficiently silent).
+    silence_score = -10.0 * torch.log10(est_energy / min_energy_threshold + eps)
+    silence_score = torch.clamp(silence_score, min=-30.0, max=0.0)
+    sisnr_db = torch.where(target_is_zero, silence_score, sisnr_db)
 
     return sisnr_db
 
@@ -332,10 +315,11 @@ class AudioDataset(Dataset):
         )
         # Random generator for reproducible augmentations
         self._rng = np.random.default_rng(42)
-        # Probability (0..1) of returning a background-only example during
-        # training. Background-only examples have zeroed COI targets and the
-        # background in the last source slot.
-        self.background_only_prob = float(background_only_prob)
+        # Background-only sampling (added on top).
+        # Semantics: `background_only_prob` is treated as an *extra-sample ratio*
+        # relative to the (augmented) COI samples per epoch.
+        # Example: 0.25 -> add 25% extra background-only samples.
+        self.background_only_prob = max(0.0, float(background_only_prob))
         # How many background files to mix together for background-only examples
         self.background_mix_n = int(background_mix_n)
 
@@ -347,15 +331,19 @@ class AudioDataset(Dataset):
         self.coi_files = split_df.loc[coi_mask, "filename"].tolist()
         self.non_coi_files = split_df.loc[~coi_mask, "filename"].tolist()
 
-        # Compute number of extra background-only samples to append per epoch.
-        # Interpret `background_only_prob` as a ratio of COI-count to add as
-        # extra background-only examples (e.g. 0.25 means 25% extra backgrounds).
-        if len(self.coi_files) > 0:
+        # Compute how many extra background-only samples to append per epoch.
+        # The ratio is applied to the *effective* COI sample count (after
+        # augmentation multiplier) so the balance stays consistent.
+        if (
+            split == "train"
+            and len(self.coi_files) > 0
+            and self.background_only_prob > 0.0
+        ):
+            base_coi_samples = len(self.coi_files) * self.augment_multiplier
             self._extra_background_count = int(
-                self.background_only_prob * len(self.coi_files) + 0.5
+                self.background_only_prob * base_coi_samples + 0.5
             )
         else:
-            # If no COI files, we will iterate over backgrounds only.
             self._extra_background_count = 0
 
         # Segment stride (seconds). If None, default to non-overlapping windows
@@ -368,7 +356,7 @@ class AudioDataset(Dataset):
         # so that each epoch can iterate over all segments deterministically for
         # validation/test. For training we will instead produce one random-offset
         # mixture per COI file in __getitem__.
-        self.coi_segments: list[tuple[str, int, int, int]] = []
+        self.coi_segments: list[tuple[str, int, int | None, int]] = []
 
         # Create a mapping from filename to class index for multi-class
         if n_coi_classes > 1:
@@ -460,8 +448,8 @@ class AudioDataset(Dataset):
             # different random augmentations. Background-only examples are added
             # on top based on `background_only_prob`.
             if len(self.coi_files) > 0:
-                base_coi_samples = len(self.coi_files) * self.augment_multiplier
-                return base_coi_samples + self._extra_background_count
+                base = len(self.coi_files) * self.augment_multiplier
+                return base + self._extra_background_count
             # Fallback: no COI files -> iterate over backgrounds
             return len(self.non_coi_files)
         return len(self.coi_segments)
@@ -481,7 +469,6 @@ class AudioDataset(Dataset):
         try:
             info = torchaudio.info(filepath)
             orig_sr = info.sample_rate
-            total_frames = int(info.num_frames)
         except Exception:
             # Fallback: torchaudio.info can fail on some backends/codecs
             waveform, orig_sr = torchaudio.load(filepath)
@@ -609,7 +596,7 @@ class AudioDataset(Dataset):
                     ]
                     sources[class_idx] = coi_audio
             else:
-                # Background-only extra sample
+                # Background-only extra sample (appended on top)
                 mix_n = max(1, int(self.background_mix_n))
                 idxs = np.random.choice(len(self.non_coi_files), size=mix_n)
                 bg_list = [
@@ -663,6 +650,7 @@ def normalize_tensor_wav(wav: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     mean = wav.mean(dim=-1, keepdim=True)
     std = wav.std(dim=-1, keepdim=True) + eps
     return (wav - mean) / std
+
 
 def train_epoch(
     model,
@@ -719,36 +707,83 @@ def train_epoch(
                 param_group["lr"] = warmup_lr
 
         # mixtures: (B, T), sources: (B, n_src, T)
-        # Sources are pre-normalized in the dataset, but we'll re-mix online
+        # We re-mix online for data augmentation and SNR control.
         sources = sources.to(device, non_blocking=True)
 
-        # --- Online mixing: shuffle sources within batch for augmentation ---
-        # This creates new source combinations each batch, improving generalization
-        # and is memory-efficient (standard technique in source separation)
+        # --- Online mixing ---
+        # Preserve COI head semantics by keeping COI sources in-order.
+        # Only shuffle the BACKGROUND across the batch to create novel mixtures.
         B, n_src, T = sources.shape
         denom_eps = 1e-8
 
-        perm = torch.randperm(B, device=device)
-        shuffled = sources[perm]  # (B, n_src, T)
+        # Permute each source slot independently (upstream-style) while
+        # preserving slot semantics (slot i stays slot i).
+        # Also energy-match permuted sources to the original per-sample energy
+        # to avoid distribution drift.
+        energies = torch.sum(sources.pow(2), dim=-1, keepdim=True)  # (B, n_src, 1)
+        new_sources: list[torch.Tensor] = []
+        target_silent_thr = 1e-6
+        clamp_min_scale = 0.1
+        clamp_max_scale = 10.0
 
-        new_cois = [shuffled[:, i, :] for i in range(n_src - 1)]
-        new_bg = shuffled[:, -1, :]
+        for src_i in range(n_src):
+            target_energy = energies[:, src_i, :]  # (B, 1)
+
+            if B > 1:
+                # Prefer sampling non-silent sources for COI slots to avoid
+                # huge rescaling when background-only samples are present.
+                if src_i < (n_src - 1):
+                    valid = torch.where(target_energy.squeeze(-1) > target_silent_thr)[
+                        0
+                    ]
+                    if valid.numel() >= 2:
+                        perm_idx = valid[
+                            torch.randint(0, valid.numel(), (B,), device=device)
+                        ]
+                    else:
+                        perm_idx = torch.randperm(B, device=device)
+                else:
+                    perm_idx = torch.randperm(B, device=device)
+            else:
+                perm_idx = torch.zeros(B, dtype=torch.long, device=device)
+
+            permuted = sources[perm_idx, src_i, :]  # (B, T)
+            permuted_energy = torch.sum(permuted.pow(2), dim=-1, keepdim=True)
+
+            # Energy matching (safe + clamped)
+            scale = torch.sqrt(target_energy / (permuted_energy + denom_eps))
+            target_is_silent = target_energy < target_silent_thr
+            # Preserve "no-COI" examples: if the target slot is silent, the
+            # mixed slot must remain silent (do not inject energy).
+            scale = torch.where(target_is_silent, torch.zeros_like(scale), scale)
+            scale = torch.clamp(scale, min=clamp_min_scale, max=clamp_max_scale)
+            new_sources.append(permuted * scale)
+
+        mixed_sources = torch.stack(new_sources, dim=1)  # (B, n_src, T)
+
+        # COI sources (kept in-order slots)
+        new_cois = [mixed_sources[:, i, :] for i in range(n_src - 1)]
+        new_bg = mixed_sources[:, -1, :]
+
         # Sum of COIs for mixture
-        total_coi = torch.stack(new_cois, dim=0).sum(dim=0)
+        total_coi = torch.stack(new_cois, dim=0).sum(dim=0)  # (B, T)
 
-        # --- Apply random SNR ---
-        # Sample SNR values for the batch
+        # --- Apply random SNR (RMS-based) ---
+        # Achieve target SNR between total COI and background per-example.
+        # SNR definition: 20*log10(rms_coi / rms_bg)
         snr_db = torch.zeros(B, 1, device=device).uniform_(*snr_range)
 
-        # Scale background to achieve target SNR (assuming COI is unit energy)
-        # Since sources are normalized to unit variance in dataset, their energy is ~T.
-        # scaling = 10^(-SNR/20)
-        bg_scaling = torch.pow(10.0, -snr_db / 20.0)
+        coi_rms = torch.sqrt(total_coi.pow(2).mean(dim=-1, keepdim=True) + denom_eps)
+        bg_rms = torch.sqrt(new_bg.pow(2).mean(dim=-1, keepdim=True) + denom_eps)
 
-        # Handle potential silent COI (background-only samples)
-        # If COI is silent, we don't need to scale BG relative to it,
-        # but we keep the scaling for consistency or just use 1.0.
-        # Here we just apply it; if COI is 0, mixture is just scaled BG.
+        desired_ratio = torch.pow(10.0, snr_db / 20.0)
+        bg_scaling = coi_rms / (bg_rms * desired_ratio + denom_eps)
+
+        # If COI is (near) silent (background-only examples), do not apply
+        # aggressive scaling which can create unstable targets.
+        silent_coi = coi_rms < 1e-4
+        bg_scaling = torch.where(silent_coi, torch.ones_like(bg_scaling), bg_scaling)
+
         new_bg_scaled = new_bg * bg_scaling
 
         # Create mixture and normalize it (model expects unit variance input)
@@ -764,6 +799,9 @@ def train_epoch(
             # Model expects (B, 1, T) input, outputs (B, n_src, T)
             rec_sources_wavs = model(mixture.unsqueeze(1))
             loss = criterion(rec_sources_wavs, clean_wavs)
+            # Upstream-style clamp to prevent rare outliers from destabilizing
+            # optimization. This affects training only.
+            loss = torch.clamp(loss, min=-30.0, max=30.0)
             loss = loss.float()
             loss_to_backprop = loss / grad_accum_steps
 
@@ -805,7 +843,8 @@ def train_epoch(
             if not grads_finite or not loss_finite:
                 if use_amp:
                     try:
-                        scaler.update()
+                        if scaler is not None:
+                            scaler.update()
                     except Exception:
                         pass
                 optimizer.zero_grad(set_to_none=True)
@@ -868,7 +907,8 @@ def train_epoch(
         if not grads_finite:
             if use_amp:
                 try:
-                    scaler.update()
+                    if scaler is not None:
+                        scaler.update()
                 except Exception:
                     pass
             optimizer.zero_grad(set_to_none=True)
@@ -938,11 +978,10 @@ def validate_epoch(
         # Note: mixtures from dataset are ignored - we do online mixing like training
         sources = sources.to(device, non_blocking=True)
 
-        # --- Online mixing: same as training but WITHOUT shuffling ---
-        # This ensures train and val use identical mixing/normalization
+        # --- Online mixing (validation) ---
+        # Keep deterministic mixing and preserve COI head semantics.
         B, n_src, T = sources.shape
 
-        # Use sources as-is (no shuffling for validation - keep deterministic)
         new_cois = [sources[:, i, :] for i in range(n_src - 1)]
         new_bg = sources[:, -1, :]
 
@@ -954,12 +993,21 @@ def validate_epoch(
         else:
             snr_db = torch.tensor([[sum(snr_range) / 2.0]], device=device)
 
-        bg_scaling = torch.pow(10.0, -snr_db / 20.0)
+        total_coi = torch.stack(new_cois, dim=0).sum(dim=0)
+        denom_eps = 1e-8
+        coi_rms = torch.sqrt(total_coi.pow(2).mean(dim=-1, keepdim=True) + denom_eps)
+        bg_rms = torch.sqrt(new_bg.pow(2).mean(dim=-1, keepdim=True) + denom_eps)
+
+        desired_ratio = torch.pow(10.0, snr_db / 20.0)
+        bg_scaling = coi_rms / (bg_rms * desired_ratio + denom_eps)
+
+        silent_coi = coi_rms < 1e-4
+        bg_scaling = torch.where(silent_coi, torch.ones_like(bg_scaling), bg_scaling)
+
         new_bg_scaled = new_bg * bg_scaling
 
         # Create mixture and normalize ONLY mixture (same as training)
         # Keep clean target sources unnormalized
-        total_coi = torch.stack(new_cois, dim=0).sum(dim=0)
         mixture_raw = total_coi + new_bg_scaled
         clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
 

@@ -4,20 +4,21 @@ data:
   segment_length: 4.0 # seconds
   snr_range: [-5, 5] # dB range for mixing
   n_coi_classes: 1
-  # Ratio of background-only to COI-containing examples during training
-  background_only_prob: 2.0
+  # Extra background-only samples added on top (ratio vs. COI samples).
+  # Example: 0.25 means add 25% extra background-only samples per epoch.
+  background_only_prob: 0.25
   # How many non-COI files to sum for background-only examples
   background_mix_n: 2
   # Augmentation multiplier: each COI sample seen 3x with random augmentations
-  augment_multiplier: 2
+  augment_multiplier: 3
 
 # Model settings (using base model defaults)
 model:
   type: "improved" # 'improved' or 'groupcomm'
   out_channels: 128 # base model default
   in_channels: 512 # base model default
-  num_blocks: 18 # base model default
-  upsampling_depth: 4 # base model default
+  num_blocks: 24 # base model default
+  upsampling_depth: 5 # base model default
   enc_kernel_size: 21 # base model default
   enc_num_basis: 512 # base model default
 
@@ -27,8 +28,8 @@ training:
   batch_size: 4 # Increased from 4 for better GPU utilization
   grad_accum_steps: 1
   use_amp: true
-  num_epochs: 300 # Increased from 200 for proper convergence
-  lr: 1e-4
+  num_epochs: 500 # Increased from 200 for proper convergence
+  lr: 3e-4
   num_workers: 2 # Parallel data loading (adjust based on CPU cores, 0 saves RAM)
   pin_memory: true # Faster CPU->GPU transfer
   persistent_workers: true # Keep workers alive between epochs
