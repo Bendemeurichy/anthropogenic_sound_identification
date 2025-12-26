@@ -30,9 +30,13 @@ from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 
 
 class COISeparationHead(nn.Module):
-    """Seperation head specific for class of interest target audio seperation,
-    replaces the original SuDoRM-RF final masking layer.
+    """Separation head specific for class of interest target audio separation.
+
+    Replaces the original SuDoRM-RF final masking layer.
     Produces masks for class of interest and background.
+
+    IMPORTANT: This head outputs PRE-ACTIVATION masks. The base model's
+    mask_nl_class (ReLU) will be applied after the view reshape.
     """
 
     def __init__(self, in_channels, out_channels, n_src=2, *args, **kwargs):
@@ -43,38 +47,55 @@ class COISeparationHead(nn.Module):
 
         if n_src != 2:
             raise ValueError(
-                "COISeparationHead only supports n_src=2 (COI + Background). Use multi_class_seperation for more sources."
+                "COISeparationHead only supports n_src=2 (COI + Background). "
+                "Use multi_class_seperation for more sources."
             )
 
-        self.coi_branch = self._make_branch(in_channels, out_channels)
-        self.background_branch = self._make_branch(in_channels, out_channels)
+        # Shared feature extraction before branching
+        self.shared_conv = nn.Sequential(
+            nn.Conv1d(in_channels, in_channels, 3, padding=1, groups=in_channels),
+            nn.Conv1d(in_channels, in_channels, 1),
+            nn.PReLU(in_channels),
+        )
 
-    def _make_branch(self, in_chan, out_chan):
-        return nn.Sequential(
-            nn.Conv1d(in_chan, in_chan, 3, padding=1, groups=in_chan),
-            nn.Conv1d(in_chan, out_chan, 1),
-            nn.PReLU(out_chan),
-            nn.Conv1d(out_chan, out_chan, 3, padding=1, groups=out_chan),
-            nn.Conv1d(out_chan, out_chan, 1),
+        # COI-specific branch
+        self.coi_branch = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, 3, padding=1),
+            nn.PReLU(out_channels),
+            nn.Conv1d(out_channels, out_channels, 1),
+        )
+
+        # Background-specific branch
+        self.background_branch = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, 3, padding=1),
+            nn.PReLU(out_channels),
+            nn.Conv1d(out_channels, out_channels, 1),
         )
 
     def forward(self, x):
         """
         Args:
-            x: (B, C, T)
+            x: (B, C, T) - bottleneck features from separation module
         Returns:
-            masks: (B, n_src * C, T) - Concatenated masks for SuDoRM-RF compatibility
+            masks: (B, n_src * out_channels, T) - Concatenated PRE-ACTIVATION masks
+
+        Note: The base model applies ReLU via mask_nl_class AFTER reshaping.
+        We output linear values here to let that activation work properly.
         """
-        coi_mask = torch.relu(self.coi_branch(x))
-        background_mask = torch.relu(self.background_branch(x))
-        # Concatenate along channel dimension to match SuDoRM-RF expectation
-        # Shape becomes (B, 2 * out_channels, T)
-        masks = torch.cat([coi_mask, background_mask], dim=1)
+        shared = self.shared_conv(x)
+
+        coi_mask = self.coi_branch(shared)  # (B, out_channels, T)
+        bg_mask = self.background_branch(shared)  # (B, out_channels, T)
+
+        # Concatenate: [COI, Background] along channel dimension
+        # Output shape: (B, 2 * out_channels, T)
+        masks = torch.cat([coi_mask, bg_mask], dim=1)
         return masks
 
 
 def wrap_model_for_coi(model, replace_head=True):
     """Wraps a SuDoRM-RF model with a COI-specific separation head.
+
     Args:
         model: SuDoRM-RF model instance
         replace_head: If True, replaces the existing separation head.
@@ -84,31 +105,24 @@ def wrap_model_for_coi(model, replace_head=True):
 
     if replace_head:
         if isinstance(model, SuDORMRF) or isinstance(model, GroupCommSudoRmRf):
-            in_channels = model.mask_net[-1].in_channels
-            # Use enc_num_basis as out_channels for each source branch
-            out_channels = model.enc_num_basis
+            in_channels = model.out_channels  # output of bottleneck/separation module
+            out_channels = model.enc_num_basis  # must match encoder basis for masking
             n_src = 2  # COI and background
 
-            model.mask_net = COISeparationHead(
-                in_channels=in_channels, out_channels=out_channels, n_src=n_src
+            # Replace mask_net with our COI-specific head
+            model.mask_net = nn.Sequential(
+                nn.PReLU(),  # Keep the PReLU that was in the original mask_net
+                COISeparationHead(
+                    in_channels=in_channels, out_channels=out_channels, n_src=n_src
+                ),
             )
 
             # Ensure model properties match
             model.num_sources = n_src
 
-            # Re-initialize decoder if needed (though usually base model is already 2 sources)
-            if model.decoder.in_channels != model.enc_num_basis * n_src:
-                model.decoder = nn.ConvTranspose1d(
-                    in_channels=model.enc_num_basis * n_src,
-                    out_channels=n_src,
-                    output_padding=(model.enc_kernel_size // 2) - 1,
-                    kernel_size=model.enc_kernel_size,
-                    stride=model.enc_kernel_size // 2,
-                    padding=model.enc_kernel_size // 2,
-                    groups=1,
-                    bias=False,
-                )
-                torch.nn.init.xavier_uniform_(model.decoder.weight)
+            # The decoder should NOT be changed from the original - it uses groups=1
+            # which is correct for the SuDoRM-RF architecture.
+            # The mask multiplication happens BEFORE the decoder in the forward pass.
 
         else:
             raise TypeError("Model type not supported for COI head replacement.")

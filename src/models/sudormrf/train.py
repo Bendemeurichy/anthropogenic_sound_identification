@@ -32,7 +32,7 @@ from contextlib import nullcontext
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
-from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
+from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
     GroupCommSudoRmRf,
 )
 from .seperation_head import wrap_model_for_coi
@@ -707,70 +707,22 @@ def train_epoch(
                 param_group["lr"] = warmup_lr
 
         # mixtures: (B, T), sources: (B, n_src, T)
-        # We re-mix online for data augmentation and SNR control.
         sources = sources.to(device, non_blocking=True)
 
-        # --- Online mixing ---
-        # Preserve COI head semantics by keeping COI sources in-order.
-        # Only shuffle the BACKGROUND across the batch to create novel mixtures.
+        # --- Simple online mixing (no complex permutation) ---
+        # The dataset already provides properly paired COI + background sources.
+        # We only need to apply SNR augmentation here.
         B, n_src, T = sources.shape
         denom_eps = 1e-8
 
-        # Permute each source slot independently (upstream-style) while
-        # preserving slot semantics (slot i stays slot i).
-        # Also energy-match permuted sources to the original per-sample energy
-        # to avoid distribution drift.
-        energies = torch.sum(sources.pow(2), dim=-1, keepdim=True)  # (B, n_src, 1)
-        new_sources: list[torch.Tensor] = []
-        target_silent_thr = 1e-6
-        clamp_min_scale = 0.1
-        clamp_max_scale = 10.0
-
-        for src_i in range(n_src):
-            target_energy = energies[:, src_i, :]  # (B, 1)
-
-            if B > 1:
-                # Prefer sampling non-silent sources for COI slots to avoid
-                # huge rescaling when background-only samples are present.
-                if src_i < (n_src - 1):
-                    valid = torch.where(target_energy.squeeze(-1) > target_silent_thr)[
-                        0
-                    ]
-                    if valid.numel() >= 2:
-                        perm_idx = valid[
-                            torch.randint(0, valid.numel(), (B,), device=device)
-                        ]
-                    else:
-                        perm_idx = torch.randperm(B, device=device)
-                else:
-                    perm_idx = torch.randperm(B, device=device)
-            else:
-                perm_idx = torch.zeros(B, dtype=torch.long, device=device)
-
-            permuted = sources[perm_idx, src_i, :]  # (B, T)
-            permuted_energy = torch.sum(permuted.pow(2), dim=-1, keepdim=True)
-
-            # Energy matching (safe + clamped)
-            scale = torch.sqrt(target_energy / (permuted_energy + denom_eps))
-            target_is_silent = target_energy < target_silent_thr
-            # Preserve "no-COI" examples: if the target slot is silent, the
-            # mixed slot must remain silent (do not inject energy).
-            scale = torch.where(target_is_silent, torch.zeros_like(scale), scale)
-            scale = torch.clamp(scale, min=clamp_min_scale, max=clamp_max_scale)
-            new_sources.append(permuted * scale)
-
-        mixed_sources = torch.stack(new_sources, dim=1)  # (B, n_src, T)
-
-        # COI sources (kept in-order slots)
-        new_cois = [mixed_sources[:, i, :] for i in range(n_src - 1)]
-        new_bg = mixed_sources[:, -1, :]
+        # Extract COI sources and background
+        new_cois = [sources[:, i, :] for i in range(n_src - 1)]
+        new_bg = sources[:, -1, :]
 
         # Sum of COIs for mixture
         total_coi = torch.stack(new_cois, dim=0).sum(dim=0)  # (B, T)
 
         # --- Apply random SNR (RMS-based) ---
-        # Achieve target SNR between total COI and background per-example.
-        # SNR definition: 20*log10(rms_coi / rms_bg)
         snr_db = torch.zeros(B, 1, device=device).uniform_(*snr_range)
 
         coi_rms = torch.sqrt(total_coi.pow(2).mean(dim=-1, keepdim=True) + denom_eps)
@@ -783,12 +735,12 @@ def train_epoch(
         # aggressive scaling which can create unstable targets.
         silent_coi = coi_rms < 1e-4
         bg_scaling = torch.where(silent_coi, torch.ones_like(bg_scaling), bg_scaling)
+        # Clamp scaling to avoid extreme values
+        bg_scaling = torch.clamp(bg_scaling, min=0.1, max=10.0)
 
         new_bg_scaled = new_bg * bg_scaling
 
         # Create mixture and normalize it (model expects unit variance input)
-        # NOTE: Only normalize the mixture INPUT, NOT the clean target sources!
-        # The model learns to estimate clean sources from normalized mixture.
         mixture_raw = total_coi + new_bg_scaled
         clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
 
