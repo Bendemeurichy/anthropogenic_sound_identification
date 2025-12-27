@@ -531,12 +531,29 @@ class AudioDataset(Dataset):
         return waveform
 
     def create_mixture(self, source, noise, snr_db):
-        """Create a mixture of source and noise at a given SNR."""
-        source_power = torch.mean(source**2)
-        noise_power = torch.mean(noise**2)
+        """Create a mixture of source and noise at a given SNR.
+
+        SNR (dB) = 10 * log10(source_power / noise_power)
+        For a target SNR, we scale noise so that:
+            noise_scaling = sqrt(source_power / (noise_power * 10^(snr_db/10)))
+
+        Args:
+            source: Clean source signal tensor
+            noise: Background noise tensor
+            snr_db: Target SNR in dB (can be negative for louder noise)
+
+        Returns:
+            Mixture tensor at the specified SNR
+        """
+        eps = 1e-8
+        source_power = torch.mean(source**2) + eps
+        noise_power = torch.mean(noise**2) + eps
 
         snr_linear = 10 ** (snr_db / 10)
-        scaling_factor = torch.sqrt(source_power / (snr_linear * noise_power + 1e-8))
+        scaling_factor = torch.sqrt(source_power / (snr_linear * noise_power))
+
+        # Clamp scaling to prevent extreme noise levels
+        scaling_factor = torch.clamp(scaling_factor, min=0.1, max=3.0)
 
         scaled_noise = noise * scaling_factor
         mixture = source + scaled_noise
@@ -722,30 +739,51 @@ def train_epoch(
         # Sum of COIs for mixture
         total_coi = torch.stack(new_cois, dim=0).sum(dim=0)  # (B, T)
 
-        # --- Apply random SNR (RMS-based) ---
+        # --- Apply random SNR (power-based, consistent with create_mixture) ---
         snr_db = torch.zeros(B, 1, device=device).uniform_(*snr_range)
 
-        coi_rms = torch.sqrt(total_coi.pow(2).mean(dim=-1, keepdim=True) + denom_eps)
-        bg_rms = torch.sqrt(new_bg.pow(2).mean(dim=-1, keepdim=True) + denom_eps)
+        # Use power (mean squared) for SNR calculation - consistent with dataset
+        coi_power = total_coi.pow(2).mean(dim=-1, keepdim=True) + denom_eps
+        bg_power = new_bg.pow(2).mean(dim=-1, keepdim=True) + denom_eps
 
-        desired_ratio = torch.pow(10.0, snr_db / 20.0)
-        bg_scaling = coi_rms / (bg_rms * desired_ratio + denom_eps)
+        # SNR = 10 * log10(signal_power / noise_power)
+        # => noise_power_desired = signal_power / 10^(snr/10)
+        # => scaling^2 = signal_power / (noise_power * 10^(snr/10))
+        # => scaling = sqrt(signal_power / (noise_power * snr_linear))
+        snr_linear = torch.pow(10.0, snr_db / 10.0)  # Power ratio, not amplitude
+        bg_scaling = torch.sqrt(coi_power / (bg_power * snr_linear + denom_eps))
 
         # If COI is (near) silent (background-only examples), do not apply
         # aggressive scaling which can create unstable targets.
-        silent_coi = coi_rms < 1e-4
+        silent_coi = coi_power < 1e-8
         bg_scaling = torch.where(silent_coi, torch.ones_like(bg_scaling), bg_scaling)
-        # Clamp scaling to avoid extreme values
-        bg_scaling = torch.clamp(bg_scaling, min=0.1, max=10.0)
+        # Tighter clamp to avoid extreme noise levels that make mixtures unlistenable
+        # At -5dB SNR, scaling should be ~1.78; at +5dB, ~0.56
+        bg_scaling = torch.clamp(bg_scaling, min=0.1, max=3.0)
 
         new_bg_scaled = new_bg * bg_scaling
 
-        # Create mixture and normalize it (model expects unit variance input)
+        # =========================================================
+        # Normalization strategy matching official SuDO-RM-RF code
+        # From run_improved_sudormrf.py:
+        #   m1wavs = normalize_tensor_wav(new_s1 + new_s2)
+        #   clean_wavs[:, 0, :] = normalize_tensor_wav(new_s1)
+        #   clean_wavs[:, 1, :] = normalize_tensor_wav(new_s2)
+        # Each source is normalized INDEPENDENTLY to zero-mean, unit-variance
+        # =========================================================
         mixture_raw = total_coi + new_bg_scaled
-        clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
 
-        mixture = normalize_tensor_wav(mixture_raw)
-        # Keep clean_wavs unnormalized for loss computation
+        # Normalize mixture to zero-mean, unit-variance
+        mixture = normalize_tensor_wav(mixture_raw, eps=denom_eps)
+
+        # Normalize each source INDEPENDENTLY (official approach)
+        # This is different from dividing by mixture std!
+        normalized_cois = [normalize_tensor_wav(coi, eps=denom_eps) for coi in new_cois]
+        normalized_bg = normalize_tensor_wav(new_bg_scaled, eps=denom_eps)
+
+        clean_wavs = torch.stack(
+            normalized_cois + [normalized_bg], dim=1
+        )  # (B, n_src, T)
 
         with autocast_ctx:
             # Model expects (B, 1, T) input, outputs (B, n_src, T)
@@ -947,24 +985,34 @@ def validate_epoch(
 
         total_coi = torch.stack(new_cois, dim=0).sum(dim=0)
         denom_eps = 1e-8
-        coi_rms = torch.sqrt(total_coi.pow(2).mean(dim=-1, keepdim=True) + denom_eps)
-        bg_rms = torch.sqrt(new_bg.pow(2).mean(dim=-1, keepdim=True) + denom_eps)
 
-        desired_ratio = torch.pow(10.0, snr_db / 20.0)
-        bg_scaling = coi_rms / (bg_rms * desired_ratio + denom_eps)
+        # Use power-based SNR calculation (consistent with training)
+        coi_power = total_coi.pow(2).mean(dim=-1, keepdim=True) + denom_eps
+        bg_power = new_bg.pow(2).mean(dim=-1, keepdim=True) + denom_eps
 
-        silent_coi = coi_rms < 1e-4
+        snr_linear = torch.pow(10.0, snr_db / 10.0)  # Power ratio
+        bg_scaling = torch.sqrt(coi_power / (bg_power * snr_linear + denom_eps))
+
+        silent_coi = coi_power < 1e-8
         bg_scaling = torch.where(silent_coi, torch.ones_like(bg_scaling), bg_scaling)
+        bg_scaling = torch.clamp(bg_scaling, min=0.1, max=3.0)
 
         new_bg_scaled = new_bg * bg_scaling
 
-        # Create mixture and normalize ONLY mixture (same as training)
-        # Keep clean target sources unnormalized
+        # =========================================================
+        # Normalization strategy matching official SuDO-RM-RF code
+        # Each source normalized INDEPENDENTLY (same as training)
+        # =========================================================
         mixture_raw = total_coi + new_bg_scaled
-        clean_wavs = torch.stack(new_cois + [new_bg_scaled], dim=1)
 
-        mixture = normalize_tensor_wav(mixture_raw)
-        # Keep clean_wavs unnormalized for loss computation
+        # Normalize mixture to zero-mean, unit-variance
+        mixture = normalize_tensor_wav(mixture_raw, eps=denom_eps)
+
+        # Normalize each source INDEPENDENTLY
+        normalized_cois = [normalize_tensor_wav(coi, eps=denom_eps) for coi in new_cois]
+        normalized_bg = normalize_tensor_wav(new_bg_scaled, eps=denom_eps)
+
+        clean_wavs = torch.stack(normalized_cois + [normalized_bg], dim=1)
 
         with autocast_ctx:
             estimates = model(mixture.unsqueeze(1))
@@ -1164,6 +1212,15 @@ def create_model(config: Config):
             num_sources=2,
         )
 
+    # Ensure base model exposes compatibility attributes expected elsewhere
+    try:
+        if not hasattr(base_model, "n_least_samples_req"):
+            ups = getattr(base_model, "upsampling_depth", config.model.upsampling_depth)
+            k = getattr(base_model, "enc_kernel_size", config.model.enc_kernel_size)
+            base_model.n_least_samples_req = (k // 2) * (2 ** int(ups))
+    except Exception:
+        pass
+
     if config.data.n_coi_classes > 1:
         print(
             f"Wrapping model for Multi-class separation with {config.data.n_coi_classes} classes."
@@ -1174,6 +1231,15 @@ def create_model(config: Config):
     else:
         print("Wrapping model for Single COI separation.")
         model = wrap_model_for_coi(base_model)
+
+    # Propagate computed compatibility attributes to wrapped model
+    try:
+        if hasattr(base_model, "n_least_samples_req") and not hasattr(
+            model, "n_least_samples_req"
+        ):
+            model.n_least_samples_req = base_model.n_least_samples_req
+    except Exception:
+        pass
 
     try:
         model = model.to(config.training.device)

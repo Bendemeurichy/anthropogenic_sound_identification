@@ -54,21 +54,126 @@ class SeparationInference:
             checkpoint_path, map_location=device, weights_only=False
         )
 
-        # Reconstruct config and use train.py's create_model
-        cfg = checkpoint.get("config", {})
-        config = Config.from_dict(cfg)
-        config.training.device = device
+        # Handle multiple checkpoint formats:
+        # - dict with keys: 'config' and 'model_state_dict' (training checkpoint)
+        # - saved torch.nn.Module instance (model was saved directly)
+        if isinstance(checkpoint, dict):
+            cfg = checkpoint.get("config", {})
+            config = Config.from_dict(cfg)
+            config.training.device = device
 
-        model = create_model(config)
-        model.load_state_dict(checkpoint["model_state_dict"])
+            model = create_model(config)
+            state_dict = checkpoint["model_state_dict"]
+            try:
+                model.load_state_dict(state_dict)
+            except RuntimeError as e:
+                # Handle common key-naming mismatches for wrapped separation heads.
+                msg = str(e)
+                # If checkpoint used a bare COISeparationHead as `mask_net` (keys
+                # like `mask_net.coi_branch.*`) while the model expects a
+                # sequential wrapper (keys like `mask_net.1.coi_branch.*`),
+                # remap those keys and retry loading with strict=False so that
+                # missing top-level PReLU params are left at their initialized
+                # values.
+                if any(
+                    ("mask_net.coi_branch" in k)
+                    or ("mask_net.background_branch" in k)
+                    or ("mask_net.shared_conv" in k)
+                    for k in state_dict.keys()
+                ):
+                    new_state = {}
+                    for k, v in state_dict.items():
+                        if "mask_net." in k:
+                            # Keep any prefix (e.g., "_orig_mod.") and insert the
+                            # sequential index `1` after `mask_net.` so that keys
+                            # like "mask_net.coi_branch..." or
+                            # "_orig_mod.mask_net.coi_branch..." become
+                            # "mask_net.1.coi_branch..." or
+                            # "_orig_mod.mask_net.1.coi_branch..." respectively.
+                            prefix, rest = k.split("mask_net.", 1)
+                            first = rest.split(".")[0]
+                            if first in {
+                                "coi_branch",
+                                "background_branch",
+                                "shared_conv",
+                            }:
+                                new_key = prefix + "mask_net.1." + rest
+                                new_state[new_key] = v
+                                continue
+                        new_state[k] = v
 
-        print(
-            f"Loaded model from epoch {checkpoint.get('epoch', '?')}, val_loss: {checkpoint.get('val_loss', '?'):.4f}"
-        )
+                    try:
+                        model.load_state_dict(new_state, strict=False)
+                        print(
+                            "Loaded checkpoint after remapping legacy `mask_net` keys (non-strict)."
+                        )
+                    except Exception:
+                        # Fall back to less strict loading of original dict
+                        model.load_state_dict(state_dict, strict=False)
+                        print(
+                            "Loaded checkpoint with non-strict fallback (no remapping applied)."
+                        )
+                else:
+                    # Re-raise if it's an unrelated issue
+                    raise
+
+            print(
+                f"Loaded model from epoch {checkpoint.get('epoch', '?')}, val_loss: {checkpoint.get('val_loss', '?'):.4f}"
+            )
+            sample_rate = config.data.sample_rate
+            segment_samples = int(config.data.segment_length * config.data.sample_rate)
+        elif isinstance(checkpoint, torch.nn.Module):
+            # checkpoint is the model object itself
+            model = checkpoint
+            # Ensure compatibility attributes expected by downstream code
+            try:
+                if not hasattr(model, "n_least_samples_req"):
+                    # infer kernel size
+                    k = getattr(model, "enc_kernel_size", None)
+                    if k is None:
+                        enc = getattr(model, "encoder", None)
+                        if enc is not None and hasattr(enc, "kernel_size"):
+                            k = enc.kernel_size
+                            if isinstance(k, (tuple, list)):
+                                k = k[0]
+
+                    # infer upsampling depth
+                    ups = getattr(model, "upsampling_depth", None)
+                    if ups is None:
+                        sm = getattr(model, "sm", None)
+                        try:
+                            first = sm[0]
+                            ups = getattr(first, "depth", None)
+                        except Exception:
+                            ups = None
+
+                    if k is not None and ups is not None:
+                        model.n_least_samples_req = (int(k) // 2) * (2 ** int(ups))
+            except Exception:
+                pass
+            # try to infer sample_rate/segment from model attributes if present,
+            # otherwise fall back to sensible defaults
+            sample_rate = getattr(model, "sample_rate", 16000)
+            segment_samples = int(getattr(model, "segment_samples", sample_rate * 4))
+            print("Loaded model object from checkpoint file.")
+        else:
+            # Unknown format — try to treat as state_dict
+            try:
+                config = Config.from_dict({})
+                model = create_model(config)
+                model.load_state_dict(checkpoint)
+                sample_rate = config.data.sample_rate
+                segment_samples = int(
+                    config.data.segment_length * config.data.sample_rate
+                )
+                print("Loaded model from raw state_dict checkpoint.")
+            except Exception:
+                raise RuntimeError("Unrecognized checkpoint format")
+
         return cls(
             model=model,
-            sample_rate=config.data.sample_rate,
-            segment_samples=int(config.data.segment_length * config.data.sample_rate),
+            sample_rate=sample_rate,
+            segment_samples=segment_samples,
             device=device,
         )
 
@@ -102,13 +207,26 @@ class SeparationInference:
 
     def _separate_segment(self, segment: torch.Tensor) -> torch.Tensor:
         """Separate a single segment.
+
+        The model was trained with independently normalized sources, so outputs
+        are normalized waveforms. We rescale using mixture statistics to get
+        outputs in a reasonable amplitude range matching the input.
+
         Returns: (n_sources, T)
         """
-        mean, std = segment.mean(), segment.std() + 1e-8
+        mean = segment.mean()
+        std = segment.std() + 1e-8
+
+        # Normalize input (zero-mean, unit-variance) - matches training
         x = ((segment - mean) / std).unsqueeze(0).unsqueeze(0).to(self.device)
+
         estimates = self.model(x)
-        # estimates shape: (1, n_sources, T)
-        sources = estimates[0].cpu() * std + mean
+        # estimates shape: (1, n_sources, T) - each source is normalized
+
+        # The model outputs normalized sources. To get usable audio:
+        # Scale by mixture std to restore reasonable amplitude.
+        # Don't add mean since sources should be zero-mean signals.
+        sources = estimates[0].cpu() * std
         return sources
 
     def _separate_long(

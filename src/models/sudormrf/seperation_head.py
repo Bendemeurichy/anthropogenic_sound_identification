@@ -35,8 +35,12 @@ class COISeparationHead(nn.Module):
     Replaces the original SuDoRM-RF final masking layer.
     Produces masks for class of interest and background.
 
-    IMPORTANT: This head outputs PRE-ACTIVATION masks. The base model's
-    mask_nl_class (ReLU) will be applied after the view reshape.
+    This head mimics the original mask_net structure: PReLU -> Conv1d
+    The output is (B, n_src * enc_num_basis, T) which gets reshaped and
+    passed through mask_nl_class (ReLU) in the base model's forward().
+
+    We add semantic separation by having dedicated branches for COI vs background,
+    but output in the same format as the original mask_net.
     """
 
     def __init__(self, in_channels, out_channels, n_src=2, *args, **kwargs):
@@ -51,36 +55,32 @@ class COISeparationHead(nn.Module):
                 "Use multi_class_seperation for more sources."
             )
 
-        # Shared feature extraction before branching
+        # Shared feature extraction before branching (no activation - let branches handle it)
         self.shared_conv = nn.Sequential(
             nn.Conv1d(in_channels, in_channels, 3, padding=1, groups=in_channels),
             nn.Conv1d(in_channels, in_channels, 1),
-            nn.PReLU(in_channels),
         )
 
-        # COI-specific branch
+        # COI-specific branch - output is PRE-ReLU (ReLU applied by mask_nl_class)
+        # Using linear output so mask_nl_class can apply ReLU properly
         self.coi_branch = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, 3, padding=1),
-            nn.PReLU(out_channels),
-            nn.Conv1d(out_channels, out_channels, 1),
+            nn.PReLU(in_channels),
+            nn.Conv1d(in_channels, out_channels, 1),  # Linear projection to mask dim
         )
 
-        # Background-specific branch
+        # Background-specific branch - same structure
         self.background_branch = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, 3, padding=1),
-            nn.PReLU(out_channels),
-            nn.Conv1d(out_channels, out_channels, 1),
+            nn.PReLU(in_channels),
+            nn.Conv1d(in_channels, out_channels, 1),  # Linear projection to mask dim
         )
 
     def forward(self, x):
         """
         Args:
-            x: (B, C, T) - bottleneck features from separation module
+            x: (B, C, T) - bottleneck features from separation module (after PReLU from mask_net Sequential)
         Returns:
             masks: (B, n_src * out_channels, T) - Concatenated PRE-ACTIVATION masks
-
-        Note: The base model applies ReLU via mask_nl_class AFTER reshaping.
-        We output linear values here to let that activation work properly.
+                   The base model will reshape to (B, n_src, out_channels, T) and apply ReLU.
         """
         shared = self.shared_conv(x)
 
@@ -88,7 +88,7 @@ class COISeparationHead(nn.Module):
         bg_mask = self.background_branch(shared)  # (B, out_channels, T)
 
         # Concatenate: [COI, Background] along channel dimension
-        # Output shape: (B, 2 * out_channels, T)
+        # Output shape: (B, 2 * out_channels, T) = (B, n_src * enc_num_basis, T)
         masks = torch.cat([coi_mask, bg_mask], dim=1)
         return masks
 

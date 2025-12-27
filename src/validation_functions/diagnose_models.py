@@ -1,8 +1,22 @@
 import numpy as np
 import torch
 import torchaudio
+import sys
+import importlib
 from pathlib import Path
 from confusion_matrix import ValidationPipeline
+
+
+try:
+    import src.models.base.sudo_rm_rf
+except Exception:
+    try:
+        real_mod = importlib.import_module("models.sudormrf.base.sudo_rm_rf")
+        sys.modules["src.models.base.sudo_rm_rf"] = real_mod
+        sys.modules["sudo_rm_rf"] = real_mod
+    except Exception:
+        # best-effort only; if mapping fails, fallback to normal error
+        pass
 
 
 def diagnostic_separation(
@@ -79,38 +93,51 @@ def diagnostic_separation(
         mask_sum = mask_post.sum(dim=1, keepdim=True) + 1e-8
         mask_norm = mask_post / mask_sum
 
-        # Save mask stats and arrays
-        for si in range(n_src):
-            # Raw (post model nonlinearity)
-            arr = mask_post[0, si].cpu().numpy()
-            np.save(out_dir / f"mask_src{si}.npy", arr)
-            # Softmax across sources (complementary)
-            arr_sm = mask_softmax[0, si].cpu().numpy()
-            np.save(out_dir / f"mask_src{si}_softmax.npy", arr_sm)
-            # Sum-normalized ReLU masks
-            arr_norm = mask_norm[0, si].cpu().numpy()
-            np.save(out_dir / f"mask_src{si}_norm.npy", arr_norm)
-            print(
-                f"mask_src{si}: raw[min={arr.min():.4f}, max={arr.max():.4f}, mean={arr.mean():.4f}]  "
-                f"softmax[min={arr_sm.min():.4f}, max={arr_sm.max():.4f}, mean={arr_sm.mean():.4f}]  "
-                f"norm[min={arr_norm.min():.4f}, max={arr_norm.max():.4f}, mean={arr_norm.mean():.4f}]"
-            )
-
-        # Sum across sources
-        sum_masks = mask_post.sum(dim=1)[0].cpu().numpy()
-        np.save(out_dir / "masks_sum.npy", sum_masks)
-        print(
-            f"masks_sum (ReLU): min={sum_masks.min():.4f}, max={sum_masks.max():.4f}, mean={sum_masks.mean():.4f}"
-        )
-        sum_sm = mask_softmax.sum(dim=1)[0].cpu().numpy()
-        np.save(out_dir / "masks_sum_softmax.npy", sum_sm)
-        print(
-            f"masks_sum (softmax): min={sum_sm.min():.4f}, max={sum_sm.max():.4f}, mean={sum_sm.mean():.4f}"
-        )
-
         # Get separated outputs via pipeline helper
         separated = pipeline._separate(mix_wav.to(device))
         separated = separated.detach().cpu()
+
+        # Compute STFT-domain masks from separated waveforms so plots are
+        # interpretable in time-frequency space (not encoded basis space).
+        # Parameters chosen for good TF resolution; adjust if needed.
+        n_fft = 512
+        hop_length = 128
+        win_length = 512
+        eps = 1e-8
+
+        mix_spec = torch.stft(
+            mix_wav,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            return_complex=True,
+        )
+        mix_mag = torch.abs(mix_spec)  # (freq, time)
+
+        # separated: (n_sources, T)
+        spec_mags = []
+        for i in range(separated.shape[0]):
+            s = separated[i]
+            S = torch.stft(
+                s,
+                n_fft=n_fft,
+                hop_length=hop_length,
+                win_length=win_length,
+                return_complex=True,
+            )
+            spec_mags.append(torch.abs(S))
+
+        # Stack -> (n_sources, freq, time)
+        spec_mags = torch.stack(spec_mags, dim=0)
+        denom = spec_mags.sum(dim=0, keepdim=False) + eps
+
+        for si in range(spec_mags.shape[0]):
+            mask_spec = (spec_mags[si] / denom).cpu().numpy()
+            np.save(out_dir / f"mask_src{si}.npy", mask_spec)
+            np.save(out_dir / f"mask_src{si}_spec_mag.npy", spec_mags[si].cpu().numpy())
+
+        # Sum across sources (spectrogram domain)
+        np.save(out_dir / "masks_sum.npy", denom.cpu().numpy())
 
     # SI-SNR helper
     def si_snr(est, ref, eps=1e-8):
@@ -136,6 +163,18 @@ def diagnostic_separation(
             separated[i : i + 1, :],
             pipeline.sample_rate,
         )
+
+    # Check separated background vs original noise (mixture - ground-truth)
+    noise_si_snr = None
+    try:
+        orig_noise = mix_wav[:L] - gt_wav[:L]
+        # choose background index: 1 if two-source model, otherwise last
+        bg_idx = 1 if separated.shape[0] > 1 else separated.shape[0] - 1
+        est_bg = separated[bg_idx][:L].numpy()
+        noise_si_snr = si_snr(est_bg, orig_noise.numpy())
+        print(f"SI-SNR (separated background vs original noise): {noise_si_snr:.3f} dB")
+    except Exception:
+        pass
 
     print("SI-SNR per estimated source:")
     for i, v in enumerate(si_values):
@@ -163,6 +202,7 @@ def diagnostic_separation(
             str(out_dir / f"diag_est_src{i}.wav") for i in range(separated.shape[0])
         ],
         "si_snr": si_values,
+        "si_snr_noise": noise_si_snr,
         "mixture": str(out_dir / "diag_mixture.wav"),
         "ground_truth": str(out_dir / "diag_ground_truth.wav"),
     }
@@ -175,21 +215,29 @@ def main():
         / "models"
         / "sudormrf"
         / "checkpoints"
-        / "20251217_120142"
+        / "20251225_003909"
         / "best_model.pt"
     )
+
+    # base model checkpoint
+    # checkpoint = (
+    #     root
+    #     / "validation_functions"
+    #     / "base_models"
+    #     / "Improved_Sudormrf_U16_Bases512_WSJ02mix.pt"
+    # )
 
     mixture_path = (
         root
         / "validation_functions"
         / "separation_output_demo"
-        / "mixture_20251216_155938.wav"
+        / "mixture_20251227_152332.wav"
     )
     gt_source_path = (
         root
         / "validation_functions"
         / "separation_output_demo"
-        / "source_20251216_155938.wav"
+        / "source_20251227_152332.wav"
     )
 
     diagnostic_separation(
@@ -202,36 +250,31 @@ def main():
 if __name__ == "__main__":
     main()
     import numpy as np
-
-    img_array = np.load("./separation_diagnostic/mask_src0.npy")
-
     from matplotlib import pyplot as plt
+    import os
 
-    # Improved visualization
-    plt.figure(figsize=(10, 3))
-    plt.title("Raw mask (post-nonlinearity)")
-    plt.imshow(img_array, cmap="gray", aspect="auto")
-    plt.colorbar()
+    base = "./separation_diagnostic"
+    files = [os.path.join(base, f"mask_src{i}.npy") for i in (0, 1)]
+    masks = []
+    for f in files:
+        try:
+            masks.append(np.load(f))
+        except Exception:
+            masks.append(None)
+
+    fig, axs = plt.subplots(1, 2, figsize=(12, 4))
+    for i, ax in enumerate(axs):
+        m = masks[i]
+        if m is None:
+            ax.text(0.5, 0.5, f"mask_src{i}.npy not found", ha="center", va="center")
+            ax.axis("off")
+            continue
+        if m.ndim == 2:
+            im = ax.imshow(m, cmap="gray", aspect="auto", origin="lower")
+            fig.colorbar(im, ax=ax)
+        else:
+            ax.plot(m.flatten())
+        ax.set_title(f"Mask src{i}")
+
     plt.tight_layout()
-
-    try:
-        img_soft = np.load("./separation_diagnostic/mask_src0_softmax.npy")
-        plt.figure(figsize=(10, 3))
-        plt.title("Softmax across sources")
-        plt.imshow(img_soft, cmap="gray", aspect="auto", vmin=0.0, vmax=1.0)
-        plt.colorbar()
-        plt.tight_layout()
-    except Exception:
-        pass
-
-    try:
-        img_norm = np.load("./separation_diagnostic/mask_src0_norm.npy")
-        plt.figure(figsize=(10, 3))
-        plt.title("Sum-normalized (ReLU masks)")
-        plt.imshow(img_norm, cmap="gray", aspect="auto", vmin=0.0, vmax=1.0)
-        plt.colorbar()
-        plt.tight_layout()
-    except Exception:
-        pass
-
     plt.show()

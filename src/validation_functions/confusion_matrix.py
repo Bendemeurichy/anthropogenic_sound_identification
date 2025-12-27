@@ -3,6 +3,7 @@ Validation module for separation + classification pipeline.
 Computes confusion matrix, precision, recall, F1-score, and other metrics.
 """
 
+import importlib
 import os
 import sys
 from pathlib import Path
@@ -24,6 +25,17 @@ sys.path.insert(0, str(Path(__file__).parent / "plane_clasifier"))
 from src.models.sudormrf.inference import SeparationInference
 from src.validation_functions.plane_clasifier.inference import PlaneClassifierInference
 from src.validation_functions.plane_clasifier.config import TrainingConfig
+
+try:
+    import src.models.base.sudo_rm_rf
+except Exception:
+    try:
+        real_mod = importlib.import_module("models.sudormrf.base.sudo_rm_rf")
+        sys.modules["src.models.base.sudo_rm_rf"] = real_mod
+        sys.modules["sudo_rm_rf"] = real_mod
+    except Exception:
+        # best-effort only; if mapping fails, fallback to normal error
+        pass
 
 # Project root (code directory)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -212,19 +224,25 @@ class ValidationPipeline:
         return waveform
 
     def _separate(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Run separation model. Returns COI source."""
+        """Run separation model. Returns all sources.
+
+        The model was trained with independently normalized sources.
+        Outputs are scaled by mixture std to restore reasonable amplitude.
+        """
         orig_len = waveform.shape[0]
 
         # If waveform is the expected segment length, run as before
         if orig_len <= self.segment_samples:
-            mean, std = waveform.mean(), waveform.std() + 1e-8
+            mean = waveform.mean()
+            std = waveform.std() + 1e-8
             x = ((waveform - mean) / std).unsqueeze(0).unsqueeze(0).to(self.device)
 
             with torch.inference_mode():
                 estimates = self.separator.model(x)
 
-            # estimates shape: (1, n_sources, T)
-            sources = estimates[0].cpu() * std + mean
+            # estimates shape: (1, n_sources, T) - normalized sources
+            # Scale by std only (model outputs zero-mean signals)
+            sources = estimates[0].cpu() * std
             # Return all sources (n_sources, T) trimmed to original length
             return sources[:, :orig_len]
 
@@ -255,14 +273,15 @@ class ValidationPipeline:
                     chunk, (0, self.segment_samples - chunk.shape[0])
                 )
 
-            mean, std = chunk.mean(), chunk.std() + 1e-8
+            mean = chunk.mean()
+            std = chunk.std() + 1e-8
             x = ((chunk - mean) / std).unsqueeze(0).unsqueeze(0).to(self.device)
 
             with torch.inference_mode():
                 estimates = self.separator.model(x)
 
-            # estimates[0].cpu() -> (n_sources, segment_samples)
-            src_chunk_all = estimates[0].cpu() * std + mean
+            # Scale by std only (model outputs zero-mean signals)
+            src_chunk_all = estimates[0].cpu() * std
 
             # Trim if last chunk shorter
             length = end - start
@@ -287,10 +306,17 @@ class ValidationPipeline:
     def _create_mixture(
         self, source: torch.Tensor, noise: torch.Tensor, snr_db: float
     ) -> torch.Tensor:
-        """Mix source and noise at given SNR."""
-        source_power = torch.mean(source**2) + 1e-8
-        noise_power = torch.mean(noise**2) + 1e-8
+        """Mix source and noise at given SNR.
+
+        SNR (dB) = 10 * log10(source_power / noise_power)
+        Scales noise to achieve target SNR with clamping to prevent extreme levels.
+        """
+        eps = 1e-8
+        source_power = torch.mean(source**2) + eps
+        noise_power = torch.mean(noise**2) + eps
         scale = torch.sqrt(source_power / (10 ** (snr_db / 10) * noise_power))
+        # Clamp scaling to prevent extreme noise (consistent with training)
+        scale = torch.clamp(scale, min=0.1, max=3.0)
         return source + noise * scale
 
     def _normalize(self, waveform: torch.Tensor) -> torch.Tensor:
@@ -404,9 +430,7 @@ class ValidationPipeline:
                 print(f"Error: {e}")
 
         # Process background-only samples (label=0) - use itertuples for better performance
-        for row in tqdm(
-            df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG only"
-        ):
+        for row in tqdm(df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG only"):
             try:
                 waveform = self._load_audio(row.filename)
                 if use_separation:
@@ -621,8 +645,6 @@ def demo_two_wav_separation(
     }
 
 
-
-
 def main():
     # ============ CONFIGURE PATHS HERE ============
     SEP_CHECKPOINT = PROJECT_ROOT / "src/models/sudormrf/checkpoints/best_model.pt"
@@ -649,7 +671,7 @@ if __name__ == "__main__":
     import random
 
     example_src = Path("./ho6sg-47RD0.wav")
-    example_noise = Path("./6PQQPzEhCjM.wav")
+    example_noise = Path("./LEEC02__0__20161128_183900_ma.wav")
 
     if not example_src.exists() or not example_noise.exists():
         missing = []
@@ -664,6 +686,6 @@ if __name__ == "__main__":
             noise_path=str(example_noise),
             snr_db=random.uniform(-5, 5),
             sep_checkpoint=PROJECT_ROOT
-            / "src/models/sudormrf/checkpoints/20251215_234806/best_model.pt",
+            / "src/validation_functions/base_models/Improved_Sudormrf_U16_Bases512_WSJ02mix.pt",
             out_dir="./separation_output_demo",
         )
