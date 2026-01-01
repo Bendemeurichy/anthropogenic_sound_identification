@@ -22,6 +22,10 @@ model:
   upsampling_depth: 5 # Standard depth
   enc_kernel_size: 21 # base model default
   enc_num_basis: 512 # base model default
+  # COI separation head U-ConvBlocks
+  # 0 = simple architecture (PReLU + Conv1d, lightweight baseline)
+  # >0 = enhanced architecture with N UConvBlocks per branch for class-specific feature extraction
+  num_head_conv_blocks: 2
 
 # Training settings - optimized for COI separation
 training:

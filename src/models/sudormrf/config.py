@@ -31,6 +31,10 @@ class ModelConfig:
     upsampling_depth: int = 5
     enc_kernel_size: int = 21
     enc_num_basis: int = 512
+    # COI separation head configuration
+    num_head_conv_blocks: int = 0
+    # If 0 (default): simple PReLU + Conv1d head (lightweight, baseline)
+    # If > 0: enhanced head with N UConvBlocks per branch for class-specific features
 
 
 @dataclass
@@ -45,7 +49,7 @@ class TrainingConfig:
     patience: int = 15
     checkpoint_dir: str = "checkpoints"
     device: str = "cuda"
-    compile_model: bool = True 
+    compile_model: bool = True
     compile_backend: str = "inductor"
     # Class-weight for COI-focused loss (used by COILoss). Higher -> more
     # emphasis on COI reconstruction. Default 1.5 matches prior code.

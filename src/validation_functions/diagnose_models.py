@@ -210,34 +210,34 @@ def diagnostic_separation(
 
 def main():
     root = Path(__file__).parent.parent
-    checkpoint = (
-        root
-        / "models"
-        / "sudormrf"
-        / "checkpoints"
-        / "20251225_003909"
-        / "best_model.pt"
-    )
-
-    # base model checkpoint
     # checkpoint = (
     #     root
-    #     / "validation_functions"
-    #     / "base_models"
-    #     / "Improved_Sudormrf_U16_Bases512_WSJ02mix.pt"
+    #     / "models"
+    #     / "sudormrf"
+    #     / "checkpoints"
+    #     / "20251226_170458"
+    #     / "best_model.pt"
     # )
+
+    #base model checkpoint
+    checkpoint = (
+        root
+        / "validation_functions"
+        / "base_models"
+        / "Improved_Sudormrf_U16_Bases512_WSJ02mix.pt"
+    )
 
     mixture_path = (
         root
         / "validation_functions"
         / "separation_output_demo"
-        / "mixture_20251227_152332.wav"
+        / "mixture_20251228_124724.wav"
     )
     gt_source_path = (
         root
         / "validation_functions"
         / "separation_output_demo"
-        / "source_20251227_152332.wav"
+        / "source_20251228_124724.wav"
     )
 
     diagnostic_separation(

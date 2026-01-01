@@ -35,7 +35,14 @@ from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
     GroupCommSudoRmRf,
 )
-from .seperation_head import wrap_model_for_coi
+import os
+
+# Check for environment variable to use old separation head
+USE_OLD_SEPARATION_HEAD = os.environ.get("USE_OLD_SEPARATION_HEAD", "0") == "1"
+if USE_OLD_SEPARATION_HEAD:
+    from .seperation_head_old import wrap_model_for_coi
+else:
+    from .seperation_head import wrap_model_for_coi
 from .multi_class_seperation import wrap_model_for_multiclass
 from .config import Config
 
@@ -1230,7 +1237,14 @@ def create_model(config: Config):
         )
     else:
         print("Wrapping model for Single COI separation.")
-        model = wrap_model_for_coi(base_model)
+        print(
+            f"  Using {config.model.num_head_conv_blocks} head-specific UConvBlocks per branch"
+        )
+        model = wrap_model_for_coi(
+            base_model,
+            num_conv_blocks=config.model.num_head_conv_blocks,
+            upsampling_depth=config.model.upsampling_depth,
+        )
 
     # Propagate computed compatibility attributes to wrapped model
     try:

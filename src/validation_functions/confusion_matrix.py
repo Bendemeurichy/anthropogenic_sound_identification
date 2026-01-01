@@ -686,6 +686,6 @@ if __name__ == "__main__":
             noise_path=str(example_noise),
             snr_db=random.uniform(-5, 5),
             sep_checkpoint=PROJECT_ROOT
-            / "src/validation_functions/base_models/Improved_Sudormrf_U16_Bases512_WSJ02mix.pt",
+            / "src/models/sudormrf/checkpoints/20251226_170458/best_model.pt",
             out_dir="./separation_output_demo",
         )
