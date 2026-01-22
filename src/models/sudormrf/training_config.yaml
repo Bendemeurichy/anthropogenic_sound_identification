@@ -13,9 +13,9 @@ data:
 # Model settings - using proven SuDoRM-RF defaults
 model:
   type: "improved" # 'improved' or 'groupcomm'
-  out_channels: 256
+  out_channels: 128
   in_channels: 512
-  num_blocks: 20
+  num_blocks: 16
   upsampling_depth: 5
   enc_num_basis: 512
   # COI separation head U-ConvBlocks
