@@ -1,10 +1,16 @@
 """
 Class of interest-specific separation head for use with original SuDoRM-RF models.
-This module adapts the existing improved_sudormrf or groupcomm_sudormrf_v2 models.
+
+This module provides a separation head that guarantees consistent output head assignment:
+    - Head 0 (COI_HEAD_INDEX): Always outputs the Class of Interest (e.g., airplane noise)
+    - Head 1 (BACKGROUND_HEAD_INDEX): Always outputs background/non-COI audio
+
+This fixed assignment is critical for downstream processing that relies on knowing
+which output channel contains the separated airplane audio.
 
 Usage:
     from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
-    from seperation_head import wrap_model_for_coi
+    from seperation_head import wrap_model_for_coi, COI_HEAD_INDEX, BACKGROUND_HEAD_INDEX
 
     # Load original model
     base_model = SuDORMRF(
@@ -18,11 +24,19 @@ Usage:
     )
 
     # Wrap with aircraft-specific head
-    model = wrap_model_for_coi(base_model, coi='aircraft')
+    model = wrap_model_for_coi(base_model)
+
+    # After inference:
+    estimated_sources = model(mixture)  # Shape: (B, 2, T)
+    airplane_audio = estimated_sources[:, COI_HEAD_INDEX, :]      # Always airplane
+    background_audio = estimated_sources[:, BACKGROUND_HEAD_INDEX, :]  # Always background
 """
+
+from typing import Optional
 
 import torch
 import torch.nn as nn
+
 from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
     GroupCommSudoRmRf,
 )
@@ -31,185 +45,351 @@ from .base.sudo_rm_rf.dnn.models.improved_sudormrf import (
     UConvBlock,
 )
 
+# =============================================================================
+# HEAD INDEX CONSTANTS - Use these for consistent access to model outputs
+# =============================================================================
+COI_HEAD_INDEX = 0  # Class of Interest (airplane) is ALWAYS at index 0
+BACKGROUND_HEAD_INDEX = 1  # Background audio is ALWAYS at index 1
+NUM_SOURCES = 2  # Total number of output sources
 
-class COISeparationHead(nn.Module):
-    """Separation head specific for class of interest target audio separation.
 
-    Replaces the original SuDoRM-RF final masking layer.
-    Produces masks for class of interest and background.
+class DepthwiseSeparableConv1d(nn.Module):
+    """Depthwise separable convolution for efficient feature processing.
 
-    This head mimics the original mask_net structure: PReLU -> Conv1d
-    The output is (B, n_src * enc_num_basis, T) which gets reshaped and
-    passed through mask_nl_class (ReLU) in the base model's forward().
+    Consists of:
+    1. Depthwise conv: applies a single filter per input channel
+    2. Pointwise conv: 1x1 conv to mix channel information
 
-    We add semantic separation by having dedicated branches for COI vs background,
-    but output in the same format as the original mask_net.
+    This is more parameter-efficient than standard convolution while
+    maintaining good representational capacity.
     """
 
     def __init__(
         self,
-        in_channels,
-        out_channels,
-        n_src=2,
-        num_conv_blocks=0,
-        upsampling_depth=4,
-        *args,
-        **kwargs,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        padding: int = 1,
+        bias: bool = True,
+    ):
+        super().__init__()
+        self.depthwise = nn.Conv1d(
+            in_channels,
+            in_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            groups=in_channels,
+            bias=bias,
+        )
+        self.pointwise = nn.Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size=1,
+            bias=bias,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.pointwise(self.depthwise(x))
+
+
+class MaskEstimationBranch(nn.Module):
+    """Single branch for estimating separation masks.
+
+    This branch learns to produce masks specific to one source type
+    (either COI or background). Using dedicated branches allows the
+    network to learn source-specific features.
+
+    Architecture options:
+    - Simple mode (num_blocks=0): Lightweight with depthwise-separable conv
+    - Enhanced mode (num_blocks>0): Uses UConvBlocks for multi-resolution analysis
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_blocks: int = 0,
+        upsampling_depth: int = 4,
     ):
         """
         Args:
-            in_channels: Number of input channels from bottleneck (out_channels from model)
-            out_channels: Number of output channels (enc_num_basis)
-            n_src: Number of sources (must be 2)
-            num_conv_blocks: Number of UConvBlocks per branch for feature extraction.
-                           If 0 (default), uses simple PReLU + Conv1d structure.
-                           If > 0, uses UConvBlocks for class-specific feature extraction.
-            upsampling_depth: Upsampling depth for UConvBlocks (default 4)
+            in_channels: Number of input channels (from bottleneck)
+            out_channels: Number of output channels (enc_num_basis for masking)
+            num_blocks: Number of UConvBlocks. 0 = simple mode, >0 = enhanced mode
+            upsampling_depth: Upsampling depth for UConvBlocks (only used if num_blocks > 0)
         """
-        super().__init__(*args, **kwargs)
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.num_blocks = num_blocks
+
+        if num_blocks == 0:
+            # Simple but effective architecture
+            # Uses depthwise-separable conv for efficiency with PReLU activation
+            self.branch = nn.Sequential(
+                nn.PReLU(in_channels),
+                DepthwiseSeparableConv1d(
+                    in_channels, in_channels, kernel_size=3, padding=1
+                ),
+                nn.PReLU(in_channels),
+                nn.Conv1d(in_channels, out_channels, kernel_size=1),
+            )
+        else:
+            # Enhanced architecture with UConvBlocks for multi-resolution processing
+            layers: list[nn.Module] = [nn.PReLU(in_channels)]
+
+            for _ in range(num_blocks):
+                layers.append(
+                    UConvBlock(
+                        out_channels=in_channels,
+                        in_channels=in_channels,
+                        upsampling_depth=upsampling_depth,
+                    )
+                )
+
+            # Final projection to output dimension
+            layers.append(nn.Conv1d(in_channels, out_channels, kernel_size=1))
+
+            self.branch = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input features (B, in_channels, T)
+        Returns:
+            Mask logits (B, out_channels, T) - PRE-ACTIVATION
+        """
+        return self.branch(x)
+
+
+class COISeparationHead(nn.Module):
+    """Separation head for Class-of-Interest (COI) audio separation.
+
+    This head replaces the original SuDoRM-RF mask network to provide
+    dedicated processing branches for COI (airplane) and background audio.
+
+    CRITICAL: Output ordering is FIXED and GUARANTEED:
+        - Channel 0: COI (airplane) mask
+        - Channel 1: Background mask
+
+    This ordering is maintained through the forward pass and must NOT be
+    changed, as downstream processing depends on it.
+
+    The head outputs PRE-ACTIVATION masks. The base model's mask_nl_class
+    (ReLU) will be applied after reshaping in the forward pass.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        n_src: int = NUM_SOURCES,
+        num_conv_blocks: int = 0,
+        upsampling_depth: int = 4,
+    ):
+        """
+        Args:
+            in_channels: Input channels from separation module (model.out_channels)
+            out_channels: Output channels per source (model.enc_num_basis)
+            n_src: Number of sources (must be 2 for COI + Background)
+            num_conv_blocks: Number of UConvBlocks per branch
+                            0 = simple lightweight architecture
+                            >0 = enhanced architecture with multi-resolution processing
+            upsampling_depth: Upsampling depth for UConvBlocks (if num_conv_blocks > 0)
+        """
+        super().__init__()
+
+        if n_src != NUM_SOURCES:
+            raise ValueError(
+                f"COISeparationHead only supports n_src={NUM_SOURCES} (COI + Background). "
+                f"Got n_src={n_src}. Use multi_class_seperation for more sources."
+            )
+
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.n_src = n_src
         self.num_conv_blocks = num_conv_blocks
         self.upsampling_depth = upsampling_depth
 
-        if n_src != 2:
-            raise ValueError(
-                "COISeparationHead only supports n_src=2 (COI + Background). "
-                "Use multi_class_seperation for more sources."
-            )
-
-        # Shared feature extraction before branching (no activation - let branches handle it)
-        self.shared_conv = nn.Sequential(
-            nn.Conv1d(in_channels, in_channels, 3, padding=1, groups=in_channels),
-            nn.Conv1d(in_channels, in_channels, 1),
+        # Shared feature extraction before branching
+        # This processes common features before source-specific branches
+        self.shared_features = nn.Sequential(
+            DepthwiseSeparableConv1d(
+                in_channels, in_channels, kernel_size=3, padding=1
+            ),
+            nn.PReLU(in_channels),
         )
 
-        if num_conv_blocks == 0:
-            # Original simple architecture
-            # COI-specific branch - output is PRE-ReLU (ReLU applied by mask_nl_class)
-            # Using linear output so mask_nl_class can apply ReLU properly
-            self.coi_branch = nn.Sequential(
-                nn.PReLU(in_channels),
-                nn.Conv1d(
-                    in_channels, out_channels, 1
-                ),  # Linear projection to mask dim
-            )
+        # COI-specific branch (airplane noise) - ALWAYS outputs at HEAD 0
+        self.coi_branch = MaskEstimationBranch(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            num_blocks=num_conv_blocks,
+            upsampling_depth=upsampling_depth,
+        )
 
-            # Background-specific branch - same structure
-            self.background_branch = nn.Sequential(
-                nn.PReLU(in_channels),
-                nn.Conv1d(
-                    in_channels, out_channels, 1
-                ),  # Linear projection to mask dim
-            )
-        else:
-            # Enhanced architecture with multiple UConvBlocks for feature extraction
-            self.coi_branch = self._build_uconv_branch(
-                in_channels, out_channels, num_conv_blocks
-            )
-            self.background_branch = self._build_uconv_branch(
-                in_channels, out_channels, num_conv_blocks
-            )
+        # Background-specific branch - ALWAYS outputs at HEAD 1
+        self.background_branch = MaskEstimationBranch(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            num_blocks=num_conv_blocks,
+            upsampling_depth=upsampling_depth,
+        )
 
-    def _build_uconv_branch(self, in_channels, out_channels, num_blocks):
-        """Build a branch with multiple UConvBlocks for class-specific feature extraction.
-
-        Uses UConvBlock from the base SuDO-RM-RF model, which performs successive
-        downsampling and upsampling to analyze features at multiple resolutions.
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with GUARANTEED output ordering.
 
         Args:
-            in_channels: Input channels (out_channels from model)
-            out_channels: Output channels (enc_num_basis)
-            num_blocks: Number of UConvBlocks
+            x: Bottleneck features from separation module (B, in_channels, T)
+               Note: The PReLU from mask_net Sequential is applied before this
+
         Returns:
-            nn.Sequential: Complete branch
+            masks: Concatenated PRE-ACTIVATION masks (B, n_src * out_channels, T)
+                   Layout: [COI_mask, Background_mask] along channel dimension
+
+                   After reshape in base model: (B, n_src, out_channels, T)
+                   Where:
+                       masks[:, COI_HEAD_INDEX, :, :] = COI (airplane) mask
+                       masks[:, BACKGROUND_HEAD_INDEX, :, :] = Background mask
         """
-        layers = []
+        # Extract shared features
+        shared = self.shared_features(x)
 
-        # Initial activation
-        layers.append(nn.PReLU(in_channels))
-
-        # Add UConvBlocks - same structure as base model's separation module
-        # Note: UConvBlock expects out_channels as first param, in_channels as second
-        for i in range(num_blocks):
-            layers.append(
-                UConvBlock(
-                    out_channels=in_channels,  # Keep same channels throughout
-                    in_channels=in_channels,  # Internal processing channels
-                    upsampling_depth=self.upsampling_depth,
-                )
-            )
-
-        # Final projection to output dimension (no activation - will be applied by mask_nl_class)
-        layers.append(nn.Conv1d(in_channels, out_channels, 1))
-
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        """
-        Args:
-            x: (B, C, T) - bottleneck features from separation module (after PReLU from mask_net Sequential)
-        Returns:
-            masks: (B, n_src * out_channels, T) - Concatenated PRE-ACTIVATION masks
-                   The base model will reshape to (B, n_src, out_channels, T) and apply ReLU.
-        """
-        shared = self.shared_conv(x)
-
+        # Generate source-specific masks
+        # IMPORTANT: COI must come FIRST to ensure consistent head assignment
         coi_mask = self.coi_branch(shared)  # (B, out_channels, T)
-        bg_mask = self.background_branch(shared)  # (B, out_channels, T)
+        background_mask = self.background_branch(shared)  # (B, out_channels, T)
 
-        # Concatenate: [COI, Background] along channel dimension
-        # Output shape: (B, 2 * out_channels, T) = (B, n_src * enc_num_basis, T)
-        masks = torch.cat([coi_mask, bg_mask], dim=1)
+        # Concatenate masks: COI FIRST (index 0), then Background (index 1)
+        # This ordering is CRITICAL and must not be changed!
+        # Shape: (B, 2 * out_channels, T) = (B, n_src * enc_num_basis, T)
+        masks = torch.cat([coi_mask, background_mask], dim=1)
+
         return masks
+
+    def extra_repr(self) -> str:
+        """String representation for printing model architecture."""
+        return (
+            f"in_channels={self.in_channels}, "
+            f"out_channels={self.out_channels}, "
+            f"n_src={self.n_src}, "
+            f"num_conv_blocks={self.num_conv_blocks}, "
+            f"upsampling_depth={self.upsampling_depth}"
+        )
 
 
 def wrap_model_for_coi(
-    model, replace_head=True, num_conv_blocks=0, upsampling_depth=None
-):
-    """Wraps a SuDoRM-RF model with a COI-specific separation head.
+    model: nn.Module,
+    replace_head: bool = True,
+    num_conv_blocks: int = 0,
+    upsampling_depth: Optional[int] = None,
+) -> nn.Module:
+    """Wrap a SuDoRM-RF model with a COI-specific separation head.
+
+    This function modifies the model's mask_net to use our COISeparationHead,
+    which guarantees consistent output ordering:
+        - output[:, 0, :] = COI (airplane) audio
+        - output[:, 1, :] = Background audio
 
     Args:
-        model: SuDoRM-RF model instance
-        replace_head: If True, replaces the existing separation head.
-        num_conv_blocks: Number of UConvBlocks per branch for feature extraction.
-                        0 = simple architecture (default), >0 = enhanced architecture with UConvBlocks
-        upsampling_depth: Upsampling depth for UConvBlocks (default: use model's upsampling_depth)
+        model: SuDoRM-RF model instance (SuDORMRF or GroupCommSudoRmRf)
+        replace_head: If True, replaces the existing separation head
+        num_conv_blocks: Number of UConvBlocks per branch for feature extraction
+                        0 = simple architecture (default, lightweight)
+                        >0 = enhanced architecture with UConvBlocks
+        upsampling_depth: Upsampling depth for UConvBlocks
+                         If None, uses the model's upsampling_depth
+
     Returns:
         model: Modified SuDoRM-RF model with COI-specific head
+
+    Raises:
+        TypeError: If model type is not supported
+
+    Example:
+        >>> base_model = SuDORMRF(...)
+        >>> model = wrap_model_for_coi(base_model, num_conv_blocks=2)
+        >>> outputs = model(mixture)
+        >>> airplane = outputs[:, COI_HEAD_INDEX, :]
+        >>> background = outputs[:, BACKGROUND_HEAD_INDEX, :]
     """
+    if not replace_head:
+        return model
 
-    if replace_head:
-        if isinstance(model, SuDORMRF) or isinstance(model, GroupCommSudoRmRf):
-            in_channels = model.out_channels  # output of bottleneck/separation module
-            out_channels = model.enc_num_basis  # must match encoder basis for masking
-            n_src = 2  # COI and background
+    # Validate model type
+    if not isinstance(model, (SuDORMRF, GroupCommSudoRmRf)):
+        raise TypeError(
+            f"Model type {type(model).__name__} not supported for COI head replacement. "
+            f"Expected SuDORMRF or GroupCommSudoRmRf."
+        )
 
-            # Use model's upsampling_depth if not specified
-            if upsampling_depth is None:
-                upsampling_depth = model.upsampling_depth
+    # Extract model parameters
+    in_channels = model.out_channels  # Output of bottleneck/separation module
+    out_channels = model.enc_num_basis  # Must match encoder basis for masking
 
-            # Replace mask_net with our COI-specific head
-            model.mask_net = nn.Sequential(
-                nn.PReLU(),  # Keep the PReLU that was in the original mask_net
-                COISeparationHead(
-                    in_channels=in_channels,
-                    out_channels=out_channels,
-                    n_src=n_src,
-                    num_conv_blocks=num_conv_blocks,
-                    upsampling_depth=upsampling_depth,
-                ),
-            )
+    # Use model's upsampling_depth if not specified
+    if upsampling_depth is None:
+        upsampling_depth = model.upsampling_depth
 
-            # Ensure model properties match
-            model.num_sources = n_src
+    # Replace mask_net with our COI-specific head
+    # Structure: PReLU -> COISeparationHead
+    # The PReLU is kept from the original architecture for compatibility
+    model.mask_net = nn.Sequential(
+        nn.PReLU(),
+        COISeparationHead(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            n_src=NUM_SOURCES,
+            num_conv_blocks=num_conv_blocks,
+            upsampling_depth=upsampling_depth,
+        ),
+    )
 
-            # The decoder should NOT be changed from the original - it uses groups=1
-            # which is correct for the SuDoRM-RF architecture.
-            # The mask multiplication happens BEFORE the decoder in the forward pass.
+    # Update model's num_sources to match our head
+    model.num_sources = NUM_SOURCES
 
-        else:
-            raise TypeError("Model type not supported for COI head replacement.")
+    # Note: The decoder is NOT modified. It uses groups=1 which is correct
+    # for the SuDoRM-RF architecture. The mask multiplication happens
+    # BEFORE the decoder in the forward pass.
 
     return model
+
+
+def get_head_indices():
+    """Get the head indices for COI and background.
+
+    Use this function to get indices programmatically rather than
+    hardcoding values, ensuring consistency across the codebase.
+
+    Returns:
+        tuple: (coi_index, background_index)
+
+    Example:
+        >>> coi_idx, bg_idx = get_head_indices()
+        >>> airplane = model_output[:, coi_idx, :]
+        >>> background = model_output[:, bg_idx, :]
+    """
+    return COI_HEAD_INDEX, BACKGROUND_HEAD_INDEX
+
+
+def verify_head_assignment(model_output: torch.Tensor) -> bool:
+    """Verify that the model output has the expected shape for head assignment.
+
+    This is a utility function for debugging and validation.
+
+    Args:
+        model_output: Output tensor from the wrapped model
+
+    Returns:
+        bool: True if the output has the expected shape (B, NUM_SOURCES, T)
+
+    Example:
+        >>> output = model(mixture)
+        >>> assert verify_head_assignment(output), "Unexpected output shape!"
+    """
+    if model_output.ndim != 3:
+        return False
+    if model_output.shape[1] != NUM_SOURCES:
+        return False
+    return True

@@ -4,9 +4,6 @@ data:
   segment_length: 4.0 # seconds
   snr_range: [-5, 5] # dB range for mixing
   n_coi_classes: 1
-  # Extra background-only samples added on top (ratio vs. COI samples).
-  # CRITICAL: Keep this LOW (0.1-0.2) - high values flood training with silence
-  # and confuse the model. Previous 2.0 value was causing poor separation!
   background_only_prob: 0.25
   # How many non-COI files to sum for background-only examples
   background_mix_n: 2
@@ -16,12 +13,11 @@ data:
 # Model settings - using proven SuDoRM-RF defaults
 model:
   type: "improved" # 'improved' or 'groupcomm'
-  out_channels: 256 # INCREASED: more capacity for complex separation
-  in_channels: 512 # base model default
-  num_blocks: 16 # Standard for good performance (16-24)
-  upsampling_depth: 5 # Standard depth
-  enc_kernel_size: 21 # base model default
-  enc_num_basis: 512 # base model default
+  out_channels: 256
+  in_channels: 512
+  num_blocks: 20
+  upsampling_depth: 5
+  enc_num_basis: 512
   # COI separation head U-ConvBlocks
   # 0 = simple architecture (PReLU + Conv1d, lightweight baseline)
   # >0 = enhanced architecture with N UConvBlocks per branch for class-specific feature extraction
@@ -29,30 +25,23 @@ model:
 
 # Training settings - optimized for COI separation
 training:
-  # === PERFORMANCE OPTIMIZATIONS ===
-  batch_size: 4 # INCREASED: larger batch = more stable gradients
-  grad_accum_steps: 1 # Effective batch size = 16
+  batch_size: 4
+  grad_accum_steps: 0
   use_amp: true
   num_epochs: 300
-  lr: 3e-4 # Slightly lower LR for stability with larger effective batch
-  num_workers: 2 # Parallel data loading (adjust based on CPU cores, 0 saves RAM)
-  pin_memory: true # Faster CPU->GPU transfer
-  persistent_workers: true # Keep workers alive between epochs
-  prefetch_factor: 2 # Preload batches per worker
+  lr: 3e-4
+  num_workers: 0
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 1
   clip_grad_norm: 5.0
-  patience: 30 # early stopping patience
+  patience: 35
   checkpoint_dir: "checkpoints"
-  device: "cuda:0" # pin to first GPU
-  compile_model: false # Disable initially for debugging - enable once working
+  device: "cuda:0"
+  compile_model: false
   compile_backend: "eager"
-  # Emphasize COI (class-of-interest) in loss. 1.0 = equal weight
-  # Start with balanced weights, increase only if COI separation is weak
-  class_weight: 1.0
-  # Optional auxiliary L1 waveform loss weight (0.0 disables).
-  aux_waveform_weight: 0.0 # Disable - SI-SNR alone is sufficient
-  # Learning rate warmup: ramp LR from 0 to lr over this many steps (prevents early NaN)
-  warmup_steps: 1000 # Longer warmup for stability
-  # Validation frequency: run validation every N epochs (1 = every epoch)
+  class_weight: 1.2
+  aux_waveform_weight: 0.0
+  warmup_steps: 1000
   validate_every_n_epochs: 1
-  # Random seed for reproducibility
   seed: 42

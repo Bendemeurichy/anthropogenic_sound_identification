@@ -7,51 +7,65 @@ Expected dataframe structure:
     - 'label': 1 for aircraft (COI), 0 for background (non-COI)
 """
 
-import os
 import gc
 import json
+import os
 from datetime import datetime
 
 # Pin to single GPU before importing torch (prevents multi-GPU OOM issues)
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-import sys
-import torch
-
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import torchaudio
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from tqdm import tqdm
 import argparse
+import sys
 from contextlib import nullcontext
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.optim as optim
+import torchaudio
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
     GroupCommSudoRmRf,
 )
-import os
+from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 
 # Check for environment variable to use old separation head
 USE_OLD_SEPARATION_HEAD = os.environ.get("USE_OLD_SEPARATION_HEAD", "0") == "1"
 if USE_OLD_SEPARATION_HEAD:
     from .seperation_head_old import wrap_model_for_coi
+
+    # Define constants for backward compatibility with old head
+    _COI_HEAD_INDEX = 0
+    _BACKGROUND_HEAD_INDEX = 1
 else:
-    from .seperation_head import wrap_model_for_coi
-from .multi_class_seperation import wrap_model_for_multiclass
-from .config import Config
+    from .seperation_head import (
+        BACKGROUND_HEAD_INDEX as _BACKGROUND_HEAD_INDEX,
+    )
+    from .seperation_head import (
+        COI_HEAD_INDEX as _COI_HEAD_INDEX,
+    )
+    from .seperation_head import (
+        wrap_model_for_coi,
+    )
 
-
-from label_loading.sampler import get_coi, sample_non_coi
+# Export as module-level constants
+COI_HEAD_INDEX: int = _COI_HEAD_INDEX
+BACKGROUND_HEAD_INDEX: int = _BACKGROUND_HEAD_INDEX
 from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
 )
+from label_loading.sampler import get_coi, sample_non_coi
+
+from .config import Config
+from .multi_class_seperation import wrap_model_for_multiclass
 
 # Small epsilon added to losses to avoid exact-zero divisions
 LOSS_EPS = 1e-8
@@ -711,7 +725,7 @@ def train_epoch(
     use_amp = bool(use_amp) and (str(device).startswith("cuda"))
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
     autocast_ctx = (
-        torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True)
+        torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
         if use_amp
         else nullcontext()
     )
@@ -794,7 +808,8 @@ def train_epoch(
 
         with autocast_ctx:
             # Model expects (B, 1, T) input, outputs (B, n_src, T)
-            rec_sources_wavs = model(mixture.unsqueeze(1))
+            mixture_input = mixture.unsqueeze(1)
+            rec_sources_wavs = model(mixture_input)
             loss = criterion(rec_sources_wavs, clean_wavs)
             # Upstream-style clamp to prevent rare outliers from destabilizing
             # optimization. This affects training only.
@@ -802,23 +817,37 @@ def train_epoch(
             loss = loss.float()
             loss_to_backprop = loss / grad_accum_steps
 
-            # Diagnostic: compute per-source SI-SNR (dB) for monitoring
-            try:
+        # Free intermediate tensors immediately after forward pass
+        del mixture_input, mixture, total_coi, new_bg_scaled, mixture_raw
+        del snr_db, coi_power, bg_power, snr_linear, bg_scaling
+
+        # Diagnostic: compute per-source SI-SNR (dB) for monitoring
+        # Done OUTSIDE autocast and with no_grad to save memory
+        coi_sisnr_mean = float("nan")
+        bg_sisnr_mean = float("nan")
+        try:
+            with torch.no_grad():
                 # Mean SI-SNR across all COI heads
                 coi_sisnrs = [
-                    sisnr(rec_sources_wavs[:, i, :], clean_wavs[:, i, :], eps=LOSS_EPS)
+                    sisnr(
+                        rec_sources_wavs[:, i, :].detach(),
+                        clean_wavs[:, i, :],
+                        eps=LOSS_EPS,
+                    )
                     for i in range(n_src - 1)
                 ]
                 coi_sisnr_batch = torch.stack(coi_sisnrs).mean(dim=0)
 
                 bg_sisnr_batch = sisnr(
-                    rec_sources_wavs[:, -1, :], clean_wavs[:, -1, :], eps=LOSS_EPS
+                    rec_sources_wavs[:, -1, :].detach(),
+                    clean_wavs[:, -1, :],
+                    eps=LOSS_EPS,
                 )
-                coi_sisnr_mean = float(coi_sisnr_batch.detach().cpu().mean().item())
-                bg_sisnr_mean = float(bg_sisnr_batch.detach().cpu().mean().item())
-            except Exception:
-                coi_sisnr_mean = float("nan")
-                bg_sisnr_mean = float("nan")
+                coi_sisnr_mean = float(coi_sisnr_batch.cpu().mean().item())
+                bg_sisnr_mean = float(bg_sisnr_batch.cpu().mean().item())
+                del coi_sisnrs, coi_sisnr_batch, bg_sisnr_batch
+        except Exception:
+            pass
 
         if use_amp:
             assert scaler is not None
@@ -870,22 +899,21 @@ def train_epoch(
 
         # Show current LR during warmup for visibility
         current_lr = optimizer.param_groups[0]["lr"]
+        loss_val = float(loss.detach().cpu().item())
         progress_bar.set_postfix(
-            loss=float(loss.detach().cpu().item()),
+            loss=loss_val,
             coi=f"{coi_sisnr_mean:.3f}",
             bg=f"{bg_sisnr_mean:.3f}",
             lr=f"{current_lr:.2e}",
         )
 
-        # Free memory explicitly
-        del (
-            sources,
-            mixture,
-            clean_wavs,
-            rec_sources_wavs,
-            loss,
-            loss_to_backprop,
-        )
+        # Free memory explicitly and aggressively
+        del sources, clean_wavs, rec_sources_wavs, loss, loss_to_backprop
+        del new_cois, normalized_cois, normalized_bg, new_bg
+
+        # Periodically clear CUDA cache to prevent fragmentation
+        if step_idx % 50 == 0 and str(device).startswith("cuda"):
+            torch.cuda.empty_cache()
 
     # Flush any remaining accumulated gradients
     if step_idx != 0 and (step_idx % grad_accum_steps) != 0:
@@ -962,8 +990,9 @@ def validate_epoch(
     all_bg_sisnr: list[float] = []
 
     use_amp = bool(use_amp) and (str(device).startswith("cuda"))
+    # Use float16 inside autocast for lower memory footprint and wider compatibility
     autocast_ctx = (
-        torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True)
+        torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
         if use_amp
         else nullcontext()
     )
@@ -1012,27 +1041,39 @@ def validate_epoch(
         # =========================================================
         mixture_raw = total_coi + new_bg_scaled
 
+        # Free intermediate tensors early
+        del snr_db, coi_power, bg_power, snr_linear, bg_scaling, silent_coi
+
         # Normalize mixture to zero-mean, unit-variance
         mixture = normalize_tensor_wav(mixture_raw, eps=denom_eps)
+        del mixture_raw
 
         # Normalize each source INDEPENDENTLY
         normalized_cois = [normalize_tensor_wav(coi, eps=denom_eps) for coi in new_cois]
         normalized_bg = normalize_tensor_wav(new_bg_scaled, eps=denom_eps)
+        del new_bg_scaled
 
         clean_wavs = torch.stack(normalized_cois + [normalized_bg], dim=1)
+        del normalized_cois, normalized_bg, new_cois, new_bg, total_coi
 
         with autocast_ctx:
-            estimates = model(mixture.unsqueeze(1))
+            mixture_input = mixture.unsqueeze(1)
+            estimates = model(mixture_input)
+            del mixture_input, mixture
             # Cast to FP32 for loss computation to ensure numerical accuracy
             loss = criterion(estimates.float(), clean_wavs.float())
 
         batch_size = B
-        running_loss += float(loss.detach().cpu().item()) * batch_size
+        loss_val = float(loss.detach().cpu().item())
+        running_loss += loss_val * batch_size
         n_samples += batch_size
+        del loss
 
         # Compute SI-SNR metrics in FP32 for accuracy
+        coi_sisnr_mean = float("nan")
+        bg_sisnr_mean = float("nan")
         try:
-            estimates_fp32 = estimates.float()
+            estimates_fp32 = estimates.float().detach()
             clean_wavs_fp32 = clean_wavs.float()
 
             # Mean SI-SNR across all COI heads
@@ -1045,26 +1086,28 @@ def validate_epoch(
             bg_sisnr_batch = sisnr(
                 estimates_fp32[:, -1, :], clean_wavs_fp32[:, -1, :], eps=LOSS_EPS
             )
-            coi_sisnr_mean = float(coi_sisnr_batch.detach().cpu().mean().item())
-            bg_sisnr_mean = float(bg_sisnr_batch.detach().cpu().mean().item())
+            coi_sisnr_mean = float(coi_sisnr_batch.cpu().mean().item())
+            bg_sisnr_mean = float(bg_sisnr_batch.cpu().mean().item())
             all_coi_sisnr.append(coi_sisnr_mean)
             all_bg_sisnr.append(bg_sisnr_mean)
+            del (
+                coi_sisnrs,
+                coi_sisnr_batch,
+                bg_sisnr_batch,
+                estimates_fp32,
+                clean_wavs_fp32,
+            )
         except Exception:
-            coi_sisnr_mean = float("nan")
-            bg_sisnr_mean = float("nan")
+            pass
 
         progress_bar.set_postfix(
-            loss=float(loss.detach().cpu().item()),
+            loss=loss_val,
             coi=f"{coi_sisnr_mean:.3f}",
             bg=f"{bg_sisnr_mean:.3f}",
         )
 
         # Free memory explicitly
-        del sources, mixture, clean_wavs, estimates, loss
-
-    # Clear GPU cache after validation
-    if device != "cpu":
-        torch.cuda.empty_cache()
+        del sources, clean_wavs, estimates
 
     epoch_loss = running_loss / n_samples
 
@@ -1208,7 +1251,6 @@ def create_model(config: Config):
             num_sources=2,
         )
     else:
-
         base_model = GroupCommSudoRmRf(
             out_channels=config.model.out_channels,
             in_channels=config.model.in_channels,
@@ -1263,12 +1305,19 @@ def create_model(config: Config):
         model = model.to("cpu")
 
     # Compile model for faster training (requires PyTorch 2.0+)
-    # Note: torch.compile with inductor backend can be slow on WSL
-    # Use 'eager' backend or disable compilation if experiencing slowness
+    # WARNING: torch.compile can cause significant memory overhead on first batch
+    # due to graph tracing. For memory-constrained GPUs (like T4 with 16GB),
+    # consider disabling compilation or using backend="eager".
     if hasattr(torch, "compile") and config.training.compile_model:
         backend = getattr(config.training, "compile_backend", "inductor")
+
         print(f"Compiling model with torch.compile() using '{backend}' backend...")
-        model = torch.compile(model, backend=backend)
+        try:
+            model = torch.compile(model, backend=backend)
+        except Exception as e:
+            print(
+                f"Warning: torch.compile failed ({e}). Continuing without compilation."
+            )
     elif hasattr(torch, "compile"):
         print("Model compilation disabled (set compile_model=True in config to enable)")
 
@@ -1288,7 +1337,13 @@ def set_seed(seed: int = 42):
 
 
 def train(config: Config, timestamp: str | None = None):
-    """Main training function."""
+    """Main training function.
+
+    Args:
+        config: Training configuration
+        timestamp: Optional timestamp for checkpoint directory
+        skip_memory_test: If True, skip the initial memory test
+    """
     # Set seed for reproducibility
     seed = getattr(config.training, "seed", 42)
     set_seed(seed)
@@ -1343,7 +1398,11 @@ def train(config: Config, timestamp: str | None = None):
     }
 
     for epoch in range(1, config.training.num_epochs + 1):
+        # Clear memory at start of each epoch
+        clear_gpu_memory()
+
         print(f"\nEpoch {epoch}/{config.training.num_epochs}")
+        print_gpu_memory("  Start of epoch: ", config.training.device)
 
         train_loss, global_step, epoch_grad_norms = train_epoch(
             model,
@@ -1386,9 +1445,7 @@ def train(config: Config, timestamp: str | None = None):
             )
             # Free validation loader AND dataset memory immediately
             del val_loader, val_dataset
-            gc.collect()
-            if config.training.device != "cpu":
-                torch.cuda.empty_cache()
+            clear_gpu_memory()
             history["val_loss"].append(val_loss)
 
             print(f"Train: {train_loss:.4f}, Val: {val_loss:.4f}")
@@ -1439,6 +1496,11 @@ def main():
     parser = argparse.ArgumentParser(description="Train aircraft sound separation")
     parser.add_argument(
         "--config", type=str, required=True, help="Path to config YAML file"
+    )
+    parser.add_argument(
+        "--skip-memory-test",
+        action="store_true",
+        help="Skip the initial GPU memory test (not recommended for first run)",
     )
     args = parser.parse_args()
 

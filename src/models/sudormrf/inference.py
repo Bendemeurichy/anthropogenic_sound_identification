@@ -1,17 +1,24 @@
 """
 Inference module for trained SuDORMRF separation model.
 
+This module provides inference capabilities for the trained SuDoRM-RF model
+with head-specific separation. The model outputs are guaranteed to have
+consistent head assignment:
+    - Head 0 (COI_HEAD_INDEX): Class of Interest (airplane) audio
+    - Head 1 (BACKGROUND_HEAD_INDEX): Background audio
+
 Usage:
     python inference.py --checkpoint path/to/best_model.pt --audio path/to/audio.wav
 """
 
-import sys
-import torch
-import torchaudio
-from pathlib import Path
-from typing import Tuple, Optional, Union
 import argparse
 import os
+import sys
+from pathlib import Path
+from typing import Optional, Tuple, Union
+
+import torch
+import torchaudio
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -21,9 +28,37 @@ from src.models.sudormrf.train import create_model
 # Check for environment variable to use old separation head
 USE_OLD_SEPARATION_HEAD = os.environ.get("USE_OLD_SEPARATION_HEAD", "0") == "1"
 
+# Import head index constants for consistent output access
+if USE_OLD_SEPARATION_HEAD:
+    # Define constants for backward compatibility with old head
+    _COI_HEAD_INDEX = 0
+    _BACKGROUND_HEAD_INDEX = 1
+    _NUM_SOURCES = 2
+else:
+    from src.models.sudormrf.seperation_head import (
+        BACKGROUND_HEAD_INDEX as _BACKGROUND_HEAD_INDEX,
+    )
+    from src.models.sudormrf.seperation_head import (
+        COI_HEAD_INDEX as _COI_HEAD_INDEX,
+    )
+    from src.models.sudormrf.seperation_head import (
+        NUM_SOURCES as _NUM_SOURCES,
+    )
+
+# Export as module-level constants
+COI_HEAD_INDEX: int = _COI_HEAD_INDEX
+BACKGROUND_HEAD_INDEX: int = _BACKGROUND_HEAD_INDEX
+NUM_SOURCES: int = _NUM_SOURCES
+
 
 class SeparationInference:
-    """Inference wrapper for trained SuDORMRF separation model."""
+    """Inference wrapper for trained SuDORMRF separation model.
+
+    This class provides methods for loading a trained model and performing
+    audio source separation with guaranteed head assignment:
+        - output[:, COI_HEAD_INDEX, :] = Airplane (COI) audio
+        - output[:, BACKGROUND_HEAD_INDEX, :] = Background audio
+    """
 
     def __init__(
         self,
@@ -250,8 +285,11 @@ class SeparationInference:
     @torch.inference_mode()
     def separate(self, audio_path: Union[str, Path]) -> torch.Tensor:
         """Separate audio into component sources.
+
         Returns:
-            sources: (n_sources, T) tensor
+            sources: (n_sources, T) tensor where:
+                     sources[COI_HEAD_INDEX, :] = Airplane (COI) audio
+                     sources[BACKGROUND_HEAD_INDEX, :] = Background audio
         """
         waveform, sr = torchaudio.load(audio_path)
         if sr != self.sample_rate:
@@ -260,6 +298,38 @@ class SeparationInference:
             waveform = waveform.mean(dim=0)
         else:
             waveform = waveform.squeeze(0)
+
+        original_length = waveform.shape[0]
+
+        # Process in overlapping chunks for long audio
+        if waveform.shape[0] > self.segment_samples:
+            return self._separate_long(waveform, original_length)
+
+        # Pad if needed
+        if waveform.shape[0] < self.segment_samples:
+            waveform = torch.nn.functional.pad(
+                waveform, (0, self.segment_samples - waveform.shape[0])
+            )
+
+        return self._separate_segment(waveform)[:, :original_length]
+
+    @torch.inference_mode()
+    def separate_waveform(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Separate a waveform tensor directly.
+
+        Args:
+            waveform: Input waveform tensor (T,) or (1, T)
+
+        Returns:
+            sources: (n_sources, T) tensor where:
+                     sources[COI_HEAD_INDEX, :] = Airplane (COI) audio
+                     sources[BACKGROUND_HEAD_INDEX, :] = Background audio
+        """
+        if waveform.dim() == 2:
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(dim=0)
+            else:
+                waveform = waveform.squeeze(0)
 
         original_length = waveform.shape[0]
 
@@ -335,6 +405,28 @@ class SeparationInference:
 
         return output / (weight + 1e-8)
 
+    def get_coi_audio(self, sources: torch.Tensor) -> torch.Tensor:
+        """Extract the Class of Interest (airplane) audio from separated sources.
+
+        Args:
+            sources: Output from separate() with shape (n_sources, T)
+
+        Returns:
+            COI audio tensor with shape (T,)
+        """
+        return sources[COI_HEAD_INDEX]
+
+    def get_background_audio(self, sources: torch.Tensor) -> torch.Tensor:
+        """Extract the background audio from separated sources.
+
+        Args:
+            sources: Output from separate() with shape (n_sources, T)
+
+        Returns:
+            Background audio tensor with shape (T,)
+        """
+        return sources[BACKGROUND_HEAD_INDEX]
+
     def save_audio(self, waveform: torch.Tensor, path: Union[str, Path]):
         """Save waveform to file."""
         if waveform.dim() == 1:
@@ -366,17 +458,22 @@ def main():
     )
     sources = inferencer.separate(audio_path)
 
-    # Save all sources
-    # Assuming last source is background, others are COI classes
-    n_sources = sources.shape[0]
-    for i in range(n_sources - 1):
-        inferencer.save_audio(
-            sources[i], output_dir / f"{audio_path.stem}_coi_class_{i}.wav"
-        )
+    # Save sources with consistent naming based on head indices
+    # COI (airplane) is ALWAYS at COI_HEAD_INDEX (0)
+    # Background is ALWAYS at BACKGROUND_HEAD_INDEX (1)
 
-    inferencer.save_audio(sources[-1], output_dir / f"{audio_path.stem}_background.wav")
+    coi_output_path = output_dir / f"{audio_path.stem}_airplane.wav"
+    background_output_path = output_dir / f"{audio_path.stem}_background.wav"
 
-    print(f"Done! Extracted {n_sources} sources.")
+    # Use the helper methods for clarity
+    inferencer.save_audio(inferencer.get_coi_audio(sources), coi_output_path)
+    inferencer.save_audio(
+        inferencer.get_background_audio(sources), background_output_path
+    )
+
+    print(f"\nDone! Separated audio into {NUM_SOURCES} sources:")
+    print(f"  - Airplane (COI): {coi_output_path}")
+    print(f"  - Background: {background_output_path}")
 
 
 if __name__ == "__main__":
