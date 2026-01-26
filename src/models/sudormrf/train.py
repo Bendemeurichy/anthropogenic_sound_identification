@@ -805,12 +805,13 @@ def train_epoch(
             # Model expects (B, 1, T) input, outputs (B, n_src, T)
             mixture_input = mixture.unsqueeze(1)
             rec_sources_wavs = model(mixture_input)
-            loss = criterion(rec_sources_wavs, clean_wavs)
-            # Upstream-style clamp to prevent rare outliers from destabilizing
-            # optimization. This affects training only.
-            loss = torch.clamp(loss, min=-30.0, max=30.0)
-            loss = loss.float()
-            loss_to_backprop = loss / grad_accum_steps
+        # Compute loss in FP32 outside autocast to avoid under/overflow
+        loss = criterion(rec_sources_wavs.float(), clean_wavs.float())
+        # Upstream-style clamp to prevent rare outliers from destabilizing
+        # optimization. This affects training only.
+        loss = torch.clamp(loss, min=-30.0, max=30.0)
+        loss = loss.float()
+        loss_to_backprop = loss / grad_accum_steps
 
         # Free intermediate tensors immediately after forward pass
         del mixture_input, mixture, total_coi, new_bg_scaled, mixture_raw
