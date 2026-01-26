@@ -4,7 +4,7 @@ data:
   segment_length: 4.0 # seconds
   snr_range: [-5, 5] # dB range for mixing
   n_coi_classes: 1
-  background_only_prob: 0.25
+  background_only_prob: 0.20
   # How many non-COI files to sum for background-only examples
   background_mix_n: 2
   # Augmentation multiplier: each COI sample seen 3x with random augmentations
@@ -15,7 +15,7 @@ model:
   type: "improved" # 'improved' or 'groupcomm'
   out_channels: 128
   in_channels: 512
-  num_blocks: 16
+  num_blocks: 28
   upsampling_depth: 5
   enc_num_basis: 512
   # COI separation head U-ConvBlocks
@@ -25,8 +25,8 @@ model:
 
 # Training settings - optimized for COI separation
 training:
-  batch_size: 4
-  grad_accum_steps: 0
+  batch_size: 2
+  grad_accum_steps: 2
   use_amp: true
   num_epochs: 300
   lr: 3e-4
@@ -42,6 +42,6 @@ training:
   compile_backend: "eager"
   class_weight: 1.2
   aux_waveform_weight: 0.0
-  warmup_steps: 1000
+  warmup_steps: 500
   validate_every_n_epochs: 1
   seed: 42

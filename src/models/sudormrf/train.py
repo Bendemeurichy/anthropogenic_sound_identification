@@ -733,16 +733,11 @@ def train_epoch(
     progress_bar = tqdm(dataloader, desc="Training", leave=False, ascii=True, ncols=100)
     optimizer.zero_grad(set_to_none=True)
     step_idx = 0
-    current_step = global_step  # Track global step for warmup
+    micro_step = global_step
+    optimizer_step = 0  # count actual optimizer updates in this epoch
 
     for step_idx, (mixtures, sources) in enumerate(progress_bar, start=1):
-        current_step += 1
-
-        # --- Learning rate warmup ---
-        if warmup_steps > 0 and current_step <= warmup_steps:
-            warmup_lr = base_lr * (current_step / warmup_steps)
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = warmup_lr
+        micro_step += 1
 
         # mixtures: (B, T), sources: (B, n_src, T)
         sources = sources.to(device, non_blocking=True)
@@ -855,7 +850,8 @@ def train_epoch(
         else:
             loss_to_backprop.backward()
 
-        if (step_idx % grad_accum_steps) == 0:
+        ready_to_step = (step_idx % grad_accum_steps) == 0
+        if ready_to_step:
             if use_amp:
                 assert scaler is not None
                 scaler.unscale_(optimizer)
@@ -866,6 +862,7 @@ def train_epoch(
                         grads_finite = False
                         break
             loss_finite = torch.isfinite(loss)
+            next_optimizer_step = optimizer_step + 1
             if not grads_finite or not loss_finite:
                 if use_amp:
                     try:
@@ -875,15 +872,22 @@ def train_epoch(
                         pass
                 optimizer.zero_grad(set_to_none=True)
                 print(
-                    f"Warning: non-finite loss or gradients at step {current_step}; skipping optimizer step."
+                    f"Warning: non-finite loss or gradients at step {next_optimizer_step}; skipping optimizer step."
                 )
                 grad_norms.append(float("nan"))
             else:
+                # Learning rate warmup based on optimizer updates (not micro-steps)
+                if warmup_steps > 0 and next_optimizer_step <= warmup_steps:
+                    warmup_lr = base_lr * (next_optimizer_step / warmup_steps)
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = warmup_lr
+
                 # Track gradient norm BEFORE clipping for monitoring
                 total_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), clip_grad_norm
                 )
                 grad_norms.append(float(total_norm.item()))
+                optimizer_step = next_optimizer_step
 
                 if use_amp:
                     assert scaler is not None
@@ -929,6 +933,7 @@ def train_epoch(
                     grads_finite = False
                     break
 
+        next_optimizer_step = optimizer_step + 1
         if not grads_finite:
             if use_amp:
                 try:
@@ -942,10 +947,16 @@ def train_epoch(
             )
             grad_norms.append(float("nan"))
         else:
+            if warmup_steps > 0 and next_optimizer_step <= warmup_steps:
+                warmup_lr = base_lr * (next_optimizer_step / warmup_steps)
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = warmup_lr
+
             total_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), clip_grad_norm
             )
             grad_norms.append(float(total_norm.item()))
+            optimizer_step = next_optimizer_step
             if use_amp:
                 assert scaler is not None
                 scaler.step(optimizer)
@@ -969,7 +980,7 @@ def train_epoch(
             f"  Gradient norms - avg: {avg_grad_norm:.4f}, max: {max_grad_norm:.4f}, nan_count: {len(grad_norms) - len(valid_norms)}"
         )
 
-    return epoch_loss, current_step, grad_norms
+    return epoch_loss, optimizer_step, grad_norms
 
 
 @torch.no_grad()
