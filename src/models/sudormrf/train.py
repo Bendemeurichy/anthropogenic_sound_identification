@@ -805,12 +805,27 @@ def train_epoch(
             # Model expects (B, 1, T) input, outputs (B, n_src, T)
             mixture_input = mixture.unsqueeze(1)
             rec_sources_wavs = model(mixture_input)
+        if not torch.isfinite(rec_sources_wavs).all():
+            if use_amp:
+                # Retry forward in FP32 if AMP produced non-finite outputs
+                with torch.amp.autocast(device_type="cuda", enabled=False):
+                    rec_sources_wavs = model(mixture_input.float())
+            if not torch.isfinite(rec_sources_wavs).all():
+                optimizer.zero_grad(set_to_none=True)
+                print("Warning: non-finite model output; skipping micro-batch.")
+                grad_norms.append(float("nan"))
+                continue
         # Compute loss in FP32 outside autocast to avoid under/overflow
         loss = criterion(rec_sources_wavs.float(), clean_wavs.float())
         # Upstream-style clamp to prevent rare outliers from destabilizing
         # optimization. This affects training only.
         loss = torch.clamp(loss, min=-30.0, max=30.0)
         loss = loss.float()
+        if not torch.isfinite(loss):
+            optimizer.zero_grad(set_to_none=True)
+            print("Warning: non-finite loss; skipping micro-batch.")
+            grad_norms.append(float("nan"))
+            continue
         loss_to_backprop = loss / grad_accum_steps
 
         # Free intermediate tensors immediately after forward pass
