@@ -1409,11 +1409,7 @@ def train(config: Config, timestamp: str | None = None):
     }
 
     for epoch in range(1, config.training.num_epochs + 1):
-        # Clear memory at start of each epoch
-        clear_gpu_memory()
-
         print(f"\nEpoch {epoch}/{config.training.num_epochs}")
-        print_gpu_memory("  Start of epoch: ", config.training.device)
 
         train_loss, global_step, epoch_grad_norms = train_epoch(
             model,
@@ -1456,7 +1452,6 @@ def train(config: Config, timestamp: str | None = None):
             )
             # Free validation loader AND dataset memory immediately
             del val_loader, val_dataset
-            clear_gpu_memory()
             history["val_loss"].append(val_loss)
 
             print(f"Train: {train_loss:.4f}, Val: {val_loss:.4f}")
@@ -1507,11 +1502,6 @@ def main():
     parser = argparse.ArgumentParser(description="Train aircraft sound separation")
     parser.add_argument(
         "--config", type=str, required=True, help="Path to config YAML file"
-    )
-    parser.add_argument(
-        "--skip-memory-test",
-        action="store_true",
-        help="Skip the initial GPU memory test (not recommended for first run)",
     )
     args = parser.parse_args()
 
