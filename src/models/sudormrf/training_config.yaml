@@ -35,13 +35,13 @@ training:
   persistent_workers: false
   prefetch_factor: 1
   clip_grad_norm: 5.0
-  patience: 35
+  patience: 75
   checkpoint_dir: "checkpoints"
   device: "cuda:0"
   compile_model: false
   compile_backend: "eager"
   class_weight: 1.2
   aux_waveform_weight: 0.0
-  warmup_steps: 500
+  warmup_steps: 250
   validate_every_n_epochs: 1
   seed: 42
