@@ -12,10 +12,10 @@ data:
 
 # Model settings - using proven SuDoRM-RF defaults
 model:
-  type: "improved" # 'improved' or 'groupcomm'
+  type: "groupcomm" # 'improved' or 'groupcomm'
   out_channels: 128
   in_channels: 512
-  num_blocks: 28
+  num_blocks: 32
   upsampling_depth: 5
   enc_num_basis: 512
   # COI separation head U-ConvBlocks
@@ -25,11 +25,11 @@ model:
 
 # Training settings - optimized for COI separation
 training:
-  batch_size: 2
-  grad_accum_steps: 2
+  batch_size: 4
+  grad_accum_steps: 1
   use_amp: true
   num_epochs: 300
-  lr: 3e-4
+  lr: 5e-4
   num_workers: 0
   pin_memory: true
   persistent_workers: false
@@ -42,6 +42,6 @@ training:
   compile_backend: "eager"
   class_weight: 1.2
   aux_waveform_weight: 0.0
-  warmup_steps: 250
+  warmup_steps: 350
   validate_every_n_epochs: 1
   seed: 42
