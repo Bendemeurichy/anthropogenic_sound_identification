@@ -110,18 +110,24 @@ class MaskEstimationBranch(nn.Module):
         out_channels: int,
         num_blocks: int = 0,
         upsampling_depth: int = 4,
+        expanded_channels: int = 512,
     ):
         """
         Args:
-            in_channels: Number of input channels (from bottleneck)
+            in_channels: Number of input channels (from bottleneck, e.g., model.out_channels)
             out_channels: Number of output channels (enc_num_basis for masking)
             num_blocks: Number of UConvBlocks. 0 = simple mode, >0 = enhanced mode
             upsampling_depth: Upsampling depth for UConvBlocks (only used if num_blocks > 0)
+            expanded_channels: Expanded dimension for UConvBlock processing (e.g., model.in_channels).
+                              UConvBlock projects in_channels -> expanded_channels for processing,
+                              then back to in_channels. This expansion is critical for representational
+                              capacity. Should typically be larger than in_channels (e.g., 512 vs 128).
         """
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.num_blocks = num_blocks
+        self.expanded_channels = expanded_channels
 
         if num_blocks == 0:
             # Simple but effective architecture
@@ -136,13 +142,17 @@ class MaskEstimationBranch(nn.Module):
             )
         else:
             # Enhanced architecture with UConvBlocks for multi-resolution processing
+            # NOTE: UConvBlock is designed as an expansion-contraction bottleneck:
+            #   - out_channels (smaller): input/output dimension of the block
+            #   - in_channels (larger): expanded internal dimension for processing
+            # This expansion is critical for representational capacity!
             layers: list[nn.Module] = [nn.PReLU(in_channels)]
 
             for _ in range(num_blocks):
                 layers.append(
                     UConvBlock(
-                        out_channels=in_channels,
-                        in_channels=in_channels,
+                        out_channels=in_channels,  # Block input/output dim (smaller)
+                        in_channels=expanded_channels,  # Expanded processing dim (larger)
                         upsampling_depth=upsampling_depth,
                     )
                 )
@@ -186,6 +196,7 @@ class COISeparationHead(nn.Module):
         n_src: int = NUM_SOURCES,
         num_conv_blocks: int = 0,
         upsampling_depth: int = 4,
+        expanded_channels: int = 512,
     ):
         """
         Args:
@@ -196,6 +207,8 @@ class COISeparationHead(nn.Module):
                             0 = simple lightweight architecture
                             >0 = enhanced architecture with multi-resolution processing
             upsampling_depth: Upsampling depth for UConvBlocks (if num_conv_blocks > 0)
+            expanded_channels: Expanded dimension for UConvBlock internal processing.
+                              Should be larger than in_channels (e.g., model.in_channels = 512).
         """
         super().__init__()
 
@@ -210,6 +223,7 @@ class COISeparationHead(nn.Module):
         self.n_src = n_src
         self.num_conv_blocks = num_conv_blocks
         self.upsampling_depth = upsampling_depth
+        self.expanded_channels = expanded_channels
 
         # Shared feature extraction before branching
         # This processes common features before source-specific branches
@@ -226,6 +240,7 @@ class COISeparationHead(nn.Module):
             out_channels=out_channels,
             num_blocks=num_conv_blocks,
             upsampling_depth=upsampling_depth,
+            expanded_channels=expanded_channels,
         )
 
         # Background-specific branch - ALWAYS outputs at HEAD 1
@@ -234,6 +249,7 @@ class COISeparationHead(nn.Module):
             out_channels=out_channels,
             num_blocks=num_conv_blocks,
             upsampling_depth=upsampling_depth,
+            expanded_channels=expanded_channels,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -275,7 +291,8 @@ class COISeparationHead(nn.Module):
             f"out_channels={self.out_channels}, "
             f"n_src={self.n_src}, "
             f"num_conv_blocks={self.num_conv_blocks}, "
-            f"upsampling_depth={self.upsampling_depth}"
+            f"upsampling_depth={self.upsampling_depth}, "
+            f"expanded_channels={self.expanded_channels}"
         )
 
 
@@ -284,6 +301,7 @@ def wrap_model_for_coi(
     replace_head: bool = True,
     num_conv_blocks: int = 0,
     upsampling_depth: Optional[int] = None,
+    expanded_channels: Optional[int] = None,
 ) -> nn.Module:
     """Wrap a SuDoRM-RF model with a COI-specific separation head.
 
@@ -300,6 +318,9 @@ def wrap_model_for_coi(
                         >0 = enhanced architecture with UConvBlocks
         upsampling_depth: Upsampling depth for UConvBlocks
                          If None, uses the model's upsampling_depth
+        expanded_channels: Expanded dimension for UConvBlock internal processing.
+                          If None, uses the model's in_channels (typically 512).
+                          This expansion is critical for UConvBlock representational capacity.
 
     Returns:
         model: Modified SuDoRM-RF model with COI-specific head
@@ -332,6 +353,11 @@ def wrap_model_for_coi(
     if upsampling_depth is None:
         upsampling_depth = model.upsampling_depth
 
+    # Use model's in_channels for expansion if not specified
+    # This is critical: UConvBlock needs a larger expanded dimension for processing
+    if expanded_channels is None:
+        expanded_channels = model.in_channels  # Typically 512
+
     # Replace mask_net with our COI-specific head
     # Structure: PReLU -> COISeparationHead
     # The PReLU is kept from the original architecture for compatibility
@@ -343,6 +369,7 @@ def wrap_model_for_coi(
             n_src=NUM_SOURCES,
             num_conv_blocks=num_conv_blocks,
             upsampling_depth=upsampling_depth,
+            expanded_channels=expanded_channels,
         ),
     )
 

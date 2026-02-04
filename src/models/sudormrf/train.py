@@ -41,7 +41,11 @@ if USE_OLD_SEPARATION_HEAD:
 else:
     from seperation_head import (
         BACKGROUND_HEAD_INDEX as _BACKGROUND_HEAD_INDEX,
+    )
+    from seperation_head import (
         COI_HEAD_INDEX as _COI_HEAD_INDEX,
+    )
+    from seperation_head import (
         wrap_model_for_coi,
     )
 
@@ -50,6 +54,7 @@ BACKGROUND_HEAD_INDEX: int = _BACKGROUND_HEAD_INDEX
 
 from config import Config
 from multi_class_seperation import wrap_model_for_multiclass
+
 from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
@@ -674,10 +679,6 @@ def train_epoch(
             loss=f"{loss.item():.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}"
         )
 
-        # Periodic cache clear
-        if step_idx % 50 == 0 and str(device).startswith("cuda"):
-            torch.cuda.empty_cache()
-
     if str(device).startswith("cuda"):
         torch.cuda.empty_cache()
 
@@ -1066,7 +1067,7 @@ def main():
     for split in ["train", "val", "test"]:
         split_df = sampled_df[sampled_df["split"] == split]
         print(
-            f"  {split}: {len(split_df)} (COI: {(split_df['label']==1).sum()}, non-COI: {(split_df['label']==0).sum()})"
+            f"  {split}: {len(split_df)} (COI: {(split_df['label'] == 1).sum()}, non-COI: {(split_df['label'] == 0).sum()})"
         )
 
     # Save dataset
