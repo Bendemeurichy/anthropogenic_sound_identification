@@ -1,3 +1,11 @@
 [submodule "src/models/sudormrf/base"]
 	path = src/models/sudormrf/base
 	url = https://github.com/etzinis/sudo_rm_rf.git
+
+[submodule "src/models/xumx/base"]
+	path = src/models/xumx/base
+	url = https://github.com/sevagh/xumx-sliCQ.git
+
+[submodule "src/models/clapsep/base"]
+	path = src/models/clapsep/base
+	url = https://github.com/Aisaka0v0/CLAPSep.git

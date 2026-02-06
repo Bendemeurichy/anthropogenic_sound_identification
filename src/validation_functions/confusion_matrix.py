@@ -4,13 +4,13 @@ Computes confusion matrix, precision, recall, F1-score, and other metrics.
 """
 
 import importlib
+import json
 import os
 import sys
-from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List, Tuple, Any
-import json
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,8 +23,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent / "plane_clasifier"))
 
 from src.models.sudormrf.inference import SeparationInference
-from src.validation_functions.plane_clasifier.inference import PlaneClassifierInference
 from src.validation_functions.plane_clasifier.config import TrainingConfig
+from src.validation_functions.plane_clasifier.inference import PlaneClassifierInference
 
 try:
     import src.models.base.sudo_rm_rf
@@ -108,7 +108,7 @@ class ClassificationMetrics:
 
     def __str__(self):
         return f"""
-{'='*50}
+{"=" * 50}
 Confusion Matrix:  TN={self.true_negatives}  FP={self.false_positives}
                    FN={self.false_negatives}  TP={self.true_positives}
 
@@ -116,7 +116,7 @@ Accuracy:  {self.accuracy:.4f}    Precision: {self.precision:.4f}
 Recall:    {self.recall:.4f}    F1-Score:  {self.f1_score:.4f}
 Specificity: {self.specificity:.4f}  Balanced Acc: {self.balanced_accuracy:.4f}
 MCC: {self.matthews_corrcoef:.4f}
-{'='*50}"""
+{"=" * 50}"""
 
     def to_dict(self):
         return {
@@ -472,12 +472,12 @@ class ValidationPipeline:
         df_coi = df_split[df_split["label"] == 1].reset_index(drop=True)
         df_bg = df_split[df_split["label"] == 0].reset_index(drop=True)
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(
             f"Validation on {split.upper()} set: {len(df_coi)} COI, {len(df_bg)} background"
         )
         print(f"SNR range: {snr_range} dB")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         results = {}
 
@@ -667,25 +667,25 @@ def main():
 
 
 if __name__ == "__main__":
-    # main()
-    import random
+    main()
+    # import random
 
-    example_src = Path("./ho6sg-47RD0.wav")
-    example_noise = Path("./LEEC02__0__20161128_183900_ma.wav")
+    # example_src = Path("./ho6sg-47RD0.wav")
+    # example_noise = Path("./LEEC02__0__20161128_183900_ma.wav")
 
-    if not example_src.exists() or not example_noise.exists():
-        missing = []
-        if not example_src.exists():
-            missing.append(str(example_src))
-        if not example_noise.exists():
-            missing.append(str(example_noise))
-        print("Example WAV files not found; skipping demo. Missing:", *missing)
-    else:
-        demo_two_wav_separation(
-            src_path=str(example_src),
-            noise_path=str(example_noise),
-            snr_db=random.uniform(-5, 5),
-            sep_checkpoint=PROJECT_ROOT
-            / "src/models/sudormrf/checkpoints/20251226_170458/best_model.pt",
-            out_dir="./separation_output_demo",
-        )
+    # if not example_src.exists() or not example_noise.exists():
+    #     missing = []
+    #     if not example_src.exists():
+    #         missing.append(str(example_src))
+    #     if not example_noise.exists():
+    #         missing.append(str(example_noise))
+    #     print("Example WAV files not found; skipping demo. Missing:", *missing)
+    # else:
+    #     demo_two_wav_separation(
+    #         src_path=str(example_src),
+    #         noise_path=str(example_noise),
+    #         snr_db=random.uniform(-5, 5),
+    #         sep_checkpoint=PROJECT_ROOT
+    #         / "src/models/sudormrf/checkpoints/20251226_170458/best_model.pt",
+    #         out_dir="./separation_output_demo",
+    #     )
