@@ -1,0 +1,52 @@
+# Training configuration for CLAPSep COI separation
+# This config uses the same approach as sudormrf: single target + residue
+# Uses pretrained CLAP model for audio encoding
+
+data:
+  df_path: "data/aircraft_data.csv"
+  sample_rate: 32000  # CLAPSep default sample rate
+  segment_length: 5.0  # seconds
+  snr_range: [-5, 5]  # dB range for mixing
+  n_coi_classes: 1
+  background_only_prob: 0.20
+  background_mix_n: 2
+  augment_multiplier: 3
+
+# Model settings
+model:
+  # CLAP pretrained checkpoint path
+  clap_checkpoint: "checkpoints/music_audioset_epoch_15_esc_90.14.pt"
+  # Decoder architecture
+  lan_embed_dim: 1024
+  depths: [1, 1, 1, 1]
+  embed_dim: 128
+  encoder_embed_dim: 128
+  phase: false
+  spec_factor: 8
+  d_attn: 640
+  n_masker_layer: 3
+  conv: false
+  # STFT parameters
+  nfft: 1024
+  hop_length: 320
+  # Whether to freeze the CLAP encoder
+  freeze_encoder: true
+  # Number of sources (COI + background)
+  num_sources: 2
+
+# Training settings
+training:
+  batch_size: 16
+  use_amp: true
+  precision: "bf16-mixed"
+  num_epochs: 150
+  lr: 1e-4
+  weight_decay: 1e-5
+  num_workers: 4
+  pin_memory: true
+  patience: 30  # early stopping patience
+  gradient_clip_val: 5.0
+  checkpoint_dir: "checkpoints/clapsep"
+  device: "cuda"
+  class_weight: 1.5
+  seed: 42

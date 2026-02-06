@@ -1,6 +1,6 @@
 data:
   df_path: "data/aircraft_data.csv"
-  sample_rate: 16000
+  sample_rate: 44100
   segment_length: 4.0 # seconds
   snr_range: [-5, 5] # dB range for mixing
   n_coi_classes: 1
@@ -15,7 +15,7 @@ model:
   type: "groupcomm" # 'improved' or 'groupcomm'
   out_channels: 128
   in_channels: 512
-  num_blocks: 32
+  num_blocks: 16
   upsampling_depth: 5
   enc_num_basis: 512
   # COI separation head U-ConvBlocks
@@ -25,8 +25,8 @@ model:
 
 # Training settings - optimized for COI separation
 training:
-  batch_size: 4
-  grad_accum_steps: 1
+  batch_size: 2
+  grad_accum_steps: 2
   use_amp: true
   num_epochs: 300
   lr: 5e-4
@@ -35,7 +35,7 @@ training:
   persistent_workers: false
   prefetch_factor: 1
   clip_grad_norm: 5.0
-  patience: 75
+  patience: 45
   checkpoint_dir: "checkpoints"
   device: "cuda:0"
   compile_model: false
@@ -43,5 +43,5 @@ training:
   class_weight: 1.2
   aux_waveform_weight: 0.0
   warmup_steps: 350
-  validate_every_n_epochs: 1
+  validate_every_n_epochs: 2
   seed: 42

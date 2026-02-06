@@ -115,8 +115,11 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     sisnr_db = 10.0 * torch.log10(sisnr_lin + eps)
 
     # Handle silent/weak targets
+    # For truly silent targets, reward low output energy with scores up to 12 dB
+    # This ensures background-only samples can achieve comparable loss to COI samples
+    # Cap at 12 dB to stay balanced with class_weight=1.2 and typical COI SI-SNR (~10-12 dB)
     silence_score = torch.clamp(
-        -10.0 * torch.log10(est_energy / min_energy + eps), min=-30.0, max=0.0
+        -10.0 * torch.log10(est_energy / min_energy + eps), min=-30.0, max=12.0
     )
     sisnr_db = torch.where(target_is_zero, silence_score, sisnr_db)
     sisnr_db = torch.where(
