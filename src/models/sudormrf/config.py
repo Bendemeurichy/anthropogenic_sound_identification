@@ -1,9 +1,10 @@
 """Configuration dataclasses for sudormrf training."""
 
-import yaml
-from dataclasses import dataclass, field, asdict
-from typing import List
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import List
+
+import yaml
 
 
 @dataclass
@@ -29,7 +30,7 @@ class ModelConfig:
     in_channels: int = 512
     num_blocks: int = 16
     upsampling_depth: int = 5
-    enc_kernel_size: int = 21
+    enc_kernel_size: int = 41
     enc_num_basis: int = 512
     # COI separation head configuration
     num_head_conv_blocks: int = 0
