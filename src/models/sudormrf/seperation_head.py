@@ -36,11 +36,10 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-
-from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
+from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
     GroupCommSudoRmRf,
 )
-from .base.sudo_rm_rf.dnn.models.improved_sudormrf import (
+from base.sudo_rm_rf.dnn.models.improved_sudormrf import (
     SuDORMRF,
     UConvBlock,
 )
@@ -338,8 +337,11 @@ def wrap_model_for_coi(
     if not replace_head:
         return model
 
-    # Validate model type
-    if not isinstance(model, (SuDORMRF, GroupCommSudoRmRf)):
+    # Validate model type - check by class name to handle models loaded from
+    # different module paths (e.g., pickled checkpoints use 'sudo_rm_rf.dnn...'
+    # while our imports use 'base.sudo_rm_rf.dnn...')
+    valid_class_names = {"SuDORMRF", "GroupCommSudoRmRf"}
+    if type(model).__name__ not in valid_class_names:
         raise TypeError(
             f"Model type {type(model).__name__} not supported for COI head replacement. "
             f"Expected SuDORMRF or GroupCommSudoRmRf."

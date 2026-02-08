@@ -1,0 +1,144 @@
+# =============================================================================
+# Finetuning configuration for pretrained SuDoRM-RF models
+# =============================================================================
+# This config is used by finetune.py to load a pretrained model from the
+# original authors and finetune it with a custom COI separation head.
+#
+# Pretrained models available (download with base/pretrained_models/download_pretrained_models.sh):
+#   - Improved_Sudormrf_U16_Bases512_WSJ02mix.pt        (improved, U16, 512 bases)
+#   - Improved_Sudormrf_U16_Bases2048_WHAMRexclmark.pt   (improved, U16, 2048 bases)
+#   - Improved_Sudormrf_U36_Bases2048_WSJ02mix.pt        (improved, U36, 2048 bases)
+#   - Improved_Sudormrf_U36_Bases4096_WHAMRexclmark.pt   (improved, U36, 4096 bases)
+#   - GroupCom_Sudormrf_U8_Bases512_WSJ02mix.pt           (groupcomm, U8, 512 bases)
+# =============================================================================
+
+# ---------------------
+# Pretrained model info
+# ---------------------
+pretrained:
+  # Path to pretrained .pt checkpoint from original authors
+  # Can be absolute or relative to project root
+  checkpoint_path: "src/validation_functions/base_models/Improved_Sudormrf_U16_Bases512_WSJ02mix.pt"
+
+  # Architecture of the pretrained model (must match the checkpoint)
+  # "improved" -> SuDORMRF (improved_sudormrf.py)
+  # "groupcomm" -> GroupCommSudoRmRf (groupcomm_sudormrf_v2.py)
+  model_type: "improved"
+
+  # Architecture parameters (must match the pretrained checkpoint exactly)
+  out_channels: 256
+  in_channels: 512
+  num_blocks: 16
+  upsampling_depth: 5
+  enc_kernel_size: 21
+  enc_num_basis: 512
+  num_sources: 2 # original model was trained for 2-source separation
+
+# ---------------------
+# Finetuning strategy
+# ---------------------
+finetuning:
+  # Freeze strategy for the pretrained backbone
+  #   "head_only"  - Only train the new COI separation head; freeze everything else
+  #   "partial"    - Train head + last N separation module blocks + bottleneck
+  #   "full"       - Train all parameters (with differential learning rates)
+  freeze_strategy: "head_only"
+
+  # Number of separation module (sm) blocks to unfreeze from the end
+  # Only used when freeze_strategy is "partial"
+  # e.g., 4 means the last 4 UConvBlocks of the 16-block separation module are trainable
+  unfreeze_last_n_blocks: 4
+
+  # Whether to also unfreeze the bottleneck layer during partial finetuning
+  unfreeze_bottleneck: true
+
+  # Whether to also unfreeze the encoder during partial/full finetuning
+  unfreeze_encoder: false
+
+  # Whether to also unfreeze the decoder during partial/full finetuning
+  unfreeze_decoder: false
+
+  # Staged unfreezing: automatically transition between freeze strategies
+  # Set to true to start with head_only, then switch to partial, then full
+  staged_unfreeze: false
+
+  # Epoch at which to transition from head_only -> partial (if staged_unfreeze=true)
+  stage1_epochs: 10
+
+  # Epoch at which to transition from partial -> full (if staged_unfreeze=true)
+  # Set to 0 to skip the full-unfreeze stage
+  stage2_epochs: 25
+
+  # Learning rate multiplier for the pretrained (non-head) parameters
+  # The head always uses the base learning rate from training.lr
+  # Pretrained layers use training.lr * backbone_lr_multiplier
+  # e.g., 0.1 means pretrained layers train at 1/10th the head learning rate
+  backbone_lr_multiplier: 0.1
+
+  # Whether to reinitialise the decoder bias (if any) when replacing the head
+  # Can help when the pretrained decoder was tuned for different source statistics
+  reinit_decoder_bias: false
+
+# ---------------------
+# COI separation head
+# ---------------------
+head:
+  # Number of UConvBlocks per branch in the separation head
+  # 0 = simple lightweight head (PReLU + DepthwiseSepConv + Conv1d)
+  # >0 = enhanced head with N UConvBlocks per branch for richer feature extraction
+  num_conv_blocks: 0
+
+  # Upsampling depth for UConvBlocks in the head (if num_conv_blocks > 0)
+  # If null, inherits from pretrained.upsampling_depth
+  upsampling_depth: null
+
+  # Expanded channels for UConvBlock internal processing (if num_conv_blocks > 0)
+  # If null, inherits from pretrained.in_channels (typically 512)
+  expanded_channels: null
+
+# ---------------------
+# Data configuration
+# ---------------------
+data:
+  df_path: "data/aircraft_data.csv"
+  sample_rate: 16000
+  segment_length: 5.0
+  snr_range: [-5, 5]
+  n_coi_classes: 1
+  background_only_prob: 0.15
+  background_mix_n: 2
+  augment_multiplier: 3
+
+# ---------------------
+# Training configuration
+# ---------------------
+training:
+  batch_size: 4
+  grad_accum_steps: 2
+  use_amp: true
+  num_epochs: 100
+  lr: 5.0e-4 # Base LR for the new head
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  clip_grad_norm: 5.0
+  patience: 20
+  checkpoint_dir: "checkpoints/finetune"
+  device: "cuda"
+  compile_model: false
+  compile_backend: "inductor"
+  class_weight: 1.5
+  aux_waveform_weight: 0.0
+  warmup_steps: 200
+  validate_every_n_epochs: 2
+  seed: 42
+
+# ---------------------
+# Scheduler configuration
+# ---------------------
+scheduler:
+  # Learning rate scheduler: ReduceLROnPlateau parameters
+  factor: 0.5 # Factor by which LR is reduced (new_lr = lr * factor)
+  patience: 5 # Number of epochs with no improvement after which LR is reduced
+  min_lr: 1.0e-7 # Minimum learning rate
