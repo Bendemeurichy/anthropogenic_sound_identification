@@ -62,6 +62,13 @@ from label_loading.metadata_loader import (
 from label_loading.sampler import get_coi, sample_non_coi
 
 LOSS_EPS = 1e-8
+ENERGY_EPS = 1e-8
+NORMALIZE_MIN_STD = 1e-3
+SILENCE_ENERGY_EPS = 1e-6
+WEAK_TARGET_ENERGY_EPS = 1e-4
+BG_SCALE_MIN = 0.1
+BG_SCALE_MAX = 3.0
+RESAMPLER_CACHE_MAX = 8
 
 
 # =============================================================================
@@ -90,12 +97,12 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
 
     # Energy calculations
     T = target.shape[-1]
-    min_energy = 1e-6
+    min_energy = SILENCE_ENERGY_EPS
     est_energy = est_zm.pow(2).sum(dim=-1)
     target_energy = target_zm.pow(2).sum(dim=-1)
 
     target_is_zero = target_energy < (min_energy * T)
-    target_is_weak = target_energy < (1e-4 * T)
+    target_is_weak = target_energy < (WEAK_TARGET_ENERGY_EPS * T)
     target_energy_safe = torch.clamp(target_energy, min=min_energy)
 
     # Projection
@@ -143,22 +150,21 @@ class COIWeightedLoss(torch.nn.Module):
         if est_sources.ndim != 3 or target_sources.ndim != 3:
             raise ValueError("est_sources and target_sources must be (B, n_src, T)")
 
-        n_src = est_sources.shape[1]
-        n_coi = n_src - 1
+        # COI SI-SNR (using head index constants)
+        coi_sisnr = sisnr(
+            est_sources[:, COI_HEAD_INDEX, :],
+            target_sources[:, COI_HEAD_INDEX, :],
+            eps=self.eps,
+        )
 
-        # COI SI-SNR (all heads except last)
-        coi_sisnrs = torch.stack(
-            [
-                sisnr(est_sources[:, i, :], target_sources[:, i, :], eps=self.eps)
-                for i in range(n_coi)
-            ],
-            dim=0,
-        ).mean(dim=0)
+        # Background SI-SNR (using head index constants)
+        bg_sisnr = sisnr(
+            est_sources[:, BACKGROUND_HEAD_INDEX, :],
+            target_sources[:, BACKGROUND_HEAD_INDEX, :],
+            eps=self.eps,
+        )
 
-        # Background SI-SNR (last head)
-        bg_sisnr = sisnr(est_sources[:, -1, :], target_sources[:, -1, :], eps=self.eps)
-
-        weighted = (self.class_weight * coi_sisnrs + bg_sisnr) / (
+        weighted = (self.class_weight * coi_sisnr + bg_sisnr) / (
             self.class_weight + 1.0
         )
         return -weighted.mean()
@@ -282,10 +288,13 @@ class AudioDataset(Dataset):
         self.augment_multiplier = int(augment_multiplier) if self.augment else 1
         self.background_only_prob = max(0.0, float(background_only_prob))
         self.background_mix_n = int(background_mix_n)
-        self.segment_stride = segment_stride or segment_length
+        self.segment_stride_samples = int(
+            (segment_stride or segment_length) * sample_rate
+        )
 
         self._rng = np.random.default_rng(42)
         self._resamplers: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
+        self._resampler_cache_max = int(RESAMPLER_CACHE_MAX)
 
         # Filter and extract file lists
         if split == "test":
@@ -302,18 +311,24 @@ class AudioDataset(Dataset):
         if n_coi_classes > 1 and "coi_class" in split_df.columns:
             self.file_to_class = dict(zip(split_df["filename"], split_df["coi_class"]))
 
-        # Background-only sample count
-        self._extra_background_count = 0
-        if split == "train" and self.coi_files and self.background_only_prob > 0.0:
-            self._extra_background_count = int(
-                self.background_only_prob
-                * len(self.coi_files)
-                * self.augment_multiplier
-                + 0.5
-            )
-
         # Precompute segments for validation/test
         self.coi_segments = self._compute_segments(split_df)
+
+        # Background-only sample count (for both train and val)
+        self._extra_background_count = 0
+        if self.coi_files and self.background_only_prob > 0.0:
+            if split == "train":
+                self._extra_background_count = int(
+                    self.background_only_prob
+                    * len(self.coi_files)
+                    * self.augment_multiplier
+                    + 0.5
+                )
+            elif split == "val":
+                # Proportional to COI segments so validation covers silence suppression
+                self._extra_background_count = int(
+                    self.background_only_prob * len(self.coi_segments) + 0.5
+                )
 
         # Print stats
         if n_coi_classes > 1 and "coi_class" in split_df.columns:
@@ -332,6 +347,10 @@ class AudioDataset(Dataset):
                 print(
                     f"  → With {self.augment_multiplier}x augmentation: {len(self.coi_files) * self.augment_multiplier} effective samples"
                 )
+            if self._extra_background_count > 0:
+                print(
+                    f"  → With {self._extra_background_count} background-only samples"
+                )
 
     def _compute_segments(
         self, split_df: pd.DataFrame
@@ -348,7 +367,7 @@ class AudioDataset(Dataset):
                     1, int(self.segment_samples * orig_sr / self.sample_rate)
                 )
                 stride_frames = max(
-                    1, int(self.segment_stride * orig_sr / self.sample_rate)
+                    1, int(self.segment_stride_samples * orig_sr / self.sample_rate)
                 )
 
                 n_segs = (
@@ -372,7 +391,7 @@ class AudioDataset(Dataset):
                     + self._extra_background_count
                 )
             return len(self.non_coi_files)
-        return len(self.coi_segments)
+        return len(self.coi_segments) + self._extra_background_count
 
     def _load_audio(
         self, filepath: str, frame_offset: int = 0, num_frames: int | None = None
@@ -395,6 +414,8 @@ class AudioDataset(Dataset):
         if sr != self.sample_rate:
             key = (sr, self.sample_rate)
             if key not in self._resamplers:
+                if len(self._resamplers) >= self._resampler_cache_max:
+                    self._resamplers.pop(next(iter(self._resamplers)))
                 self._resamplers[key] = torchaudio.transforms.Resample(
                     sr, self.sample_rate
                 )
@@ -434,7 +455,7 @@ class AudioDataset(Dataset):
                     )
                     max_offset = max(0, int(info.num_frames) - seg_frames)
                     frame_offset = (
-                        int(np.random.randint(0, max_offset + 1))
+                        int(self._rng.integers(0, max_offset + 1))
                         if max_offset > 0
                         else 0
                     )
@@ -456,7 +477,7 @@ class AudioDataset(Dataset):
                     sources = [coi_audio]
             else:
                 # Background-only sample
-                idxs = np.random.choice(
+                idxs = self._rng.choice(
                     len(self.non_coi_files), size=max(1, self.background_mix_n)
                 )
                 background = torch.stack(
@@ -467,25 +488,37 @@ class AudioDataset(Dataset):
                 ]
         else:
             # Validation/Test
-            filepath, frame_offset, num_frames, class_idx = self.coi_segments[idx]
-            coi_audio = self._load_audio(filepath, frame_offset, num_frames)
-            sources = (
-                [torch.zeros_like(coi_audio) for _ in range(self.n_coi_classes)]
-                if self.n_coi_classes > 1
-                else [coi_audio]
-            )
-            if self.n_coi_classes > 1:
-                sources[class_idx] = coi_audio
+            if idx < len(self.coi_segments):
+                filepath, frame_offset, num_frames, class_idx = self.coi_segments[idx]
+                coi_audio = self._load_audio(filepath, frame_offset, num_frames)
+                sources = (
+                    [torch.zeros_like(coi_audio) for _ in range(self.n_coi_classes)]
+                    if self.n_coi_classes > 1
+                    else [coi_audio]
+                )
+                if self.n_coi_classes > 1:
+                    sources[class_idx] = coi_audio
+            else:
+                # Background-only validation sample
+                idxs = self._rng.choice(
+                    len(self.non_coi_files), size=max(1, self.background_mix_n)
+                )
+                background = torch.stack(
+                    [self._load_audio(self.non_coi_files[int(i)]) for i in idxs]
+                ).sum(dim=0)
+                sources = [
+                    torch.zeros_like(background) for _ in range(self.n_coi_classes)
+                ]
 
         # Add background
         if background is None:
             background = self._load_audio(
-                self.non_coi_files[np.random.randint(len(self.non_coi_files))]
+                self.non_coi_files[int(self._rng.integers(len(self.non_coi_files)))]
             )
         sources.append(background)
 
         sources_tensor = torch.stack(sources, dim=0)
-        return sources_tensor.sum(dim=0), sources_tensor
+        return sources_tensor
 
 
 # =============================================================================
@@ -494,7 +527,7 @@ class AudioDataset(Dataset):
 
 
 def normalize_tensor_wav(
-    wav: torch.Tensor, eps: float = 1e-8, min_std: float = 1e-4
+    wav: torch.Tensor, eps: float = ENERGY_EPS, min_std: float = NORMALIZE_MIN_STD
 ) -> torch.Tensor:
     """Normalize waveform to zero mean and unit variance."""
     mean = wav.mean(dim=-1, keepdim=True)
@@ -520,7 +553,7 @@ def prepare_batch(
         clean_wavs: (B, n_src, T) independently normalized sources
     """
     B, n_src, T = sources.shape
-    eps = 1e-8
+    eps = ENERGY_EPS
 
     cois = [sources[:, i, :] for i in range(n_src - 1)]
     bg = sources[:, -1, :]
@@ -540,16 +573,20 @@ def prepare_batch(
     bg_scaling = torch.sqrt(coi_power / (bg_power * snr_linear + eps))
 
     # Don't scale if COI is silent
-    silent_coi = coi_power < 1e-8
+    silent_coi = coi_power < SILENCE_ENERGY_EPS
     bg_scaling = torch.where(silent_coi, torch.ones_like(bg_scaling), bg_scaling)
-    bg_scaling = torch.clamp(bg_scaling, min=0.1, max=3.0)
+    bg_scaling = torch.clamp(bg_scaling, min=BG_SCALE_MIN, max=BG_SCALE_MAX)
 
     bg_scaled = bg * bg_scaling
-    mixture = normalize_tensor_wav(total_coi + bg_scaled, eps=eps, min_std=1e-3)
+    mixture = normalize_tensor_wav(
+        total_coi + bg_scaled, eps=eps, min_std=NORMALIZE_MIN_STD
+    )
 
     # Normalize each source independently
-    normalized_cois = [normalize_tensor_wav(c, eps=eps, min_std=1e-3) for c in cois]
-    normalized_bg = normalize_tensor_wav(bg_scaled, eps=eps, min_std=1e-3)
+    normalized_cois = [
+        normalize_tensor_wav(c, eps=eps, min_std=NORMALIZE_MIN_STD) for c in cois
+    ]
+    normalized_bg = normalize_tensor_wav(bg_scaled, eps=eps, min_std=NORMALIZE_MIN_STD)
     clean_wavs = torch.stack(normalized_cois + [normalized_bg], dim=1)
 
     return mixture, clean_wavs
@@ -578,6 +615,7 @@ def train_epoch(
     global_step: int = 0,
     base_lr: float = 0.001,
     snr_range: tuple[float, float] = (-5.0, 5.0),
+    scaler: torch.amp.GradScaler | None = None,
 ) -> tuple[float, int, list[float]]:
     """Train for one epoch."""
     model.train()
@@ -585,7 +623,8 @@ def train_epoch(
     grad_norms: list[float] = []
 
     use_amp = use_amp and str(device).startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+    if scaler is None and use_amp:
+        scaler = torch.amp.GradScaler("cuda", enabled=True)
     autocast_ctx = (
         torch.amp.autocast("cuda", dtype=torch.float16, enabled=True)
         if use_amp
@@ -594,34 +633,52 @@ def train_epoch(
 
     optimizer.zero_grad(set_to_none=True)
     optimizer_step = 0
+    has_pending_grads = False
 
     pbar = tqdm(dataloader, desc="Training", leave=False, ascii=True, ncols=100)
-    for step_idx, (_, sources) in enumerate(pbar, start=1):
+    for step_idx, sources in enumerate(pbar, start=1):
         sources = sources.to(device, non_blocking=True)
         mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=False)
+        B = sources.shape[0]
+        del sources  # Free; clean_wavs has the processed copy
 
         if not check_finite(mixture, clean_wavs):
+            del mixture, clean_wavs
             grad_norms.append(float("nan"))
             continue
 
-        # Forward pass
+        # Forward pass + loss inside autocast to avoid fp16->fp32 duplication
         with autocast_ctx:
             outputs = model(mixture.unsqueeze(1))
 
-        if not check_finite(outputs):
-            if use_amp:
-                with torch.amp.autocast("cuda", enabled=False):
-                    outputs = model(mixture.unsqueeze(1).float())
             if not check_finite(outputs):
-                optimizer.zero_grad(set_to_none=True)
-                grad_norms.append(float("nan"))
-                continue
+                del outputs  # Free old computation graph before retry
+                if use_amp:
+                    torch.cuda.empty_cache()
+                    with torch.amp.autocast("cuda", enabled=False):
+                        outputs = model(mixture.unsqueeze(1).float())
+                    if not check_finite(outputs):
+                        del outputs, mixture, clean_wavs
+                        optimizer.zero_grad(set_to_none=True)
+                        grad_norms.append(float("nan"))
+                        torch.cuda.empty_cache()
+                        continue
+                else:
+                    # No retry available without AMP; skip this batch
+                    del mixture, clean_wavs
+                    optimizer.zero_grad(set_to_none=True)
+                    grad_norms.append(float("nan"))
+                    continue
 
-        # Loss
-        loss = torch.clamp(
-            criterion(outputs.float(), clean_wavs.float()), min=-30.0, max=30.0
-        )
+            loss = torch.clamp(
+                criterion(outputs.float(), clean_wavs.float()), min=-30.0, max=30.0
+            )
+
+        del outputs  # Graph retained via loss; free the direct reference
+        del mixture, clean_wavs
+
         if not check_finite(loss):
+            del loss
             optimizer.zero_grad(set_to_none=True)
             grad_norms.append(float("nan"))
             continue
@@ -632,6 +689,10 @@ def train_epoch(
             scaler.scale(loss_scaled).backward()
         else:
             loss_scaled.backward()
+
+        # Extract scalar before freeing loss tensors
+        batch_loss = float(loss.item())
+        del loss, loss_scaled
 
         # Optimizer step
         if step_idx % grad_accum_steps == 0:
@@ -645,13 +706,14 @@ def train_epoch(
                 if p.grad is not None
             )
 
-            if grads_ok and check_finite(loss):
+            if grads_ok:
                 optimizer_step += 1
 
-                # Warmup
-                if warmup_steps > 0 and optimizer_step <= warmup_steps:
+                # Warmup (based on global step to avoid restarting each epoch)
+                current_global = global_step + optimizer_step
+                if warmup_steps > 0 and current_global <= warmup_steps:
                     for pg in optimizer.param_groups:
-                        pg["lr"] = base_lr * (optimizer_step / warmup_steps)
+                        pg["lr"] = base_lr * (current_global / warmup_steps)
 
                 total_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), clip_grad_norm
@@ -672,15 +734,59 @@ def train_epoch(
                         pass
 
             optimizer.zero_grad(set_to_none=True)
+            has_pending_grads = False
+        else:
+            has_pending_grads = True
 
         # Metrics
-        B = sources.shape[0]
-        running_loss += float(loss.item()) * B
+        running_loss += batch_loss * B
         n_samples += B
 
         pbar.set_postfix(
-            loss=f"{loss.item():.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}"
+            loss=f"{batch_loss:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}"
         )
+
+        # Periodically release cached CUDA memory to prevent fragmentation buildup
+        if use_amp and step_idx % 50 == 0:
+            torch.cuda.empty_cache()
+
+    # Flush any remaining accumulated gradients from the last partial cycle
+    if has_pending_grads:
+        if use_amp:
+            scaler.unscale_(optimizer)
+
+        grads_ok = all(
+            torch.isfinite(p.grad).all()
+            for p in model.parameters()
+            if p.grad is not None
+        )
+
+        if grads_ok:
+            optimizer_step += 1
+            current_global = global_step + optimizer_step
+            if warmup_steps > 0 and current_global <= warmup_steps:
+                for pg in optimizer.param_groups:
+                    pg["lr"] = base_lr * (current_global / warmup_steps)
+
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), clip_grad_norm
+            )
+            grad_norms.append(float(total_norm.item()))
+
+            if use_amp:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+        else:
+            grad_norms.append(float("nan"))
+            if use_amp:
+                try:
+                    scaler.update()
+                except Exception:
+                    pass
+
+        optimizer.zero_grad(set_to_none=True)
 
     if str(device).startswith("cuda"):
         torch.cuda.empty_cache()
@@ -695,7 +801,6 @@ def train_epoch(
     return running_loss / max(n_samples, 1), global_step + optimizer_step, grad_norms
 
 
-@torch.no_grad()
 def validate_epoch(
     model,
     dataloader,
@@ -717,37 +822,43 @@ def validate_epoch(
     )
 
     pbar = tqdm(dataloader, desc="Validation", leave=False, ascii=True, ncols=100)
-    for _, sources in pbar:
-        sources = sources.to(device, non_blocking=True)
-        mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=True)
+    with torch.no_grad():
+        for sources in pbar:
+            sources = sources.to(device, non_blocking=True)
+            mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=True)
+            B = sources.shape[0]
+            del sources
 
-        if not check_finite(mixture, clean_wavs):
-            continue
+            if not check_finite(mixture, clean_wavs):
+                del mixture, clean_wavs
+                continue
 
-        with autocast_ctx:
-            outputs = model(mixture.unsqueeze(1))
-            loss = criterion(outputs.float(), clean_wavs.float())
+            with autocast_ctx:
+                outputs = model(mixture.unsqueeze(1))
+                loss = criterion(outputs.float(), clean_wavs.float())
 
-        B = sources.shape[0]
-        running_loss += float(loss.item()) * B
-        n_samples += B
+            batch_loss = float(loss.item())
+            running_loss += batch_loss * B
+            n_samples += B
 
-        # SI-SNR metrics
-        try:
-            n_src = outputs.shape[1]
-            coi_sisnr = torch.stack(
-                [sisnr(outputs[:, i], clean_wavs[:, i]) for i in range(n_src - 1)]
-            ).mean()
-            bg_sisnr = sisnr(outputs[:, -1], clean_wavs[:, -1]).mean()
-            all_coi_sisnr.append(float(coi_sisnr.item()))
-            all_bg_sisnr.append(float(bg_sisnr.item()))
-            pbar.set_postfix(
-                loss=f"{loss.item():.4f}",
-                coi=f"{coi_sisnr.item():.2f}",
-                bg=f"{bg_sisnr.item():.2f}",
-            )
-        except Exception:
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+            # SI-SNR metrics
+            try:
+                n_src = outputs.shape[1]
+                coi_sisnr = torch.stack(
+                    [sisnr(outputs[:, i], clean_wavs[:, i]) for i in range(n_src - 1)]
+                ).mean()
+                bg_sisnr = sisnr(outputs[:, -1], clean_wavs[:, -1]).mean()
+                all_coi_sisnr.append(float(coi_sisnr.item()))
+                all_bg_sisnr.append(float(bg_sisnr.item()))
+                pbar.set_postfix(
+                    loss=f"{batch_loss:.4f}",
+                    coi=f"{coi_sisnr.item():.2f}",
+                    bg=f"{bg_sisnr.item():.2f}",
+                )
+            except Exception:
+                pbar.set_postfix(loss=f"{batch_loss:.4f}")
+
+            del outputs, loss, mixture, clean_wavs
 
     if all_coi_sisnr and all_bg_sisnr:
         print(
@@ -784,7 +895,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         augment=(split == "train"),
         background_only_prob=(
             getattr(config.data, "background_only_prob", 0.0)
-            if split == "train"
+            if split in ("train", "val")
             else 0.0
         ),
         background_mix_n=getattr(config.data, "background_mix_n", 2),
@@ -876,8 +987,8 @@ def set_seed(seed: int = 42):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
 
 # =============================================================================
@@ -905,15 +1016,25 @@ def train(config: Config, timestamp: str | None = None):
     print("Creating train dataloader...")
     train_loader, train_dataset = create_dataloader(config, "train")
 
+    print("Creating val dataloader...")
+    val_loader, val_dataset = create_dataloader(config, "val")
+
     # Setup training
     criterion = COIWeightedLoss(
         class_weight=getattr(config.training, "class_weight", 1.5)
     )
     base_lr = float(config.training.lr)
-    optimizer = optim.Adam(model.parameters(), lr=base_lr)
+    weight_decay = float(getattr(config.training, "weight_decay", 1e-2))
+    optimizer = optim.AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=5
     )
+
+    # Create GradScaler once so its internal state persists across epochs
+    use_amp = getattr(config.training, "use_amp", True) and str(
+        config.training.device
+    ).startswith("cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
 
     warmup_steps = int(getattr(config.training, "warmup_steps", 500))
     validate_every_n = int(getattr(config.training, "validate_every_n_epochs", 1))
@@ -940,6 +1061,7 @@ def train(config: Config, timestamp: str | None = None):
             global_step=global_step,
             base_lr=base_lr,
             snr_range=tuple(config.data.snr_range),
+            scaler=scaler,
         )
         history["train_loss"].append(train_loss)
         valid_norms = [n for n in epoch_grad_norms if not np.isnan(n)]
@@ -955,7 +1077,8 @@ def train(config: Config, timestamp: str | None = None):
         )
 
         if run_validation:
-            val_loader, val_dataset = create_dataloader(config, "val")
+            # Reset val dataset RNG for deterministic background pairing each time
+            val_dataset._rng = np.random.default_rng(42)
             val_loss = validate_epoch(
                 model,
                 val_loader,
@@ -964,9 +1087,6 @@ def train(config: Config, timestamp: str | None = None):
                 use_amp=getattr(config.training, "use_amp", True),
                 snr_range=tuple(config.data.snr_range),
             )
-            del val_loader, val_dataset
-            gc.collect()
-
             history["val_loss"].append(val_loss)
             print(f"Train: {train_loss:.4f}, Val: {val_loss:.4f}")
             scheduler.step(val_loss)
@@ -995,8 +1115,7 @@ def train(config: Config, timestamp: str | None = None):
                 print(f"\nEarly stopping after {epoch} epochs")
                 break
         else:
-            val_loss = history["val_loss"][-1] if history["val_loss"] else float("inf")
-            history["val_loss"].append(val_loss)
+            history["val_loss"].append(None)
             print(f"Train: {train_loss:.4f}")
 
     # Save history

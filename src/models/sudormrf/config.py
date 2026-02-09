@@ -45,6 +45,7 @@ class TrainingConfig:
     use_amp: bool = True
     num_epochs: int = 50
     lr: float = 0.001
+    weight_decay: float = 1e-2
     num_workers: int = 4  # Parallel data loading (adjust based on CPU cores)
     clip_grad_norm: float = 5.0
     patience: int = 15
