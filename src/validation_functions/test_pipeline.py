@@ -711,8 +711,8 @@ class ValidationPipeline:
             results_dict = {k: v.to_dict() for k, v in results.items()}
             # Add checkpoint paths to output
             results_dict["checkpoint_paths"] = {
-                "separator": self.sep_checkpoint_path,
-                "classifier": self.cls_checkpoint_path,
+                "separator": str(self.sep_checkpoint_path),
+                "classifier": str(self.cls_checkpoint_path),
             }
             with open(Path(output_dir) / f"results_{ts}.json", "w") as f:
                 json.dump(results_dict, f, indent=2)
