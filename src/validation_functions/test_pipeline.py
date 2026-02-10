@@ -228,6 +228,10 @@ class ValidationPipeline:
         self.classifier = None
         self._resamplers = {}
 
+        # Store checkpoint paths for logging
+        self.sep_checkpoint_path = None
+        self.cls_checkpoint_path = None
+
         # Signal-level metric functions (torchmetrics)
         self._si_snr = ScaleInvariantSignalNoiseRatio()
         self._sdr = SignalDistortionRatio()
@@ -244,6 +248,10 @@ class ValidationPipeline:
         """Load separation and classification models."""
         sep_path = sep_checkpoint or self.SEP_CHECKPOINT
         cls_path = cls_weights or self.CLS_WEIGHTS
+
+        # Store checkpoint paths
+        self.sep_checkpoint_path = sep_path
+        self.cls_checkpoint_path = cls_path
 
         if use_clapsep:
             ckpt_label = sep_path if sep_checkpoint else "default CLAPSep checkpoint"
@@ -700,8 +708,14 @@ class ValidationPipeline:
         if output_dir:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            results_dict = {k: v.to_dict() for k, v in results.items()}
+            # Add checkpoint paths to output
+            results_dict["checkpoint_paths"] = {
+                "separator": self.sep_checkpoint_path,
+                "classifier": self.cls_checkpoint_path,
+            }
             with open(Path(output_dir) / f"results_{ts}.json", "w") as f:
-                json.dump({k: v.to_dict() for k, v in results.items()}, f, indent=2)
+                json.dump(results_dict, f, indent=2)
 
         return results
 
