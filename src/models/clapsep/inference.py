@@ -86,26 +86,43 @@ def _import_clapsep_class():
 
     if ckpt_clapsep_py.exists() and ckpt_decoder_py.exists():
         try:
-            # Use unique module names to avoid conflicts
-            decoder_name = f"_clapsep_ckpt_decoder_{id(ckpt_decoder_py)}"
-            clapsep_name = f"_clapsep_ckpt_main_{id(ckpt_clapsep_py)}"
+            import types
 
-            # Load decoder module
-            decoder_spec = importlib.util.spec_from_file_location(
-                decoder_name, str(ckpt_decoder_py)
-            )
-            if decoder_spec and decoder_spec.loader:
-                decoder_module = importlib.util.module_from_spec(decoder_spec)
-                sys.modules[decoder_name] = decoder_module
-                decoder_spec.loader.exec_module(decoder_module)
+            # Create a synthetic package so that relative imports
+            # (e.g. ``from .CLAPSep_decoder import …``) resolve correctly.
+            pkg_name = "_clapsep_ckpt_pkg"
 
-            # Load CLAPSep module
+            if pkg_name not in sys.modules:
+                pkg = types.ModuleType(pkg_name)
+                pkg.__path__ = [str(_CKPT_MODEL_DIR)]
+                pkg.__package__ = pkg_name
+                sys.modules[pkg_name] = pkg
+
+            # -- Load decoder as a sub-module of the synthetic package ------
+            decoder_fqn = f"{pkg_name}.CLAPSep_decoder"
+            if decoder_fqn not in sys.modules:
+                decoder_spec = importlib.util.spec_from_file_location(
+                    decoder_fqn,
+                    str(ckpt_decoder_py),
+                    submodule_search_locations=[],
+                )
+                if decoder_spec and decoder_spec.loader:
+                    decoder_module = importlib.util.module_from_spec(decoder_spec)
+                    decoder_module.__package__ = pkg_name
+                    sys.modules[decoder_fqn] = decoder_module
+                    decoder_spec.loader.exec_module(decoder_module)
+
+            # -- Load CLAPSep as a sub-module of the synthetic package ------
+            clapsep_fqn = f"{pkg_name}.CLAPSep"
             clapsep_spec = importlib.util.spec_from_file_location(
-                clapsep_name, str(ckpt_clapsep_py)
+                clapsep_fqn,
+                str(ckpt_clapsep_py),
+                submodule_search_locations=[],
             )
             if clapsep_spec and clapsep_spec.loader:
                 clapsep_module = importlib.util.module_from_spec(clapsep_spec)
-                sys.modules[clapsep_name] = clapsep_module
+                clapsep_module.__package__ = pkg_name
+                sys.modules[clapsep_fqn] = clapsep_module
                 clapsep_spec.loader.exec_module(clapsep_module)
 
                 # Extract and return the CLAPSep class
@@ -125,7 +142,7 @@ def _import_clapsep_class():
 
     # --- Attempt 2: Load from base/model/CLAPSep.py ------------------------
     try:
-        from models.clapsep.base.model.CLAPSep import CLAPSep  # type: ignore
+        from .base.model.CLAPSep import CLAPSep  # type: ignore
 
         return CLAPSep
     except ImportError as e:
