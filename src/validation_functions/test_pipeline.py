@@ -1,6 +1,7 @@
 """
 Validation module for separation + classification pipeline.
 Computes confusion matrix, precision, recall, F1-score, and other metrics.
+Includes signal-level separation quality metrics (SI-SNR, SDR).
 """
 
 import importlib
@@ -16,12 +17,20 @@ import numpy as np
 import pandas as pd
 import torch
 import torchaudio
+from torchmetrics.audio import (
+    ScaleInvariantSignalDistortionRatio,
+    ScaleInvariantSignalNoiseRatio,
+    SignalDistortionRatio,
+)
 from tqdm import tqdm
 
 # Add paths for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent / "plane_clasifier"))
 
+from src.models.clapsep.inference import COI_HEAD_INDEX as CLAPSEP_COI_HEAD
+from src.models.clapsep.inference import CLAPSepInference
+from src.models.sudormrf.inference import COI_HEAD_INDEX as SUDORMRF_COI_HEAD
 from src.models.sudormrf.inference import SeparationInference
 from src.validation_functions.plane_clasifier.config import TrainingConfig
 from src.validation_functions.plane_clasifier.inference import PlaneClassifierInference
@@ -68,6 +77,17 @@ class ClassificationMetrics:
     confidences: List[float] = field(default_factory=list)
     labels: List[int] = field(default_factory=list)
 
+    # Signal-level separation quality metrics (populated when reference is available)
+    si_snr_scores: List[float] = field(default_factory=list)
+    sdr_scores: List[float] = field(default_factory=list)
+    si_sdr_scores: List[float] = field(default_factory=list)
+    mean_si_snr: Optional[float] = None
+    mean_sdr: Optional[float] = None
+    mean_si_sdr: Optional[float] = None
+
+    # Actual SNR values achieved after clamping (for mixture experiments)
+    actual_snrs: List[float] = field(default_factory=list)
+
     def compute(
         self, y_true: np.ndarray, y_pred: np.ndarray, y_scores: np.ndarray = None
     ):
@@ -106,8 +126,16 @@ class ClassificationMetrics:
             (tp * tn - fp * fn) / mcc_denom if mcc_denom > 0 else 0.0
         )
 
+        # Aggregate signal metrics if populated
+        if self.si_snr_scores:
+            self.mean_si_snr = float(np.mean(self.si_snr_scores))
+        if self.sdr_scores:
+            self.mean_sdr = float(np.mean(self.sdr_scores))
+        if self.si_sdr_scores:
+            self.mean_si_sdr = float(np.mean(self.si_sdr_scores))
+
     def __str__(self):
-        return f"""
+        s = f"""
 {"=" * 50}
 Confusion Matrix:  TN={self.true_negatives}  FP={self.false_positives}
                    FN={self.false_negatives}  TP={self.true_positives}
@@ -115,11 +143,23 @@ Confusion Matrix:  TN={self.true_negatives}  FP={self.false_positives}
 Accuracy:  {self.accuracy:.4f}    Precision: {self.precision:.4f}
 Recall:    {self.recall:.4f}    F1-Score:  {self.f1_score:.4f}
 Specificity: {self.specificity:.4f}  Balanced Acc: {self.balanced_accuracy:.4f}
-MCC: {self.matthews_corrcoef:.4f}
-{"=" * 50}"""
+MCC: {self.matthews_corrcoef:.4f}"""
+
+        if self.mean_si_snr is not None:
+            s += f"""
+
+Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
+  SI-SNR: {self.mean_si_snr:+.2f} dB    SDR: {self.mean_sdr:+.2f} dB    SI-SDR: {self.mean_si_sdr:+.2f} dB"""
+
+        if self.actual_snrs:
+            s += f"""
+  Actual SNR range: [{min(self.actual_snrs):.1f}, {max(self.actual_snrs):.1f}] dB  (mean: {np.mean(self.actual_snrs):.1f} dB)"""
+
+        s += f"\n{'=' * 50}"
+        return s
 
     def to_dict(self):
-        return {
+        d = {
             "confusion_matrix": {
                 "tp": self.true_positives,
                 "tn": self.true_negatives,
@@ -134,6 +174,20 @@ MCC: {self.matthews_corrcoef:.4f}
             "balanced_accuracy": self.balanced_accuracy,
             "mcc": self.matthews_corrcoef,
         }
+        if self.mean_si_snr is not None:
+            d["signal_metrics"] = {
+                "mean_si_snr_db": self.mean_si_snr,
+                "mean_sdr_db": self.mean_sdr,
+                "mean_si_sdr_db": self.mean_si_sdr,
+                "n_signal_samples": len(self.si_snr_scores),
+            }
+        if self.actual_snrs:
+            d["actual_snr_stats"] = {
+                "min": float(min(self.actual_snrs)),
+                "max": float(max(self.actual_snrs)),
+                "mean": float(np.mean(self.actual_snrs)),
+            }
+        return d
 
 
 # ============================================================================
@@ -160,6 +214,10 @@ class ValidationPipeline:
         self.base_path = base_path
         self.sample_rate = 16000
         self.segment_length = 5.0
+        self.classifier_sample_rate = self.sample_rate
+        self.classifier_segment_samples = int(
+            self.classifier_sample_rate * self.segment_length
+        )
         self.segment_samples = int(self.sample_rate * self.segment_length)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -167,21 +225,51 @@ class ValidationPipeline:
         self.classifier = None
         self._resamplers = {}
 
-    def load_models(self, sep_checkpoint: str = None, cls_weights: str = None):
+        # Signal-level metric functions (torchmetrics)
+        self._si_snr = ScaleInvariantSignalNoiseRatio()
+        self._sdr = SignalDistortionRatio()
+        self._si_sdr = ScaleInvariantSignalDistortionRatio()
+
+    def load_models(
+        self,
+        sep_checkpoint: str = None,
+        cls_weights: str = None,
+        use_clapsep: bool = False,
+        clapsep_text_pos: str = "airplane flying over",
+        clapsep_text_neg: str = "",
+    ):
         """Load separation and classification models."""
         sep_path = sep_checkpoint or self.SEP_CHECKPOINT
         cls_path = cls_weights or self.CLS_WEIGHTS
 
-        print(f"Loading separation model from {sep_path}")
-        self.separator = SeparationInference.from_checkpoint(
-            sep_path, device=self.device
-        )
+        if use_clapsep:
+            ckpt_label = sep_path if sep_checkpoint else "default CLAPSep checkpoint"
+            print(
+                f"Loading CLAPSep model from {ckpt_label} "
+                f"(text_pos='{clapsep_text_pos}', text_neg='{clapsep_text_neg}')"
+            )
+            self.separator = CLAPSepInference.from_pretrained(
+                model_ckpt_path=sep_path if sep_checkpoint else None,
+                device=self.device,
+                text_pos=clapsep_text_pos,
+                text_neg=clapsep_text_neg,
+            )
+            self.sample_rate = self.separator.sample_rate
+            self.segment_samples = int(self.sample_rate * self.segment_length)
+        else:
+            print(f"Loading separation model from {sep_path}")
+            self.separator = SeparationInference.from_checkpoint(
+                sep_path, device=self.device
+            )
 
         print(f"Loading classification model from {cls_path}")
         config = TrainingConfig(
-            sample_rate=self.sample_rate, audio_duration=self.segment_length
+            sample_rate=self.classifier_sample_rate, audio_duration=self.segment_length
         )
         self.classifier = PlaneClassifierInference(cls_path, config)
+        self.classifier_segment_samples = int(
+            self.classifier_sample_rate * self.segment_length
+        )
 
     def _convert_path(self, filepath: str) -> str:
         """Convert Windows paths to Linux paths."""
@@ -230,6 +318,9 @@ class ValidationPipeline:
         Outputs are scaled by mixture std to restore reasonable amplitude.
         """
         orig_len = waveform.shape[0]
+
+        if isinstance(self.separator, CLAPSepInference):
+            return self.separator.separate_waveform(waveform)
 
         # If waveform is the expected segment length, run as before
         if orig_len <= self.segment_samples:
@@ -299,55 +390,131 @@ class ValidationPipeline:
 
     def _classify(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Run classification. Returns (prediction, confidence)."""
-        result = self.classifier.predict_waveform(waveform.numpy())
+        wav = waveform.detach().cpu()
+
+        if self.classifier_sample_rate != self.sample_rate:
+            key = (self.sample_rate, self.classifier_sample_rate)
+            if key not in self._resamplers:
+                self._resamplers[key] = torchaudio.transforms.Resample(
+                    self.sample_rate, self.classifier_sample_rate
+                )
+            wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
+
+        if wav.shape[0] < self.classifier_segment_samples:
+            wav = torch.nn.functional.pad(
+                wav, (0, self.classifier_segment_samples - wav.shape[0])
+            )
+        else:
+            wav = wav[: self.classifier_segment_samples]
+
+        result = self.classifier.predict_waveform(wav.numpy())
         pred = 1 if result["prediction"] == "plane" else 0
         return pred, result["confidence"]
 
     def _create_mixture(
         self, source: torch.Tensor, noise: torch.Tensor, snr_db: float
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, float]:
         """Mix source and noise at given SNR.
 
         SNR (dB) = 10 * log10(source_power / noise_power)
         Scales noise to achieve target SNR with clamping to prevent extreme levels.
+
+        Returns:
+            Tuple of (mixture, actual_snr_db) where actual_snr_db reflects the
+            SNR after clamping the noise scale factor.
         """
         eps = 1e-8
         source_power = torch.mean(source**2) + eps
         noise_power = torch.mean(noise**2) + eps
         scale = torch.sqrt(source_power / (10 ** (snr_db / 10) * noise_power))
+        scale_unclamped = scale.item()
         # Clamp scaling to prevent extreme noise (consistent with training)
         scale = torch.clamp(scale, min=0.1, max=3.0)
-        return source + noise * scale
+
+        # Compute actual SNR achieved after clamping
+        scaled_noise_power = torch.mean((noise * scale) ** 2) + eps
+        actual_snr_db = 10 * torch.log10(source_power / scaled_noise_power).item()
+
+        if abs(scale.item() - scale_unclamped) > 1e-6:
+            print(
+                f"  [SNR clamping] requested={snr_db:.1f}dB -> "
+                f"actual={actual_snr_db:.1f}dB (scale {scale_unclamped:.3f} -> {scale.item():.3f})"
+            )
+
+        return source + noise * scale, actual_snr_db
 
     def _normalize(self, waveform: torch.Tensor) -> torch.Tensor:
         return (waveform - waveform.mean()) / (waveform.std() + 1e-8)
+
+    def _get_coi_head_index(self) -> int:
+        """Return the COI head index for the current separator model."""
+        if isinstance(self.separator, CLAPSepInference):
+            return CLAPSEP_COI_HEAD
+        return SUDORMRF_COI_HEAD
+
+    def _classify_separated(self, separated: torch.Tensor) -> Tuple[int, float]:
+        """Classify the COI output from a separated signal.
+
+        Uses the designated COI head index rather than cherry-picking
+        the source with the highest confidence, so the evaluation
+        matches real-world deployment behaviour.
+        """
+        if separated.dim() == 1:
+            return self._classify(separated)
+        coi_source = separated[self._get_coi_head_index()]
+        return self._classify(coi_source)
+
+    def _compute_signal_metrics(
+        self, reference: torch.Tensor, estimate: torch.Tensor
+    ) -> Tuple[float, float, float]:
+        """Compute signal-level separation quality metrics.
+
+        Args:
+            reference: Clean reference signal (T,)
+            estimate:  Separated estimate signal (T,)
+
+        Returns:
+            (si_snr, sdr, si_sdr) in dB
+        """
+        ref = reference.detach().cpu().float()
+        est = estimate.detach().cpu().float()
+        # Align lengths
+        min_len = min(ref.shape[0], est.shape[0])
+        ref = ref[:min_len]
+        est = est[:min_len]
+
+        si_snr = self._si_snr(est.unsqueeze(0), ref.unsqueeze(0)).item()
+        sdr = self._sdr(est.unsqueeze(0), ref.unsqueeze(0)).item()
+        si_sdr = self._si_sdr(est.unsqueeze(0), ref.unsqueeze(0)).item()
+        return si_snr, sdr, si_sdr
 
     def validate_clean(
         self, df_coi: pd.DataFrame, df_bg: pd.DataFrame, use_separation: bool
     ) -> ClassificationMetrics:
         """Validate on clean (unmixed) audio - both COI and background."""
         y_true, y_pred, y_scores = [], [], []
+        si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
         desc = "Clean (sep+cls)" if use_separation else "Clean (cls only)"
 
-        # Process COI samples (label=1) - use itertuples for better performance
+        # Process COI samples (label=1)
         for row in tqdm(df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI"):
             try:
                 waveform = self._load_audio(row.filename)
                 if use_separation:
                     separated = self._separate(waveform)
-                    # If multiple sources returned, pick the source with highest
-                    # plane-confidence from the classifier
-                    if separated.dim() == 1:
-                        pred, conf = self._classify(separated)
-                    else:
-                        best_conf = -1.0
-                        best_pred = 0
-                        for s_idx in range(separated.shape[0]):
-                            p, c = self._classify(separated[s_idx])
-                            if c > best_conf:
-                                best_conf = c
-                                best_pred = p
-                        pred, conf = best_pred, best_conf
+                    pred, conf = self._classify_separated(separated)
+                    # Compute signal metrics: compare COI head output to original
+                    coi_est = (
+                        separated
+                        if separated.dim() == 1
+                        else separated[self._get_coi_head_index()]
+                    )
+                    si_snr, sdr, si_sdr = self._compute_signal_metrics(
+                        waveform, coi_est
+                    )
+                    si_snr_scores.append(si_snr)
+                    sdr_scores.append(sdr)
+                    si_sdr_scores.append(si_sdr)
                 else:
                     pred, conf = self._classify(waveform)
                 y_true.append(1)
@@ -356,23 +523,13 @@ class ValidationPipeline:
             except Exception as e:
                 print(f"Error: {row.filename}: {e}")
 
-        # Process background samples (label=0) - use itertuples for better performance
+        # Process background samples (label=0)
         for row in tqdm(df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG"):
             try:
                 waveform = self._load_audio(row.filename)
                 if use_separation:
                     separated = self._separate(waveform)
-                    if separated.dim() == 1:
-                        pred, conf = self._classify(separated)
-                    else:
-                        best_conf = -1.0
-                        best_pred = 0
-                        for s_idx in range(separated.shape[0]):
-                            p, c = self._classify(separated[s_idx])
-                            if c > best_conf:
-                                best_conf = c
-                                best_pred = p
-                        pred, conf = best_pred, best_conf
+                    pred, conf = self._classify_separated(separated)
                 else:
                     pred, conf = self._classify(waveform)
                 y_true.append(0)
@@ -382,6 +539,9 @@ class ValidationPipeline:
                 print(f"Error: {row.filename}: {e}")
 
         metrics = ClassificationMetrics()
+        metrics.si_snr_scores = si_snr_scores
+        metrics.sdr_scores = sdr_scores
+        metrics.si_sdr_scores = si_sdr_scores
         metrics.compute(np.array(y_true), np.array(y_pred), np.array(y_scores))
         return metrics
 
@@ -394,10 +554,12 @@ class ValidationPipeline:
     ) -> ClassificationMetrics:
         """Validate on mixtures at random SNR (COI+BG) and clean background (BG only)."""
         y_true, y_pred, y_scores = [], [], []
+        si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
+        actual_snrs: List[float] = []
         desc = "Mixtures (sep+cls)" if use_separation else "Mixtures (cls only)"
         bg_files = df_bg["filename"].tolist()
 
-        # Process COI + background mixtures (label=1) - use itertuples for better performance
+        # Process COI + background mixtures (label=1)
         for row in tqdm(
             df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI+BG"
         ):
@@ -407,20 +569,23 @@ class ValidationPipeline:
                     self._load_audio(bg_files[np.random.randint(len(bg_files))])
                 )
                 snr = np.random.uniform(*snr_range)
-                mixture = self._create_mixture(coi, bg, snr)
+                mixture, actual_snr = self._create_mixture(coi, bg, snr)
+                actual_snrs.append(actual_snr)
                 if use_separation:
                     separated = self._separate(mixture)
-                    if separated.dim() == 1:
-                        pred, conf = self._classify(separated)
-                    else:
-                        best_conf = -1.0
-                        best_pred = 0
-                        for s_idx in range(separated.shape[0]):
-                            p, c = self._classify(separated[s_idx])
-                            if c > best_conf:
-                                best_conf = c
-                                best_pred = p
-                        pred, conf = best_pred, best_conf
+                    pred, conf = self._classify_separated(separated)
+                    # Compute signal metrics: compare COI head output to clean COI
+                    coi_est = (
+                        separated
+                        if separated.dim() == 1
+                        else separated[self._get_coi_head_index()]
+                    )
+                    si_snr_val, sdr_val, si_sdr_val = self._compute_signal_metrics(
+                        coi, coi_est
+                    )
+                    si_snr_scores.append(si_snr_val)
+                    sdr_scores.append(sdr_val)
+                    si_sdr_scores.append(si_sdr_val)
                 else:
                     pred, conf = self._classify(mixture)
                 y_true.append(1)
@@ -429,23 +594,13 @@ class ValidationPipeline:
             except Exception as e:
                 print(f"Error: {e}")
 
-        # Process background-only samples (label=0) - use itertuples for better performance
+        # Process background-only samples (label=0)
         for row in tqdm(df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG only"):
             try:
                 waveform = self._load_audio(row.filename)
                 if use_separation:
                     separated = self._separate(waveform)
-                    if separated.dim() == 1:
-                        pred, conf = self._classify(separated)
-                    else:
-                        best_conf = -1.0
-                        best_pred = 0
-                        for s_idx in range(separated.shape[0]):
-                            p, c = self._classify(separated[s_idx])
-                            if c > best_conf:
-                                best_conf = c
-                                best_pred = p
-                        pred, conf = best_pred, best_conf
+                    pred, conf = self._classify_separated(separated)
                 else:
                     pred, conf = self._classify(waveform)
                 y_true.append(0)
@@ -455,6 +610,10 @@ class ValidationPipeline:
                 print(f"Error: {e}")
 
         metrics = ClassificationMetrics()
+        metrics.si_snr_scores = si_snr_scores
+        metrics.sdr_scores = sdr_scores
+        metrics.si_sdr_scores = si_sdr_scores
+        metrics.actual_snrs = actual_snrs
         metrics.compute(np.array(y_true), np.array(y_pred), np.array(y_scores))
         return metrics
 
@@ -464,8 +623,22 @@ class ValidationPipeline:
         snr_range: Tuple[float, float] = (-5, 5),
         data_csv: str = None,
         output_dir: str = None,
+        seed: int = 42,
     ) -> Dict[str, ClassificationMetrics]:
-        """Run full validation suite."""
+        """Run full validation suite.
+
+        Args:
+            split: Dataset split to evaluate on.
+            snr_range: (min, max) SNR in dB for mixture creation.
+            data_csv: Path to dataset CSV. Falls back to self.DATA_CSV.
+            output_dir: Directory to save JSON results.
+            seed: Random seed for reproducibility of mixture creation.
+        """
+        # Set seeds for reproducibility
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        print(f"Random seed set to {seed}")
+
         csv_path = data_csv or self.DATA_CSV
         df = pd.read_csv(csv_path)
         df_split = df[df["split"] == split]
@@ -583,7 +756,8 @@ def demo_two_wav_separation(
     src_n = pipeline._normalize(src)
     noise_n = pipeline._normalize(noise)
 
-    mixture = pipeline._create_mixture(src_n, noise_n, snr_db)
+    mixture, actual_snr = pipeline._create_mixture(src_n, noise_n, snr_db)
+    print(f"Requested SNR: {snr_db:.1f} dB -> Actual SNR: {actual_snr:.1f} dB")
 
     print("Running separation on the mixture...")
     separated = pipeline._separate(mixture)

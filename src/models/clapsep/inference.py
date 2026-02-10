@@ -84,8 +84,8 @@ def _import_clapsep_class():
     # --- Attempt 1: checkpoint/CLAPSep/model/CLAPSep.py -------------------
     ckpt_clapsep = _CKPT_MODEL_DIR / "CLAPSep.py"
     ckpt_decoder = _CKPT_MODEL_DIR / "CLAPSep_decoder.py"
-    if ckpt_clapsep.rent
-    if ckpt_pkg.exists():
+    ckpt_pkg = _CKPT_MODEL_DIR.parent
+    if ckpt_clapsep.exists() and ckpt_decoder.exists() and ckpt_pkg.exists():
         added = str(ckpt_pkg) not in sys.path
         if added:
             sys.path.insert(0, str(ckpt_pkg))
