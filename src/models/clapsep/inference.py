@@ -132,7 +132,8 @@ def _build_pretrained_clapsep(clap_path: Path, ckpt_path: Path, device: str):
 
     print(f"[CLAPSep] Loading weights from {ckpt_path}")
     ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
-    model.load_state_dict(ckpt, strict=False)
+    state_dict = ckpt.get("state_dict", ckpt)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model
 
