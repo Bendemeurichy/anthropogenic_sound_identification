@@ -36,10 +36,10 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
+from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
     GroupCommSudoRmRf,
 )
-from base.sudo_rm_rf.dnn.models.improved_sudormrf import (
+from .base.sudo_rm_rf.dnn.models.improved_sudormrf import (
     SuDORMRF,
     UConvBlock,
 )

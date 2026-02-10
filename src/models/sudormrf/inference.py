@@ -121,9 +121,26 @@ class SeparationInference:
         state_dict = None
         model_obj = None
 
+        # PRIORITY 1: Try loading config.yaml from checkpoint directory first
+        # This ensures we use the most up-to-date config with all parameters
+        cfg_path = checkpoint_path.parent / "config.yaml"
+        if cfg_path.exists():
+            print(f"Loading config from {cfg_path}")
+            config = Config.from_yaml(str(cfg_path))
+
         if isinstance(checkpoint, dict):
-            # Typical training checkpoint: contains both config and model_state_dict
-            if "config" in checkpoint and "model_state_dict" in checkpoint:
+            # Extract state_dict from checkpoint
+            if "model_state_dict" in checkpoint:
+                state_dict = checkpoint["model_state_dict"]
+            elif "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            # Sometimes checkpoints are saved as the raw state_dict
+            elif all(isinstance(v, torch.Tensor) for v in checkpoint.values()):
+                state_dict = checkpoint
+
+            # PRIORITY 2: If config not found in config.yaml, try checkpoint dict
+            if config is None and "config" in checkpoint:
+                print("Loading config from checkpoint dict (no config.yaml found)")
                 cfg_obj = checkpoint["config"]
                 if isinstance(cfg_obj, Config):
                     config = cfg_obj
@@ -135,52 +152,21 @@ class SeparationInference:
                     except Exception:
                         config = None
 
-                state_dict = checkpoint["model_state_dict"]
-
-            # Some checkpoints use 'state_dict' key
-            elif "state_dict" in checkpoint:
-                state_dict = checkpoint["state_dict"]
-
-            # Sometimes checkpoints are saved as the raw state_dict
-            else:
-                # Heuristic: if all values are tensors, treat as state_dict
-                if all(isinstance(v, torch.Tensor) for v in checkpoint.values()):
-                    state_dict = checkpoint
-                else:
-                    # Try to fallback to a config.yaml alongside the checkpoint file
-                    cfg_path = checkpoint_path.parent / "config.yaml"
-                    if cfg_path.exists():
-                        config = Config.from_yaml(str(cfg_path))
-                        # attempt to pick common keys for state_dict
-                        if "model_state_dict" in checkpoint:
-                            state_dict = checkpoint["model_state_dict"]
-                        elif "state_dict" in checkpoint:
-                            state_dict = checkpoint["state_dict"]
-                        else:
-                            # maybe checkpoint contains a wrapped object; leave to later
-                            state_dict = None
-                    else:
-                        raise ValueError(
-                            "Unsupported checkpoint format. Expected training checkpoint or state_dict."
-                        )
+            # If still no config or state_dict, raise error
+            if config is None or state_dict is None:
+                raise ValueError(
+                    "Unsupported checkpoint format. Expected training checkpoint with config and state_dict."
+                )
 
         else:
             # Loaded object may be a full model
             if isinstance(checkpoint, torch.nn.Module):
                 model_obj = checkpoint
             else:
-                # Try loading a config.yaml next to the checkpoint
-                cfg_path = checkpoint_path.parent / "config.yaml"
-                if cfg_path.exists():
-                    config = Config.from_yaml(str(cfg_path))
-                else:
-                    raise ValueError("Unsupported checkpoint format.")
-
-        # If config not found in the checkpoint, try config.yaml in same folder
-        if config is None:
-            cfg_path = checkpoint_path.parent / "config.yaml"
-            if cfg_path.exists():
-                config = Config.from_yaml(str(cfg_path))
+                if config is None:
+                    raise ValueError(
+                        "Unsupported checkpoint format and no config.yaml found."
+                    )
 
         # Build model (or use provided model object) and load weights
         if model_obj is not None:
@@ -203,6 +189,15 @@ class SeparationInference:
 
                 # Filter state_dict to match model's keys
                 model_state_dict = model.state_dict()
+
+                # Print shape mismatches for debugging
+                for k, v in state_dict.items():
+                    if k in model_state_dict and model_state_dict[k].shape != v.shape:
+                        print(
+                            f"Shape mismatch for key '{k}': "
+                            f"Checkpoint shape {v.shape}, Model shape {model_state_dict[k].shape}"
+                        )
+
                 filtered_state_dict = {
                     k: v
                     for k, v in state_dict.items()

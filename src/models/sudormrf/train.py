@@ -29,31 +29,31 @@ from tqdm import tqdm
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import GroupCommSudoRmRf
-from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
+from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import GroupCommSudoRmRf
+from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 
 # Check for environment variable to use old separation head
 USE_OLD_SEPARATION_HEAD = os.environ.get("USE_OLD_SEPARATION_HEAD", "0") == "1"
 if USE_OLD_SEPARATION_HEAD:
-    from seperation_head_old import wrap_model_for_coi
+    from .seperation_head_old import wrap_model_for_coi
 
     _COI_HEAD_INDEX, _BACKGROUND_HEAD_INDEX = 0, 1
 else:
-    from seperation_head import (
+    from .seperation_head import (
         BACKGROUND_HEAD_INDEX as _BACKGROUND_HEAD_INDEX,
     )
-    from seperation_head import (
+    from .seperation_head import (
         COI_HEAD_INDEX as _COI_HEAD_INDEX,
     )
-    from seperation_head import (
+    from .seperation_head import (
         wrap_model_for_coi,
     )
 
 COI_HEAD_INDEX: int = _COI_HEAD_INDEX
 BACKGROUND_HEAD_INDEX: int = _BACKGROUND_HEAD_INDEX
 
-from config import Config
-from multi_class_seperation import wrap_model_for_multiclass
+from .config import Config
+from .multi_class_seperation import wrap_model_for_multiclass
 
 from label_loading.metadata_loader import (
     load_metadata_datasets,
