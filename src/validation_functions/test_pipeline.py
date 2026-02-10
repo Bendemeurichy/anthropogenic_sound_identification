@@ -37,14 +37,17 @@ from src.validation_functions.plane_clasifier.inference import PlaneClassifierIn
 
 try:
     import src.models.base.sudo_rm_rf
-except Exception:
+except Exception as e:
     try:
         real_mod = importlib.import_module("models.sudormrf.base.sudo_rm_rf")
         sys.modules["src.models.base.sudo_rm_rf"] = real_mod
         sys.modules["sudo_rm_rf"] = real_mod
-    except Exception:
+    except Exception as e2:
         # best-effort only; if mapping fails, fallback to normal error
-        pass
+        import traceback
+
+        print(f"[Warning] Failed to map sudormrf modules: {e2}", file=sys.stderr)
+        traceback.print_exc()
 
 # Project root (code directory)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -521,7 +524,10 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
             except Exception as e:
-                print(f"Error: {row.filename}: {e}")
+                import traceback
+
+                print(f"Error: {row.filename}: {e}", file=sys.stderr)
+                traceback.print_exc()
 
         # Process background samples (label=0)
         for row in tqdm(df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG"):
@@ -536,7 +542,10 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
             except Exception as e:
-                print(f"Error: {row.filename}: {e}")
+                import traceback
+
+                print(f"Error: {row.filename}: {e}", file=sys.stderr)
+                traceback.print_exc()
 
         metrics = ClassificationMetrics()
         metrics.si_snr_scores = si_snr_scores
@@ -592,7 +601,10 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
             except Exception as e:
-                print(f"Error: {e}")
+                import traceback
+
+                print(f"Error: {e}", file=sys.stderr)
+                traceback.print_exc()
 
         # Process background-only samples (label=0)
         for row in tqdm(df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG only"):
@@ -607,7 +619,10 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
             except Exception as e:
-                print(f"Error: {e}")
+                import traceback
+
+                print(f"Error: {e}", file=sys.stderr)
+                traceback.print_exc()
 
         metrics = ClassificationMetrics()
         metrics.si_snr_scores = si_snr_scores
@@ -821,17 +836,24 @@ def demo_two_wav_separation(
 
 def main():
     # ============ CONFIGURE PATHS HERE ============
-    SEP_CHECKPOINT = PROJECT_ROOT / "src/models/sudormrf/checkpoints/20260129_113352/best_model.pt"
+    SEP_CHECKPOINT = (
+        PROJECT_ROOT / "src/models/clapsep/checkpoint/CLAPSep/model/best_model.ckpt"
+    )
     CLS_WEIGHTS = (
         PROJECT_ROOT
         / "src/validation_functions/plane_clasifier/results/checkpoints/final_model.weights.h5"
     )
-    DATA_CSV = PROJECT_ROOT / "src/models/sudormrf/checkpoints/20260129_113352/separation_dataset.csv"
+    DATA_CSV = (
+        PROJECT_ROOT
+        / "src/models/sudormrf/checkpoints/20260129_113352/separation_dataset.csv"
+    )
     BASE_PATH = "/path/to/your/datasets"  # For converting Windows paths in CSV
     # ==============================================
 
     pipeline = ValidationPipeline(base_path=BASE_PATH)
-    pipeline.load_models(sep_checkpoint=SEP_CHECKPOINT, cls_weights=CLS_WEIGHTS)
+    pipeline.load_models(
+        sep_checkpoint=SEP_CHECKPOINT, cls_weights=CLS_WEIGHTS, use_clapsep=True
+    )
     pipeline.run(
         split="test",
         snr_range=(-5, 5),

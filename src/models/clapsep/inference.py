@@ -75,49 +75,70 @@ def _validate_weight_file(path: Path, label: str = "Checkpoint") -> None:
 def _import_clapsep_class():
     """Import CLAPSep from checkpoint dir, falling back to base dir.
 
-    Uses importlib to load directly from file paths so that other ``model``
-    modules on ``sys.path`` (e.g. ``plane_clasifier/model.py``) don't
-    shadow the checkpoint's ``model/`` package.
+    Uses importlib.util to load modules directly from file paths, avoiding
+    conflicts with other 'model' packages on sys.path.
     """
     import importlib.util
 
-    # --- Attempt 1: checkpoint/CLAPSep/model/CLAPSep.py -------------------
-    ckpt_clapsep = _CKPT_MODEL_DIR / "CLAPSep.py"
-    ckpt_decoder = _CKPT_MODEL_DIR / "CLAPSep_decoder.py"
-    ckpt_pkg = _CKPT_MODEL_DIR.parent
-    if ckpt_clapsep.exists() and ckpt_decoder.exists() and ckpt_pkg.exists():
-        added = str(ckpt_pkg) not in sys.path
-        if added:
-            sys.path.insert(0, str(ckpt_pkg))
-        # Another library (e.g. plane_clasifier) may have registered a bare
-        # ``model`` module in sys.modules.  That shadows the namespace
-        # package we need here (``checkpoint/CLAPSep/model/``).  Temporarily
-        # evict it so our import resolves to the correct directory.
-        shadow = sys.modules.pop("model", None)
-        try:
-            from model.CLAPSep import CLAPSep  # type: ignore[import]
+    # --- Attempt 1: Load from checkpoint/CLAPSep/model/CLAPSep.py ---------
+    ckpt_clapsep_py = _CKPT_MODEL_DIR / "CLAPSep.py"
+    ckpt_decoder_py = _CKPT_MODEL_DIR / "CLAPSep_decoder.py"
 
-            return CLAPSep
-        except Exception:
-            pass
-        finally:
-            if added:
-                try:
-                    sys.path.remove(str(ckpt_pkg))
-                except ValueError:
-                    pass
-            # Restore the evicted module so other code is unaffected
-            if shadow is not None:
-                sys.modules.setdefault("model", shadow)
+    if ckpt_clapsep_py.exists() and ckpt_decoder_py.exists():
+        try:
+            # Use unique module names to avoid conflicts
+            decoder_name = f"_clapsep_ckpt_decoder_{id(ckpt_decoder_py)}"
+            clapsep_name = f"_clapsep_ckpt_main_{id(ckpt_clapsep_py)}"
+
+            # Load decoder module
+            decoder_spec = importlib.util.spec_from_file_location(
+                decoder_name, str(ckpt_decoder_py)
+            )
+            if decoder_spec and decoder_spec.loader:
+                decoder_module = importlib.util.module_from_spec(decoder_spec)
+                sys.modules[decoder_name] = decoder_module
+                decoder_spec.loader.exec_module(decoder_module)
+
+            # Load CLAPSep module
+            clapsep_spec = importlib.util.spec_from_file_location(
+                clapsep_name, str(ckpt_clapsep_py)
+            )
+            if clapsep_spec and clapsep_spec.loader:
+                clapsep_module = importlib.util.module_from_spec(clapsep_spec)
+                sys.modules[clapsep_name] = clapsep_module
+                clapsep_spec.loader.exec_module(clapsep_module)
+
+                # Extract and return the CLAPSep class
+                if hasattr(clapsep_module, "CLAPSep"):
+                    return clapsep_module.CLAPSep
+        except Exception as e:
+            # If checkpoint loading fails, fall through to base model
+            import traceback
+            import warnings
+
+            print(f"[CLAPSep] Failed to load from checkpoint: {e}", file=sys.stderr)
+            traceback.print_exc()
+            warnings.warn(
+                f"Failed to load CLAPSep from checkpoint: {e}. "
+                f"Falling back to base model."
+            )
+
+    # --- Attempt 2: Load from base/model/CLAPSep.py ------------------------
     try:
         from models.clapsep.base.model.CLAPSep import CLAPSep  # type: ignore
 
         return CLAPSep
-    except Exception:
-        pass
+    except ImportError as e:
+        print(f"[CLAPSep] Failed to load from base model: {e}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc()
+
+    # --- All attempts failed -----------------------------------------------
     raise ImportError(
         "Cannot import CLAPSep from checkpoint/CLAPSep/model/ or base/model/. "
-        "Ensure laion-clap, loralib, einops, torchlibrosa are installed."
+        "Ensure the checkpoint files exist and dependencies (laion-clap, "
+        "loralib, einops, torchlibrosa) are installed."
     )
 
 
