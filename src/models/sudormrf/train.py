@@ -953,10 +953,13 @@ def create_model(config: Config):
         print(
             f"Wrapping model for Single COI separation ({config.model.num_head_conv_blocks} head blocks)"
         )
+        # Use expanded_channels from config if available, otherwise default to None (uses model.in_channels)
+        expanded_channels = getattr(config.model, "expanded_channels", None)
         model = wrap_model_for_coi(
             base_model,
             num_conv_blocks=config.model.num_head_conv_blocks,
             upsampling_depth=config.model.upsampling_depth,
+            expanded_channels=expanded_channels,
         )
 
     if not hasattr(model, "n_least_samples_req"):

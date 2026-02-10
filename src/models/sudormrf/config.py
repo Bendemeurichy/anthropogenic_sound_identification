@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import yaml
 
@@ -36,6 +36,8 @@ class ModelConfig:
     num_head_conv_blocks: int = 0
     # If 0 (default): simple PReLU + Conv1d head (lightweight, baseline)
     # If > 0: enhanced head with N UConvBlocks per branch for class-specific features
+    # Expanded dimension for UConvBlock internal processing (None = use in_channels)
+    expanded_channels: Optional[int] = None
 
 
 @dataclass
