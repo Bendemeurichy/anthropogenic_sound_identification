@@ -13,11 +13,16 @@ data:
 # Model settings - using proven SuDoRM-RF defaults
 model:
   type: "improved" # 'improved' or 'groupcomm'
-  out_channels: 128
+  # number of channels output by the model, bottleneck
+  out_channels: 256
+  # number of channels in the internal representations
   in_channels: 512
   num_blocks: 16
   upsampling_depth: 5
+  # Number of basis functions for encoder/decoder - 512 is a common choice for good performance on speech separation, 2048 is more computationally intensive but can capture finer details,
+  # 4096 is often overkill for COI separation and may lead to overfitting on small datasets
   enc_num_basis: 512
+  # Scale with segment length and sample rate to ensure sufficient temporal context for COI separation
   enc_kernel_size: 41
   # COI separation head U-ConvBlocks
   # 0 = simple architecture (PReLU + Conv1d, lightweight baseline)

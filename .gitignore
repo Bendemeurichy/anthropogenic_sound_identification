@@ -212,6 +212,7 @@ src/tags/graphs/
 src/tags/metadata/
 /data/
 src/validation_functions/plane_clasifier/results
+src/validation_functions/validation_results/
 src/models/sudormrf/checkpoints
 *.wav
 *.jpg
