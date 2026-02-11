@@ -19,13 +19,13 @@ model:
   in_channels: 512
   num_blocks: 16
   upsampling_depth: 5
-  # Number of basis functions for encoder/decoder - 512 is a common choice for good performance on speech separation, 2048 is more computationally intensive but can capture finer details,
-  # 4096 is often overkill for COI separation and may lead to overfitting on small datasets
+  # Number of basis functions for encoder/decoder - 512 on speech separation, 2048 is more computation finer details,
+  # 4096 overkill for COI separation and overfitting on small datasets
   enc_num_basis: 512
   # Scale with segment length and sample rate to ensure sufficient temporal context for COI separation
   enc_kernel_size: 41
   # COI separation head U-ConvBlocks
-  # 0 = simple architecture (PReLU + Conv1d, lightweight baseline)
+  # 0 = simple architecture (PReLU + Conv1d)
   # >0 = enhanced architecture with N UConvBlocks per branch for class-specific feature extraction
   num_head_conv_blocks: 2
   # Expanded dimension for UConvBlock internal processing

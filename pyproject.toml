@@ -40,6 +40,7 @@ dependencies = [
     "torchcodec (>=0.9.1,<0.10.0)",
     "tensorflow (>=2.20.0,<3.0.0)",
     "tensorflow-hub (>=0.16.1,<0.17.0)",
+    "tokenizers (>=0.22.2,<0.23.0)",
 ]
 [tool.poetry]
 package-mode=false

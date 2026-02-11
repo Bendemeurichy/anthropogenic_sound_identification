@@ -219,18 +219,29 @@ class CLAPSepModelWrapper(nn.Module):
 
     def _separate_single(self, wav: torch.Tensor) -> torch.Tensor:
         orig_len = wav.shape[0]
-        mx = torch.max(torch.abs(wav))
-        if mx > 1:
-            wav = wav * (0.9 / mx)
+        # Pad so we can split into fixed-size chunks
         rem = orig_len % self.chunk_samples
         if rem:
             wav = torch.nn.functional.pad(wav, (0, self.chunk_samples - rem))
         parts = []
+        # Process chunk-by-chunk and undo any chunk-level scaling
         for chunk in wav.split(self.chunk_samples):
-            sep = self.clapsep.inference_from_data(  # type: ignore[attr-defined]
-                chunk.unsqueeze(0), self.embed_pos, self.embed_neg
-            )
-            parts.append(sep.squeeze(0))
+            # Compute chunk peak and scale if needed (match previous behaviour)
+            chunk_mx = torch.max(torch.abs(chunk))
+            if chunk_mx > 1:
+                chunk_scale = 0.9 / chunk_mx
+                chunk_in = chunk * chunk_scale
+            else:
+                # keep as tensor so arithmetic stays on the same device/dtype
+                chunk_scale = chunk.new_tensor(1.0)
+                chunk_in = chunk
+            # Run the model on the (possibly) scaled chunk
+            sep = self.clapsep.inference_from_data(
+                chunk_in.unsqueeze(0), self.embed_pos, self.embed_neg
+            ).squeeze(0)
+            # Undo scaling on the model output so it matches the original mix scale
+            sep = sep / chunk_scale
+            parts.append(sep)
         return torch.cat(parts)[:orig_len]
 
 
