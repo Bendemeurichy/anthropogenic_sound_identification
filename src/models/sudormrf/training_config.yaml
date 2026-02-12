@@ -18,7 +18,7 @@ model:
   # number of channels in the internal representations
   in_channels: 512
   num_blocks: 24
-  upsampling_depth: 7
+  upsampling_depth: 6
   # Number of basis functions for encoder/decoder - 512 on speech separation, 2048 is more computation finer details,
   # 4096 overkill for COI separation and overfitting on small datasets
   enc_num_basis: 512
@@ -34,18 +34,18 @@ model:
 
 # Training settings - optimized for COI separation
 training:
-  batch_size: 4
+  batch_size: 8
   grad_accum_steps: 2
   use_amp: true
   num_epochs: 300
   lr: 3e-4
-  weight_decay: 1e-3
+  weight_decay: 1e-4
   num_workers: 0
   pin_memory: true
   persistent_workers: false
   prefetch_factor: 1
   clip_grad_norm: 5.0
-  patience: 35
+  patience: 30
   checkpoint_dir: "checkpoints"
   device: "cuda:0"
   compile_model: false
