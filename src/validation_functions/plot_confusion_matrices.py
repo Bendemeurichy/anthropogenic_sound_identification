@@ -482,11 +482,12 @@ def extract_model_info(results: dict) -> dict:
 def main():
     # Path to results file
     results_dir = Path(__file__).parent / "validation_results"
-    results_file = results_dir / "results_20260210_234618.json"
+    results_file = results_dir / "results_20260211_232530.json"
+
 
     #  SudoRMRF
     # "results_20260211_003754.json"
-    #
+    #"results_20260210_234618.json"
     # Clapsep
     # "results_20260211_111014.json"
 

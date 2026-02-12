@@ -22,8 +22,8 @@ import torchaudio
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.models.sudormrf.config import Config
-from src.models.sudormrf.train import create_model
+from config import Config
+from train import create_model
 
 # Check for environment variable to use old separation head
 USE_OLD_SEPARATION_HEAD = os.environ.get("USE_OLD_SEPARATION_HEAD", "0") == "1"
@@ -35,13 +35,13 @@ if USE_OLD_SEPARATION_HEAD:
     _BACKGROUND_HEAD_INDEX = 1
     _NUM_SOURCES = 2
 else:
-    from src.models.sudormrf.seperation_head import (
+    from seperation_head import (
         BACKGROUND_HEAD_INDEX as _BACKGROUND_HEAD_INDEX,
     )
-    from src.models.sudormrf.seperation_head import (
+    from seperation_head import (
         COI_HEAD_INDEX as _COI_HEAD_INDEX,
     )
-    from src.models.sudormrf.seperation_head import (
+    from seperation_head import (
         NUM_SOURCES as _NUM_SOURCES,
     )
 
@@ -49,6 +49,39 @@ else:
 COI_HEAD_INDEX: int = _COI_HEAD_INDEX
 BACKGROUND_HEAD_INDEX: int = _BACKGROUND_HEAD_INDEX
 NUM_SOURCES: int = _NUM_SOURCES
+
+
+def robust_load_audio(path: Union[str, Path]) -> Tuple[torch.Tensor, int]:
+    """Load audio robustly: try torchaudio first, then switch backend to
+    `soundfile`, and finally fall back to the `soundfile` Python API.
+
+    Returns (waveform, sample_rate) where waveform has shape (channels, frames).
+    """
+    p = str(path)
+    # 1) Preferred: torchaudio.load (may use torchcodec internally)
+    try:
+        return torchaudio.load(p)
+    except Exception as e:  # pragma: no cover - runtime environment dependent
+        # Attempt to switch torchaudio backend to soundfile and retry
+        try:
+            torchaudio.set_audio_backend("soundfile")
+            return torchaudio.load(p)
+        except Exception:
+            # Final fallback: use pysoundfile directly (pure-python)
+            try:
+                import soundfile as sf
+            except Exception:
+                raise RuntimeError(
+                    "Failed to load audio with torchaudio and 'soundfile' is not installed. "
+                    "Install pysoundfile (`pip install soundfile`) or ensure FFmpeg/torchcodec compatibility."
+                ) from e
+
+            data, sr = sf.read(p, always_2d=True)
+            import numpy as _np
+
+            # data: (frames, channels) -> waveform: (channels, frames)
+            wav = torch.from_numpy(_np.asarray(data).T).to(torch.float32)
+            return wav, int(sr)
 
 
 class SeparationInference:
@@ -286,7 +319,7 @@ class SeparationInference:
                      sources[COI_HEAD_INDEX, :] = Airplane (COI) audio
                      sources[BACKGROUND_HEAD_INDEX, :] = Background audio
         """
-        waveform, sr = torchaudio.load(audio_path)
+        waveform, sr = robust_load_audio(audio_path)
         if sr != self.sample_rate:
             waveform = torchaudio.transforms.Resample(sr, self.sample_rate)(waveform)
         if waveform.shape[0] > 1:
@@ -426,8 +459,26 @@ class SeparationInference:
         """Save waveform to file."""
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
-        torchaudio.save(str(path), waveform, self.sample_rate)
-        print(f"Saved: {path}")
+
+        # First try torchaudio.save (may use torchcodec). If torchcodec
+        # fails to load (FFmpeg mismatch), fall back to pysoundfile.
+        try:
+            torchaudio.save(str(path), waveform, self.sample_rate)
+            print(f"Saved: {path}")
+            return
+        except Exception:
+            try:
+                import soundfile as sf
+            except Exception:
+                raise RuntimeError(
+                    "Failed to save audio via torchaudio and 'soundfile' is not installed. "
+                    "Install pysoundfile (`pip install soundfile`) or fix torchcodec/FFmpeg."
+                )
+
+            # waveform: (channels, frames) -> data: (frames, channels)
+            data = waveform.detach().cpu().numpy().T
+            sf.write(str(path), data, self.sample_rate)
+            print(f"Saved: {path} (via soundfile)")
 
 
 def main():
