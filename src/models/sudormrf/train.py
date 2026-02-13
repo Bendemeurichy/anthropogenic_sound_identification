@@ -52,14 +52,14 @@ else:
 COI_HEAD_INDEX: int = _COI_HEAD_INDEX
 BACKGROUND_HEAD_INDEX: int = _BACKGROUND_HEAD_INDEX
 
-from .config import Config
-from .multi_class_seperation import wrap_model_for_multiclass
-
 from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
 )
 from label_loading.sampler import get_coi, sample_non_coi
+
+from .config import Config
+from .multi_class_seperation import wrap_model_for_multiclass
 
 LOSS_EPS = 1e-8
 ENERGY_EPS = 1e-8
@@ -1159,6 +1159,9 @@ def main():
         "Fixed-wing aircraft, airplane",
         "Aircraft engine",
         "Fixed-wing_aircraft_and_airplane",
+        "Helicopter",
+        "helicopter",
+        "Propeller airscrew",
     ]
     print(f"\nTarget classes: {target_classes}")
 

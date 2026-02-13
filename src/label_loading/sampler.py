@@ -117,6 +117,9 @@ def test_sampler():
         "Fixed-wing aircraft, airplane",
         "Aircraft engine",
         "Fixed-wing_aircraft_and_airplane",
+        "Helicopter",
+        "helicopter",
+        "Propeller airscrew",
     ]
 
     print(f"\nTarget classes: {target_classes}")
@@ -127,7 +130,7 @@ def test_sampler():
     sampled_df = sample_non_coi(
         classification_metadata,
         coi_df,
-        coi_ratio=0.25,  # Aim for 50% plane sounds
+        coi_ratio=0.25,  # Aim for 25% plane sounds
     )
 
     # 4. Create binary labels: 1 for plane, 0 for non-plane
