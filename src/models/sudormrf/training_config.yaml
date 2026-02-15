@@ -23,7 +23,7 @@ model:
   # 4096 overkill for COI separation and overfitting on small datasets
   enc_num_basis: 2048
   # Scale with segment length and sample rate to ensure sufficient temporal context for COI separation
-  enc_kernel_size: 82
+  enc_kernel_size: 84
   # COI separation head U-ConvBlocks
   # 0 = simple architecture (PReLU + Conv1d)
   # >0 = enhanced architecture with N UConvBlocks per branch for class-specific feature extraction
