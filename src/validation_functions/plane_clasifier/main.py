@@ -12,7 +12,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from config import TrainingConfig
 from train import train_plane_classifier
 
-from common.audioset_downloader import download_missing_files_from_df
+# from common.audioset_downloader import download_missing_files_from_df
 from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
@@ -143,9 +143,9 @@ def main(optimize_hyperparams=False, n_trials=20):
                     print(
                         f"\nDownloading {len(train_and_val)} train files to: {output_dir}"
                     )
-                    download_missing_files_from_df(
-                        train_and_val, output_dir, "train", cookies
-                    )
+                    # download_missing_files_from_df(
+                    #     train_and_val, output_dir, "train", cookies
+                    # )
 
                 # Download eval/test files
                 if len(test_missing) > 0:
@@ -156,9 +156,9 @@ def main(optimize_hyperparams=False, n_trials=20):
                     print(
                         f"\nDownloading {len(test_missing)} eval files to: {output_dir}"
                     )
-                    download_missing_files_from_df(
-                        test_missing, output_dir, "eval", cookies
-                    )
+                    # download_missing_files_from_df(
+                    #     test_missing, output_dir, "eval", cookies
+                    # )
 
                 # Recheck missing files
                 sampled_df["file_exists"] = sampled_df["filename"].apply(
