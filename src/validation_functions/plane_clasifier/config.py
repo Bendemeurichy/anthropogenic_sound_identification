@@ -1,7 +1,7 @@
 """Configuration settings for training"""
 
 from dataclasses import dataclass
-from typing import Optional, List, Dict
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -14,7 +14,7 @@ class TrainingConfig:
     end_time_column: str = "end_time"
     label_column: str = "label"
     split_column: str = "split"
-    batch_size: int = 32
+    batch_size: int = 64
     sample_rate: int = 16000  # YAMNet requirement
     audio_duration: float = 5.0  # Duration in seconds for each audio clip
     split_long: bool = True  # Split long annotations into multiple clips
@@ -24,13 +24,13 @@ class TrainingConfig:
 
     # Training parameters - Phase 1 (frozen backbone)
     phase1_epochs: int = 30
-    phase1_lr: float = 1e-3
+    phase1_lr: float = 3.7e-3
     phase1_patience: int = 10
     phase1_reduce_lr_patience: int = 5
 
     # Training parameters - Phase 2 (fine-tuning)
     phase2_epochs: int = 20
-    phase2_lr: float = 1e-5
+    phase2_lr: float = 3.6e-6
     phase2_patience: int = 8
     phase2_reduce_lr_patience: int = 4
 
@@ -41,10 +41,10 @@ class TrainingConfig:
     clipnorm: float = 1.0
 
     # Regularization
-    label_smoothing: float = 0.1
+    label_smoothing: float = 0.056975723209947024
     l2_reg: float = 1e-4
-    dropout_rate_1: float = 0.3
-    dropout_rate_2: float = 0.2
+    dropout_rate_1: float = 0.2380903303269794
+    dropout_rate_2: float = 0.2768290173703309
     dropout_rate_3: float = 0.1
 
     # Augmentation
@@ -73,7 +73,7 @@ class TrainingConfig:
     random_seed: int = 42
 
     # Class weight mode: 'balanced', 'sqrt_balanced', 'manual', or None
-    class_weight_mode: Optional[str] = "sqrt_balanced"
+    class_weight_mode: Optional[str] = None
     # Manual class weights (used only if class_weight_mode='manual')
     manual_class_weights: Optional[Dict[int, float]] = None
 

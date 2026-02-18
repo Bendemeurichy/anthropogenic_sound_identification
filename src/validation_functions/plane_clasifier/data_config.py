@@ -14,17 +14,15 @@ class DataLoaderConfig:
     split_column: str = "split"
 
     # Audio processing
-    sample_rate: int = 16000
-    audio_duration: float = 5.0
+    sample_rate: int = 32000
+    audio_duration: float = 4.0
 
     # How to handle long annotated segments
     split_long: bool = True  # if True, split long annotations into multiple clips
-    min_clip_length: float = (
-        0.5  # seconds: if a remainder is shorter than this, still include (it will be padded)
-    )
+    min_clip_length: float = 0.5  # seconds: if a remainder is shorter than this, still include (it will be padded)
 
     # Batching / performance
-    batch_size: int = 32
+    batch_size: int = 64
     shuffle_buffer: int = 10000
 
     # Augmentation
