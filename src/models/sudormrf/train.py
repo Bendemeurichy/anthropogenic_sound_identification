@@ -1153,15 +1153,25 @@ def main():
     print(f"Using {len(separation_metadata)} for separation training (70%)")
 
     # Target classes
+    # target_classes = [
+    #     "airplane",
+    #     "Aircraft",
+    #     "Fixed-wing aircraft, airplane",
+    #     "Aircraft engine",
+    #     "Fixed-wing_aircraft_and_airplane",
+    #     "Helicopter",
+    #     "helicopter",
+    #     "Propeller airscrew",
+    # ]
     target_classes = [
-        "airplane",
-        "Aircraft",
-        "Fixed-wing aircraft, airplane",
-        "Aircraft engine",
-        "Fixed-wing_aircraft_and_airplane",
-        "Helicopter",
-        "helicopter",
-        "Propeller airscrew",
+        "Rail transport",
+        "Train",
+        "Subway, metro, underground",
+        "Railroad car, train wagon",
+        "Train wheels squealing",
+        "trian",
+        "Rail_transport",
+        "Subway_and_metro_and_underground",
     ]
     print(f"\nTarget classes: {target_classes}")
 

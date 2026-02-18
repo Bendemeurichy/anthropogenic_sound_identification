@@ -111,15 +111,25 @@ def test_sampler():
     # You'll need to check what plane-related labels exist in your datasets
     # Common airplane labels in AudioSet: "Aircraft", "Airplane", "Fixed-wing aircraft"
     # In ESC-50: "airplane"
+    # target_classes = [
+    #     "airplane",
+    #     "Aircraft",
+    #     "Fixed-wing aircraft, airplane",
+    #     "Aircraft engine",
+    #     "Fixed-wing_aircraft_and_airplane",
+    #     "Helicopter",
+    #     "helicopter",
+    #     "Propeller airscrew",
+    # ]
     target_classes = [
-        "airplane",
-        "Aircraft",
-        "Fixed-wing aircraft, airplane",
-        "Aircraft engine",
-        "Fixed-wing_aircraft_and_airplane",
-        "Helicopter",
-        "helicopter",
-        "Propeller airscrew",
+        "Rail transport",
+        "Train",
+        "Subway, metro, underground",
+        "Railroad car, train wagon",
+        "Train wheels squealing",
+        "trian",
+        "Rail_transport",
+        "Subway_and_metro_and_underground",
     ]
 
     print(f"\nTarget classes: {target_classes}")

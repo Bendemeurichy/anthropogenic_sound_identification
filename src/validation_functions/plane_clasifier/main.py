@@ -1,21 +1,23 @@
 """Main entry point for training"""
 
-from pathlib import Path
-import sys
-import pandas as pd
 import argparse
+import sys
+from pathlib import Path
+
+import pandas as pd
 
 # Add parent directories to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from train import train_plane_classifier
 from config import TrainingConfig
-from label_loading.sampler import get_coi, sample_non_coi
+from train import train_plane_classifier
+
+from common.audioset_downloader import download_missing_files_from_df
 from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
 )
-from common.audioset_downloader import download_missing_files_from_df
+from label_loading.sampler import get_coi, sample_non_coi
 
 
 def main(optimize_hyperparams=False, n_trials=20):
@@ -46,12 +48,25 @@ def main(optimize_hyperparams=False, n_trials=20):
     # You'll need to check what plane-related labels exist in your datasets
     # Common airplane labels in AudioSet: "Aircraft", "Airplane", "Fixed-wing aircraft"
     # In ESC-50: "airplane"
+    # target_classes = [
+    #     "airplane",
+    #     "Aircraft",
+    #     "Fixed-wing aircraft, airplane",
+    #     "Aircraft engine",
+    #     "Fixed-wing_aircraft_and_airplane",
+    #     "Helicopter",
+    #     "helicopter",
+    #     "Propeller airscrew",
+    # ]
     target_classes = [
-        "airplane",
-        "Aircraft",
-        "Fixed-wing aircraft, airplane",
-        "Aircraft engine",
-        "Fixed-wing_aircraft_and_airplane",
+        "Rail transport",
+        "Train",
+        "Subway, metro, underground",
+        "Railroad car, train wagon",
+        "Train wheels squealing",
+        "trian",
+        "Rail_transport",
+        "Subway_and_metro_and_underground",
     ]
 
     print(f"\nTarget classes: {target_classes}")
@@ -234,8 +249,9 @@ def main(optimize_hyperparams=False, n_trials=20):
 
     # 8. Optional: Run hyperparameter optimization
     if optimize_hyperparams:
-        from optimize_hyperparams import optimize as run_optuna, get_best_config
         import optuna
+        from optimize_hyperparams import get_best_config
+        from optimize_hyperparams import optimize as run_optuna
 
         study = run_optuna(train_df, val_df, test_df, n_trials=n_trials)
         config = get_best_config(study)
