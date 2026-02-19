@@ -29,37 +29,37 @@ from tqdm import tqdm
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import GroupCommSudoRmRf
-from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
+from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import GroupCommSudoRmRf
+from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 
 # Check for environment variable to use old separation head
 USE_OLD_SEPARATION_HEAD = os.environ.get("USE_OLD_SEPARATION_HEAD", "0") == "1"
 if USE_OLD_SEPARATION_HEAD:
-    from .seperation_head_old import wrap_model_for_coi
+    from seperation_head_old import wrap_model_for_coi
 
     _COI_HEAD_INDEX, _BACKGROUND_HEAD_INDEX = 0, 1
 else:
-    from .seperation_head import (
+    from seperation_head import (
         BACKGROUND_HEAD_INDEX as _BACKGROUND_HEAD_INDEX,
     )
-    from .seperation_head import (
+    from seperation_head import (
         COI_HEAD_INDEX as _COI_HEAD_INDEX,
     )
-    from .seperation_head import (
+    from seperation_head import (
         wrap_model_for_coi,
     )
 
 COI_HEAD_INDEX: int = _COI_HEAD_INDEX
 BACKGROUND_HEAD_INDEX: int = _BACKGROUND_HEAD_INDEX
 
+from config import Config
+from multi_class_seperation import wrap_model_for_multiclass
+
 from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
 )
 from label_loading.sampler import get_coi, sample_non_coi
-
-from .config import Config
-from .multi_class_seperation import wrap_model_for_multiclass
 
 LOSS_EPS = 1e-8
 ENERGY_EPS = 1e-8
@@ -476,13 +476,17 @@ class AudioDataset(Dataset):
                 else:
                     sources = [coi_audio]
             else:
-                # Background-only sample
+                # Background-only sample - create mixture of multiple background sources
                 idxs = self._rng.choice(
-                    len(self.non_coi_files), size=max(1, self.background_mix_n)
+                    len(self.non_coi_files),
+                    size=max(1, self.background_mix_n),
+                    replace=True,
                 )
-                background = torch.stack(
-                    [self._load_audio(self.non_coi_files[int(i)]) for i in idxs]
-                ).sum(dim=0)
+                background_sources = [
+                    self._load_audio(self.non_coi_files[int(i)]) for i in idxs
+                ]
+                background = torch.stack(background_sources).sum(dim=0)
+                # COI sources are all zeros (no aircraft present)
                 sources = [
                     torch.zeros_like(background) for _ in range(self.n_coi_classes)
                 ]
@@ -501,7 +505,9 @@ class AudioDataset(Dataset):
             else:
                 # Background-only validation sample
                 idxs = self._rng.choice(
-                    len(self.non_coi_files), size=max(1, self.background_mix_n)
+                    len(self.non_coi_files),
+                    size=max(1, self.background_mix_n),
+                    replace=True,
                 )
                 background = torch.stack(
                     [self._load_audio(self.non_coi_files[int(i)]) for i in idxs]
@@ -670,9 +676,7 @@ def train_epoch(
                     grad_norms.append(float("nan"))
                     continue
 
-            loss = torch.clamp(
-                criterion(outputs.float(), clean_wavs.float()), min=-30.0, max=30.0
-            )
+            loss = criterion(outputs.float(), clean_wavs.float())
 
         del outputs  # Graph retained via loss; free the direct reference
         del mixture, clean_wavs
@@ -825,7 +829,7 @@ def validate_epoch(
     with torch.no_grad():
         for sources in pbar:
             sources = sources.to(device, non_blocking=True)
-            mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=True)
+            mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=False)
             B = sources.shape[0]
             del sources
 
@@ -1081,7 +1085,6 @@ def train(config: Config, timestamp: str | None = None):
 
         if run_validation:
             # Reset val dataset RNG for deterministic background pairing each time
-            val_dataset._rng = np.random.default_rng(42)
             val_loss = validate_epoch(
                 model,
                 val_loader,
@@ -1153,26 +1156,29 @@ def main():
     print(f"Using {len(separation_metadata)} for separation training (70%)")
 
     # Target classes
-    # target_classes = [
-    #     "airplane",
-    #     "Aircraft",
-    #     "Fixed-wing aircraft, airplane",
-    #     "Aircraft engine",
-    #     "Fixed-wing_aircraft_and_airplane",
-    #     "Helicopter",
-    #     "helicopter",
-    #     "Propeller airscrew",
-    # ]
+    # Plane experiment
     target_classes = [
-        "Rail transport",
-        "Train",
-        "Subway, metro, underground",
-        "Railroad car, train wagon",
-        "Train wheels squealing",
-        "trian",
-        "Rail_transport",
-        "Subway_and_metro_and_underground",
+        "airplane",
+        "Aircraft",
+        "Fixed-wing aircraft, airplane",
+        "Aircraft engine",
+        "Fixed-wing_aircraft_and_airplane",
+        "Helicopter",
+        "helicopter",
+        "Propeller airscrew",
     ]
+
+    # Train experiment
+    # target_classes = [
+    #     "Rail transport",
+    #     "Train",
+    #     "Subway, metro, underground",
+    #     "Railroad car, train wagon",
+    #     "Train wheels squealing",
+    #     "trian",
+    #     "Rail_transport",
+    #     "Subway_and_metro_and_underground",
+    # ]
     print(f"\nTarget classes: {target_classes}")
 
     # Sample data

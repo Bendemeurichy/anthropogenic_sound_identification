@@ -242,7 +242,7 @@ class ValidationPipeline:
         sep_checkpoint: str = None,
         cls_weights: str = None,
         use_clapsep: bool = False,
-        clapsep_text_pos: str = "airplane flying over",
+        clapsep_text_pos: str = "train passing",
         clapsep_text_neg: str = "",
     ):
         """Load separation and classification models."""
@@ -855,13 +855,17 @@ def main():
     )
     CLS_WEIGHTS = (
         PROJECT_ROOT
-        / "src/validation_functions/plane_clasifier/results/checkpoints/final_model.weights.h5"
+        / "src/validation_functions/plane_clasifier/checkpoints/final_model.weights.h5"
     )
+    # Trains
     DATA_CSV = (
         PROJECT_ROOT
-        / "src/models/sudormrf/checkpoints/20260129_113352/separation_dataset.csv"
+        / "src/models/sudormrf/checkpoints/20260219_124144/separation_dataset.csv"
     )
-    BASE_PATH = "/path/to/your/datasets"  # For converting Windows paths in CSV
+
+    # planes/ "src/models/sudormrf/checkpoints/20260129_113352/separation_dataset.csv"
+
+    BASE_PATH = PROJECT_ROOT.parent / "datasets"  # For converting Windows paths in CSV
     # ==============================================
 
     pipeline = ValidationPipeline(base_path=BASE_PATH)
