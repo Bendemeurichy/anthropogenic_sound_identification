@@ -500,17 +500,57 @@ class ValidationPipeline:
         return si_snr, sdr, si_sdr
 
     def validate_clean(
-        self, df_coi: pd.DataFrame, df_bg: pd.DataFrame, use_separation: bool
+        self,
+        df_coi: pd.DataFrame,
+        df_bg: pd.DataFrame,
+        use_separation: bool,
+        save_examples_dir: str = None,
+        save_n_examples: int = 1,
     ) -> ClassificationMetrics:
-        """Validate on clean (unmixed) audio - both COI and background."""
+        """Validate on clean (unmixed) audio - both COI and background.
+
+        If `save_examples_dir` is provided, pick up to `save_n_examples` random COI
+        samples and save:
+          - the original clean COI input(s)
+          - the separated outputs (either single COI head or all sources)
+        This helps inspect a small number of separation examples for the clean condition.
+        """
         y_true, y_pred, y_scores = [], [], []
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
         desc = "Clean (sep+cls)" if use_separation else "Clean (cls only)"
 
+        # Prepare optional example saving: choose up to save_n_examples distinct indices
+        save_dir = Path(save_examples_dir) if save_examples_dir else None
+        sample_choices = []
+        if save_dir is not None and len(df_coi) > 0:
+            save_dir.mkdir(parents=True, exist_ok=True)
+            n = min(save_n_examples, len(df_coi))
+            sample_choices = list(
+                np.random.choice(len(df_coi), size=n, replace=False).tolist()
+            )
+
         # Process COI samples (label=1)
-        for row in tqdm(df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI"):
+        for idx, row in enumerate(
+            tqdm(df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI")
+        ):
             try:
                 waveform = self._load_audio(row.filename)
+                if save_dir is not None and idx in sample_choices:
+                    # save original clean COI (with suffix indicating selection index)
+                    try:
+                        k = list(sample_choices).index(idx)
+                        torchaudio.save(
+                            str(save_dir / f"clean_coi_{k}.wav"),
+                            waveform.unsqueeze(0).cpu(),
+                            self.sample_rate,
+                        )
+                    except Exception:
+                        # don't fail validation on save errors
+                        print(
+                            f"Warning: failed to save clean_coi for {row.filename}",
+                            file=sys.stderr,
+                        )
+
                 if use_separation:
                     separated = self._separate(waveform)
                     pred, conf = self._classify_separated(separated)
@@ -526,6 +566,36 @@ class ValidationPipeline:
                     si_snr_scores.append(si_snr)
                     sdr_scores.append(sdr)
                     si_sdr_scores.append(si_sdr)
+
+                    # Save separated outputs for the chosen sample(s)
+                    if save_dir is not None and idx in sample_choices:
+                        try:
+                            k = list(sample_choices).index(idx)
+                            if separated.dim() == 1:
+                                torchaudio.save(
+                                    str(save_dir / f"separated_coi_est_{k}.wav"),
+                                    separated.unsqueeze(0).cpu(),
+                                    self.sample_rate,
+                                )
+                            else:
+                                # save all sources and the COI head separately with index suffixes
+                                for s in range(separated.shape[0]):
+                                    torchaudio.save(
+                                        str(save_dir / f"separated_src{s}_{k}.wav"),
+                                        separated[s].unsqueeze(0).cpu(),
+                                        self.sample_rate,
+                                    )
+                                coi_head = separated[self._get_coi_head_index()]
+                                torchaudio.save(
+                                    str(save_dir / f"separated_coi_head_{k}.wav"),
+                                    coi_head.unsqueeze(0).cpu(),
+                                    self.sample_rate,
+                                )
+                        except Exception:
+                            print(
+                                f"Warning: failed to save separated outputs for {row.filename}",
+                                file=sys.stderr,
+                            )
                 else:
                     pred, conf = self._classify(waveform)
                 y_true.append(1)
@@ -568,26 +638,72 @@ class ValidationPipeline:
         df_bg: pd.DataFrame,
         snr_range: Tuple[float, float],
         use_separation: bool,
+        save_examples_dir: str = None,
+        save_n_examples: int = 1,
     ) -> ClassificationMetrics:
-        """Validate on mixtures at random SNR (COI+BG) and clean background (BG only)."""
+        """Validate on mixtures at random SNR (COI+BG) and clean background (BG only).
+
+        If `save_examples_dir` is provided, pick up to `save_n_examples` random COI
+        mixtures and save:
+          - the original clean COI and BG inputs used to create those mixtures
+          - the created mixture file(s)
+          - the separated outputs (either single COI head or all sources)
+        """
         y_true, y_pred, y_scores = [], [], []
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
         actual_snrs: List[float] = []
         desc = "Mixtures (sep+cls)" if use_separation else "Mixtures (cls only)"
         bg_files = df_bg["filename"].tolist()
 
+        # Prepare optional example saving: choose up to save_n_examples distinct indices
+        save_dir = Path(save_examples_dir) if save_examples_dir else None
+        sample_choices = []
+        if save_dir is not None and len(df_coi) > 0:
+            save_dir.mkdir(parents=True, exist_ok=True)
+            n = min(save_n_examples, len(df_coi))
+            sample_choices = list(
+                np.random.choice(len(df_coi), size=n, replace=False).tolist()
+            )
+
         # Process COI + background mixtures (label=1)
-        for row in tqdm(
-            df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI+BG"
+        for idx, row in enumerate(
+            tqdm(df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI+BG")
         ):
             try:
                 coi = self._normalize(self._load_audio(row.filename))
-                bg = self._normalize(
-                    self._load_audio(bg_files[np.random.randint(len(bg_files))])
-                )
+                # pick a random background file for this mixture
+                bg_idx = np.random.randint(len(bg_files))
+                bg_file = bg_files[bg_idx]
+                bg = self._normalize(self._load_audio(bg_file))
                 snr = np.random.uniform(*snr_range)
                 mixture, actual_snr = self._create_mixture(coi, bg, snr)
                 actual_snrs.append(actual_snr)
+
+                # Save chosen example inputs/mixture (for any selected indices)
+                if save_dir is not None and idx in sample_choices:
+                    try:
+                        k = list(sample_choices).index(idx)
+                        torchaudio.save(
+                            str(save_dir / f"mixture_coi_clean_{k}.wav"),
+                            coi.unsqueeze(0).cpu(),
+                            self.sample_rate,
+                        )
+                        torchaudio.save(
+                            str(save_dir / f"mixture_bg_clean_{k}.wav"),
+                            bg.unsqueeze(0).cpu(),
+                            self.sample_rate,
+                        )
+                        torchaudio.save(
+                            str(save_dir / f"mixture_created_{k}.wav"),
+                            mixture.unsqueeze(0).cpu(),
+                            self.sample_rate,
+                        )
+                    except Exception:
+                        print(
+                            f"Warning: failed to save mixture example for {row.filename}",
+                            file=sys.stderr,
+                        )
+
                 if use_separation:
                     separated = self._separate(mixture)
                     pred, conf = self._classify_separated(separated)
@@ -603,6 +719,42 @@ class ValidationPipeline:
                     si_snr_scores.append(si_snr_val)
                     sdr_scores.append(sdr_val)
                     si_sdr_scores.append(si_sdr_val)
+
+                    # Save separated outputs for the chosen mixture sample(s)
+                    if save_dir is not None and idx in sample_choices:
+                        try:
+                            k = list(sample_choices).index(idx)
+                            if separated.dim() == 1:
+                                torchaudio.save(
+                                    str(
+                                        save_dir / f"mixture_separated_coi_est_{k}.wav"
+                                    ),
+                                    separated.unsqueeze(0).cpu(),
+                                    self.sample_rate,
+                                )
+                            else:
+                                for s in range(separated.shape[0]):
+                                    torchaudio.save(
+                                        str(
+                                            save_dir
+                                            / f"mixture_separated_src{s}_{k}.wav"
+                                        ),
+                                        separated[s].unsqueeze(0).cpu(),
+                                        self.sample_rate,
+                                    )
+                                coi_head = separated[self._get_coi_head_index()]
+                                torchaudio.save(
+                                    str(
+                                        save_dir / f"mixture_separated_coi_head_{k}.wav"
+                                    ),
+                                    coi_head.unsqueeze(0).cpu(),
+                                    self.sample_rate,
+                                )
+                        except Exception:
+                            print(
+                                f"Warning: failed to save separated outputs for mixture {row.filename}",
+                                file=sys.stderr,
+                            )
                 else:
                     pred, conf = self._classify(mixture)
                 y_true.append(1)
@@ -647,6 +799,8 @@ class ValidationPipeline:
         data_csv: str = None,
         output_dir: str = None,
         seed: int = 42,
+        save_examples_dir: str = None,
+        save_n_examples: int = 1,
     ) -> Dict[str, ClassificationMetrics]:
         """Run full validation suite.
 
@@ -656,6 +810,13 @@ class ValidationPipeline:
             data_csv: Path to dataset CSV. Falls back to self.DATA_CSV.
             output_dir: Directory to save JSON results.
             seed: Random seed for reproducibility of mixture creation.
+            save_examples_dir: If provided, save example audio for up to `save_n_examples`
+                random separations in the clean separation run and up to `save_n_examples`
+                random mixtures in the mixture separation run. Separate subdirectories will be created:
+                - <save_examples_dir>/clean_sep
+                - <save_examples_dir>/mixture_sep
+            save_n_examples: Number of random examples to save for each of clean and
+                mixture tests (1..N). Defaults to 1.
         """
         # Set seeds for reproducibility
         np.random.seed(seed)
@@ -684,8 +845,15 @@ class ValidationPipeline:
 
         # 2. Clean - separation + classification
         print("\n[2/4] Clean audio - separation + classification")
+        clean_save_dir = (
+            str(Path(save_examples_dir) / "clean_sep") if save_examples_dir else None
+        )
         results["clean_sep_cls"] = self.validate_clean(
-            df_coi, df_bg, use_separation=True
+            df_coi,
+            df_bg,
+            use_separation=True,
+            save_examples_dir=clean_save_dir,
+            save_n_examples=save_n_examples,
         )
         print(results["clean_sep_cls"])
 
@@ -699,8 +867,18 @@ class ValidationPipeline:
 
             # 4. Mixtures - separation + classification
             print(f"\n[4/4] Mixtures ({snr_range}dB) - separation + classification")
+            mix_save_dir = (
+                str(Path(save_examples_dir) / "mixture_sep")
+                if save_examples_dir
+                else None
+            )
             results["mix_sep_cls"] = self.validate_mixtures(
-                df_coi, df_bg, snr_range, use_separation=True
+                df_coi,
+                df_bg,
+                snr_range,
+                use_separation=True,
+                save_examples_dir=mix_save_dir,
+                save_n_examples=save_n_examples,
             )
             print(results["mix_sep_cls"])
 
@@ -877,6 +1055,8 @@ def main():
         snr_range=(-5, 5),
         data_csv=DATA_CSV,
         output_dir="./validation_results",
+        save_examples_dir=f"./validation_examples_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        save_n_examples=2,
     )
 
 
