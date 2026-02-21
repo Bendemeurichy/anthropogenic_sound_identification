@@ -622,11 +622,9 @@ def train_epoch(
     clip_grad_norm: float = 5.0,
     grad_accum_steps: int = 1,
     use_amp: bool = True,
-    warmup_steps: int = 0,
-    global_step: int = 0,
-    base_lr: float = 0.001,
     snr_range: tuple[float, float] = (-5.0, 5.0),
     scaler: torch.amp.GradScaler | None = None,
+    scheduler: optim.lr_scheduler._LRScheduler | None = None,
 ) -> tuple[float, int, list[float]]:
     """Train for one epoch."""
     model.train()
@@ -718,12 +716,6 @@ def train_epoch(
             if grads_ok:
                 optimizer_step += 1
 
-                # Warmup (based on global step to avoid restarting each epoch)
-                current_global = global_step + optimizer_step
-                if warmup_steps > 0 and current_global <= warmup_steps:
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = base_lr * (current_global / warmup_steps)
-
                 total_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), clip_grad_norm
                 )
@@ -734,6 +726,9 @@ def train_epoch(
                     scaler.update()
                 else:
                     optimizer.step()
+
+                if scheduler is not None:
+                    scheduler.step()
             else:
                 grad_norms.append(float("nan"))
                 if use_amp:
@@ -772,7 +767,6 @@ def train_epoch(
 
         if grads_ok:
             optimizer_step += 1
-            current_global = global_step + optimizer_step
 
             total_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), clip_grad_norm
@@ -784,6 +778,9 @@ def train_epoch(
                 scaler.update()
             else:
                 optimizer.step()
+
+            if scheduler is not None:
+                scheduler.step()
         else:
             grad_norms.append(float("nan"))
             if use_amp:
@@ -804,7 +801,7 @@ def train_epoch(
             f"  Gradient norms - avg: {np.mean(valid_norms):.4f}, max: {np.max(valid_norms):.4f}"
         )
 
-    return running_loss / max(n_samples, 1), global_step + optimizer_step, grad_norms
+    return running_loss / max(n_samples, 1), optimizer_step, grad_norms
 
 
 def validate_epoch(
@@ -1059,7 +1056,6 @@ def train(config: Config, timestamp: str | None = None):
     ).startswith("cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
 
-    warmup_steps = int(getattr(config.training, "warmup_steps", 500))
     validate_every_n = int(getattr(config.training, "validate_every_n_epochs", 1))
 
     # Training loop
@@ -1084,11 +1080,9 @@ def train(config: Config, timestamp: str | None = None):
             clip_grad_norm=config.training.clip_grad_norm,
             grad_accum_steps=getattr(config.training, "grad_accum_steps", 1),
             use_amp=getattr(config.training, "use_amp", True),
-            warmup_steps=warmup_steps,
-            global_step=global_step,
-            base_lr=base_lr,
             snr_range=tuple(config.data.snr_range),
             scaler=scaler,
+            schduler=scheduler,
         )
         history["train_loss"].append(train_loss)
         valid_norms = [n for n in epoch_grad_norms if not np.isnan(n)]
@@ -1115,7 +1109,6 @@ def train(config: Config, timestamp: str | None = None):
             )
             history["val_loss"].append(val_loss)
             print(f"Train: {train_loss:.4f}, Val: {val_loss:.4f}")
-            scheduler.step(val_loss)
 
             # Save best model
             if val_loss < best_val_loss:
