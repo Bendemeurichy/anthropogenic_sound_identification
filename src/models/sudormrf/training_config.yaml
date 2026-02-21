@@ -2,9 +2,22 @@ data:
   df_path: "data/aircraft_data.csv"
   sample_rate: 32000
   segment_length: 4.0 # seconds
-  snr_range: [-10, 10] # dB range for mixing
+  snr_range: [-5, 5] # dB range for mixing
   n_coi_classes: 1
-  background_only_prob: 0.2
+  # semantic labels that define the “class of interest” for separation.
+  # this list is read by train.py and saved with the checkpoint so that
+  # downstream inference/validation pipelines can report which categories
+  # were targeted.
+  target_classes:
+    - "airplane"
+    - "Aircraft"
+    - "Fixed-wing aircraft, airplane"
+    - "Aircraft engine"
+    - "Fixed-wing_aircraft_and_airplane"
+    - "Helicopter"
+    - "helicopter"
+    - "Propeller airscrew"
+  background_only_prob: 0.15
   # How many non-COI files to sum for background-only examples
   background_mix_n: 2
   # Augmentation multiplier: each COI sample seen 3x with random augmentations
@@ -18,12 +31,12 @@ model:
   # number of channels in the internal representations
   in_channels: 512
   num_blocks: 16
-  upsampling_depth: 6
+  upsampling_depth: 5
   # Number of basis functions for encoder/decoder - 512 on speech separation, 2048 is more computation finer details,
   # 4096 overkill for COI separation and overfitting on small datasets
-  enc_num_basis: 1024
+  enc_num_basis: 512
   # Scale with segment length and sample rate to ensure sufficient temporal context for COI separation
-  enc_kernel_size: 84
+  enc_kernel_size: 41
   # COI separation head U-ConvBlocks
   # 0 = simple architecture (PReLU + Conv1d)
   # >0 = enhanced architecture with N UConvBlocks per branch for class-specific feature extraction
@@ -34,16 +47,16 @@ model:
 
 # Training settings - optimized for COI separation
 training:
-  batch_size: 4
-  grad_accum_steps: 8
+  batch_size: 8
+  grad_accum_steps: 4
   use_amp: true
   num_epochs: 400
-  lr: 1e-3
-  weight_decay: 1e-3
-  num_workers: 0
+  lr: 3e-4
+  weight_decay: 1e-2
+  num_workers: 2
   pin_memory: true
-  persistent_workers: false
-  prefetch_factor: 1
+  persistent_workers: true
+  prefetch_factor: 2
   clip_grad_norm: 5.0
   patience: 35
   checkpoint_dir: "checkpoints"
@@ -52,6 +65,6 @@ training:
   compile_backend: "eager"
   class_weight: 1.4
   aux_waveform_weight: 0.0
-  warmup_steps: 600
+  warmup_steps: 300
   validate_every_n_epochs: 1
   seed: 42

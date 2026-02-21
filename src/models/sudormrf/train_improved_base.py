@@ -1128,30 +1128,14 @@ def main():
     print(f"Loaded {len(all_metadata)} total samples")
     print(f"Using {len(separation_metadata)} for separation training (70%)")
 
-    # Target classes
-    # Plane experiment
-    target_classes = [
-        "airplane",
-        "Aircraft",
-        "Fixed-wing aircraft, airplane",
-        "Aircraft engine",
-        "Fixed-wing_aircraft_and_airplane",
-        "Helicopter",
-        "helicopter",
-        "Propeller airscrew",
-    ]
-
-    # Train experiment
-    # target_classes = [
-    #     "Rail transport",
-    #     "Train",
-    #     "Subway, metro, underground",
-    #     "Railroad car, train wagon",
-    #     "Train wheels squealing",
-    #     "trian",
-    #     "Rail_transport",
-    #     "Subway_and_metro_and_underground",
-    # ]
+    # Target classes are now provided in the configuration file.  Read the list
+    # from the loaded config object instead of hard‑coding it here.
+    target_classes = getattr(config.data, "target_classes", None)
+    if not target_classes:
+        raise ValueError(
+            "No target_classes specified in config.data – please add a list of "
+            "labels to the YAML configuration"
+        )
     print(f"\nTarget classes: {target_classes}")
 
     # Sample data

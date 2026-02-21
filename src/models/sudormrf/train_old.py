@@ -1599,14 +1599,16 @@ def main():
     print(f"Using {len(separation_metadata)} samples for separation training (70%)")
     print(f"Datasets included: {separation_metadata['dataset'].unique()}")
 
-    # 3. Define target classes (plane-related sounds) - same as plane classifier
-    target_classes = [
-        "airplane",
-        "Aircraft",
-        "Fixed-wing aircraft, airplane",
-        "Aircraft engine",
-        "Fixed-wing_aircraft_and_airplane",
-    ]
+    # 3. Define target classes (plane-related sounds) – pulled from the
+    # configuration file rather than being hard‑coded.  This keeps the list
+    # of semantic labels alongside the rest of the training settings and
+    # ensures it gets saved with the checkpoint.
+    target_classes = getattr(config.data, "target_classes", None)
+    if not target_classes:
+        raise ValueError(
+            "No target_classes specified in config.data – please add a list "
+            "of labels to the YAML configuration"
+        )
 
     print(f"\nTarget classes: {target_classes}")
 

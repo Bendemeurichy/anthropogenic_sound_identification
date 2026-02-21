@@ -99,6 +99,7 @@ class SeparationInference:
         sample_rate: int,
         segment_samples: int,
         device: str,
+        config: Optional["Config"] = None,
     ):
         self.model = model.to(device)
         self.model.eval()
@@ -108,6 +109,10 @@ class SeparationInference:
         self.device = device
         self.sample_rate = sample_rate
         self.segment_samples = segment_samples
+        # keep a reference to the training configuration (if available)
+        # so downstream code (e.g. validation pipelines) can inspect fields
+        # such as the list of target_classes.
+        self.config = config
 
     @classmethod
     def from_checkpoint(
@@ -308,6 +313,7 @@ class SeparationInference:
             sample_rate=sample_rate,
             segment_samples=segment_samples,
             device=device,
+            config=config,
         )
 
     @torch.inference_mode()

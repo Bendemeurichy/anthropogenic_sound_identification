@@ -605,13 +605,16 @@ def prepare_dataset(config: FinetuneConfig, checkpoint_dir: Path) -> str:
     sep_metadata, _ = split_seperation_classification(all_metadata)
     print(f"Loaded {len(all_metadata)} samples, {len(sep_metadata)} for separation")
 
-    target_classes = [
-        "airplane",
-        "Aircraft",
-        "Fixed-wing aircraft, airplane",
-        "Aircraft engine",
-        "Fixed-wing_aircraft_and_airplane",
-    ]
+    # pull the list of semantic labels from the configuration object rather than
+    # keeping it hard‑coded here.  The dataclass default means the attribute
+    # will always exist, but we enforce that it is non‑empty so the user is
+    # reminded to specify something sensible.
+    target_classes = getattr(config.data, "target_classes", None)
+    if not target_classes:
+        raise ValueError(
+            "No target_classes specified in config.data – please add a list of "
+            "labels to the YAML configuration"
+        )
 
     coi_df = get_coi(sep_metadata, target_classes)
     sampled_df = sample_non_coi(sep_metadata, coi_df, coi_ratio=0.25)

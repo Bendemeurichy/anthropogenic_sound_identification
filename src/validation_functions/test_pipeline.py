@@ -223,6 +223,8 @@ class ValidationPipeline:
         )
         self.segment_samples = int(self.sample_rate * self.segment_length)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # will be populated when a separation checkpoint is loaded
+        self.target_classes = None
 
         self.separator = None
         self.classifier = None
@@ -272,6 +274,17 @@ class ValidationPipeline:
             self.separator = SeparationInference.from_checkpoint(
                 sep_path, device=self.device
             )
+
+        # recover and log the target class list if the checkpoint included a
+        # config (it should, since the training routine saves the YAML)
+        if hasattr(self.separator, "config") and self.separator.config:
+            tc = getattr(self.separator.config.data, "target_classes", None)
+            if tc:
+                self.target_classes = tc
+                print(f"Target classes from separation checkpoint: {tc}")
+
+        # (The target_classes list has already been recovered and printed above;
+        # no need to repeat it.)
 
         print(f"Loading classification model from {cls_path}")
         config = TrainingConfig(
@@ -835,6 +848,11 @@ class ValidationPipeline:
         )
         print(f"SNR range: {snr_range} dB")
         print(f"{'=' * 60}\n")
+        # if the pipeline has recovered a list of target classes from the
+        # separation checkpoint, surface it here so the user can verify what
+        # semantic labels the model was trained to treat as COI.
+        if getattr(self, "target_classes", None):
+            print(f"Target classes: {self.target_classes}")
 
         results = {}
 

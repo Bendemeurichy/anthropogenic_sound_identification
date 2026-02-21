@@ -176,7 +176,7 @@ def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
         fig.update_xaxes(title_text="Predicted", row=row, col=col)
         fig.update_yaxes(title_text="Actual", autorange="reversed", row=row, col=col)
 
-    title_text = "Confusion Matrices - Classifying Airplanes"
+    title_text = "Confusion Matrices - Classifying Trains"
     if model_info:
         separator = model_info.get("separator", "")
         classifier = model_info.get("classifier", "")
@@ -481,15 +481,15 @@ def extract_model_info(results: dict) -> dict:
 
 def main():
     # Path to results file
-    results_dir = Path(__file__).parent / "validation_results"
-    results_file = results_dir / "results_20260211_232530.json"
-
+    results_dir = Path(__file__).parent / "validation_examples_train"
+    results_file = results_dir / "results_20260219_152550.json"
 
     #  SudoRMRF
     # "results_20260211_003754.json"
-    #"results_20260210_234618.json"
+    # "results_20260210_234618.json"
     # Clapsep
     # "results_20260211_111014.json"
+    # "results_20260211_232530.json"
 
     # Load results
     results = load_results(results_file)

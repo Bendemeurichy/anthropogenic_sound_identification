@@ -14,6 +14,13 @@ class DataConfig:
     segment_length: float = 5.0
     snr_range: List[float] = field(default_factory=lambda: [-5, 5])
     n_coi_classes: int = 1
+    # list of semantic labels that define the class(es) of interest we want
+    # the separation model to focus on.  This replaces the hard‑coded
+    # `target_classes` list that used to live in `train.py`.  During training
+    # the dataframe is filtered based on these labels and saved alongside the
+    # checkpoint; during inference the same list can be recovered from the
+    # checkpoint config.
+    target_classes: List[str] = field(default_factory=list)
     # Probability (0..1) of returning a background-only example during training
     background_only_prob: float = 0.0
     # How many non-COI files to mix together when creating a background-only example
