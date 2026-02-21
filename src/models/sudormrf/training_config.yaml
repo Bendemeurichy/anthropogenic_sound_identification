@@ -40,7 +40,7 @@ model:
   # COI separation head U-ConvBlocks
   # 0 = simple architecture (PReLU + Conv1d)
   # >0 = enhanced architecture with N UConvBlocks per branch for class-specific feature extraction
-  num_head_conv_blocks: 2
+  num_head_conv_blocks: 1
   # Expanded dimension for UConvBlock internal processing
   # null/None = use in_channels (512), or set explicitly (e.g., 128 for smaller model)
   expanded_channels: null

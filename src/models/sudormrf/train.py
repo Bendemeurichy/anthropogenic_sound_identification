@@ -1082,7 +1082,7 @@ def train(config: Config, timestamp: str | None = None):
             use_amp=getattr(config.training, "use_amp", True),
             snr_range=tuple(config.data.snr_range),
             scaler=scaler,
-            schduler=scheduler,
+            scheduler=scheduler,
         )
         history["train_loss"].append(train_loss)
         valid_norms = [n for n in epoch_grad_norms if not np.isnan(n)]
