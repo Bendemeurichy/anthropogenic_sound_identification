@@ -4,7 +4,7 @@ data:
   segment_length: 4.0 # seconds
   snr_range: [-5, 5] # dB range for mixing
   n_coi_classes: 1
-  # semantic labels that define the “class of interest” for separation.
+  # semantic labels that define the "class of interest" for separation.
   # this list is read by train.py and saved with the checkpoint so that
   # downstream inference/validation pipelines can report which categories
   # were targeted.
