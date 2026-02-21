@@ -1031,7 +1031,7 @@ def train(config: Config, timestamp: str | None = None):
     )
     base_lr = float(config.training.lr)
     optimizer = optim.AdamW(
-        model.parameters(), lr=base_lr, weight_decay=config.training.weight_decay
+        model.parameters(), lr=base_lr, weight_decay=float(config.training.weight_decay)
     )
 
     warmup_steps = int(getattr(config.training, "warmup_steps", 300))
