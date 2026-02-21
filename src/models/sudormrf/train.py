@@ -9,6 +9,7 @@ Expected dataframe structure:
 import argparse
 import gc
 import json
+import math
 import os
 import sys
 from contextlib import nullcontext
@@ -351,6 +352,10 @@ class AudioDataset(Dataset):
                 print(
                     f"  → With {self._extra_background_count} background-only samples"
                 )
+
+    def set_epoch(self, epoch: int):
+        """Re-seed the internal RNG for a new epoch to ensure augmentation diversity."""
+        self._rng = np.random.default_rng(42 + epoch)
 
     def _compute_segments(
         self, split_df: pd.DataFrame
@@ -768,9 +773,6 @@ def train_epoch(
         if grads_ok:
             optimizer_step += 1
             current_global = global_step + optimizer_step
-            if warmup_steps > 0 and current_global <= warmup_steps:
-                for pg in optimizer.param_groups:
-                    pg["lr"] = base_lr * (current_global / warmup_steps)
 
             total_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), clip_grad_norm
@@ -829,7 +831,7 @@ def validate_epoch(
     with torch.no_grad():
         for sources in pbar:
             sources = sources.to(device, non_blocking=True)
-            mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=False)
+            mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=True)
             B = sources.shape[0]
             del sources
 
@@ -899,7 +901,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         augment=(split == "train"),
         background_only_prob=(
             getattr(config.data, "background_only_prob", 0.0)
-            if split in ("train", "val")
+            if split in ("train")
             else 0.0
         ),
         background_mix_n=getattr(config.data, "background_mix_n", 2),
@@ -1031,11 +1033,25 @@ def train(config: Config, timestamp: str | None = None):
         class_weight=getattr(config.training, "class_weight", 1.5)
     )
     base_lr = float(config.training.lr)
-    weight_decay = float(getattr(config.training, "weight_decay", 1e-2))
-    optimizer = optim.AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=5
+    optimizer = optim.AdamW(
+        model.parameters(), lr=base_lr, weight_decay=config.training.weight_decay
     )
+
+    warmup_steps = int(getattr(config.training, "warmup_steps", 300))
+    # Estimate total optimizer steps for cosine schedule
+    steps_per_epoch = max(
+        1, len(train_loader) // max(1, config.training.grad_accum_steps)
+    )
+    total_steps = steps_per_epoch * config.training.num_epochs
+
+    def lr_lambda(current_step: int) -> float:
+        if current_step < warmup_steps:
+            return current_step / max(1, warmup_steps)
+        # Cosine decay from 1.0 to 0.01 after warmup
+        progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Create GradScaler once so its internal state persists across epochs
     use_amp = getattr(config.training, "use_amp", True) and str(
@@ -1054,6 +1070,10 @@ def train(config: Config, timestamp: str | None = None):
 
     for epoch in range(1, config.training.num_epochs + 1):
         print(f"\nEpoch {epoch}/{config.training.num_epochs}")
+
+        # Re-seed dataset RNG for augmentation diversity each epoch
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch)
 
         train_loss, global_step, epoch_grad_norms = train_epoch(
             model,
