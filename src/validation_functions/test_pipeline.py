@@ -889,7 +889,15 @@ class ValidationPipeline:
         metrics.sdr_scores = sdr_scores
         metrics.si_sdr_scores = si_sdr_scores
         metrics.actual_snrs = actual_snrs
-        metrics.compute(np.array(y_true), np.array(y_pred), np.array(y_scores))
+        # pass raw_labels so that misclassification counts by the original
+        # multi‑class label (and the per‑label counter) work correctly for
+        # mixture evaluations, matching the clean path above.
+        metrics.compute(
+            np.array(y_true),
+            np.array(y_pred),
+            np.array(y_scores),
+            raw_labels=raw_labels,
+        )
         return metrics
 
     def run(
