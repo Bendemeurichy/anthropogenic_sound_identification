@@ -1183,6 +1183,11 @@ def main():
     coi_df = get_coi(separation_metadata, target_classes)
     sampled_df = sample_non_coi(separation_metadata, coi_df, coi_ratio=0.25)
 
+    # keep a copy of the original multi‑class labels; the subsequent step
+    # overwrites `label` with a binary indicator but we want to retain the
+    # real taxonomy for later inspection
+    sampled_df["orig_label"] = sampled_df["label"]
+
     # Binary labels
     sampled_df["label"] = sampled_df["label"].apply(
         lambda x: (

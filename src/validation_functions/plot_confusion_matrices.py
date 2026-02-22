@@ -63,9 +63,16 @@ def create_confusion_matrix_figure(
     else:
         text = [[f"TN: {tn}", f"FP: {fp}"], [f"FN: {fn}", f"TP: {tp}"]]
 
-    # build misclassification table values; prefer per‑label counts if present,
-    # otherwise fall back to the simple two‑transition summary.
-    if "misclassified_per_label" in cm_data:
+    # build misclassification table values; prefer raw‑label counts first,
+    # then the binary per‑label summary, otherwise fall back to the simple
+    # two‑transition summary.
+    if "misclassified_raw_counts" in cm_data:
+        per_raw = cm_data["misclassified_raw_counts"]
+        # sort keys as strings so the order is stable
+        sorted_keys = sorted(per_raw.keys(), key=lambda x: str(x))
+        mis_labels = [str(k) for k in sorted_keys]
+        mis_counts = [per_raw[k] for k in sorted_keys]
+    elif "misclassified_per_label" in cm_data:
         per_label = cm_data["misclassified_per_label"]
         # keys may be strings (due to JSON) – sort numerically
         sorted_keys = sorted(per_label.keys(), key=lambda x: int(x))
@@ -226,7 +233,11 @@ def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
 
         # annotate misclassification counts just below the heatmap; use
         # per‑label dictionary if available.
-        if "misclassified_per_label" in data:
+        if "misclassified_raw_counts" in data:
+            per_raw = data["misclassified_raw_counts"]
+            items = sorted(per_raw.items(), key=lambda kv: str(kv[0]))
+            mis_text = "<br>".join(f"{k}: {v}" for k, v in items)
+        elif "misclassified_per_label" in data:
             per_label = data["misclassified_per_label"]
             # sort by numeric label
             items = sorted(per_label.items(), key=lambda kv: int(kv[0]))

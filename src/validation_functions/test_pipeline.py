@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -99,14 +99,27 @@ class ClassificationMetrics:
     actual_snrs: List[float] = field(default_factory=list)
 
     def compute(
-        self, y_true: np.ndarray, y_pred: np.ndarray, y_scores: np.ndarray = None
+        self,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        y_scores: np.ndarray = None,
+        raw_labels: Sequence[Any] = None,
     ):
-        """Compute all metrics from predictions."""
+        """Compute all metrics from predictions.
+
+        ``raw_labels`` is an optional parallel sequence containing the original
+        (multi‑class) label for each sample; it is used only for bookkeeping and
+        does not affect the numeric metrics.
+        """
         self.n_samples = len(y_true)
         self.labels = y_true.tolist()
         self.predictions = y_pred.tolist()
+        if raw_labels is not None:
+            self.raw_labels = list(raw_labels)
         # reset misclassified info in case the same object is reused
-        self.misclassified = {}
+        self.misclassified_transitions = {}
+        self.misclassified_per_label = {}
+        self.misclassified_raw_counts = {}
         if y_scores is not None:
             self.confidences = y_scores.tolist()
 
@@ -138,19 +151,21 @@ class ClassificationMetrics:
             (tp * tn - fp * fn) / mcc_denom if mcc_denom > 0 else 0.0
         )
 
-        # count up misclassification transitions
-        for true_val, pred_val in zip(y_true, y_pred):
+        # count up misclassification transitions (and per‑label/raw summaries)
+        for idx, (true_val, pred_val) in enumerate(zip(y_true, y_pred)):
             if true_val != pred_val:
                 key = f"{true_val}->{pred_val}"
                 self.misclassified_transitions[key] = (
                     self.misclassified_transitions.get(key, 0) + 1
                 )
-                # also increment the per‑true‑label counter
                 self.misclassified_per_label[true_val] = (
                     self.misclassified_per_label.get(true_val, 0) + 1
                 )
-
-        # Aggregate signal metrics if populated
+                if raw_labels is not None:
+                    raw_key = str(raw_labels[idx])
+                    self.misclassified_raw_counts[raw_key] = (
+                        self.misclassified_raw_counts.get(raw_key, 0) + 1
+                    )
 
         # Aggregate signal metrics if populated
         if self.si_snr_scores:
@@ -172,15 +187,22 @@ Specificity: {self.specificity:.4f}  Balanced Acc: {self.balanced_accuracy:.4f}
 MCC: {self.matthews_corrcoef:.4f}"""
 
         # provide a quick summary of which class‑to‑class *transitions* were wrong
+        # provide a quick summary of which class transitions were mis‑predicted
         s += (
             f"\n\nMisclassified transition counts:\n"
             f"  Actual 0 → Pred 1: {self.misclassified_transitions.get('0->1', 0)}\n"
             f"  Actual 1 → Pred 0: {self.misclassified_transitions.get('1->0', 0)}"
         )
         if self.misclassified_per_label:
-            s += "\nMisclassified by true label:\n"
+            s += "\n\nMisclassified by binary true label:\n"
             for cls, cnt in sorted(self.misclassified_per_label.items()):
                 s += f"  Class {cls}: {cnt}\n"
+        if self.misclassified_raw_counts:
+            s += "\nMisclassified by original label:\n"
+            for raw, cnt in sorted(
+                self.misclassified_raw_counts.items(), key=lambda x: str(x[0])
+            ):
+                s += f"  {raw}: {cnt}\n"
 
         if self.mean_si_snr is not None:
             s += f"""
@@ -228,6 +250,13 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
             d["misclassified_transitions"] = self.misclassified_transitions
         if self.misclassified_per_label:
             d["misclassified_per_label"] = self.misclassified_per_label
+        if self.misclassified_raw_counts:
+            d["misclassified_raw_counts"] = {
+                str(k): v for k, v in self.misclassified_raw_counts.items()
+            }
+        if self.raw_labels:
+            # preserve the sequence of original labels for downstream inspection
+            d["raw_labels"] = list(self.raw_labels)
         return d
 
 
@@ -567,6 +596,7 @@ class ValidationPipeline:
         This helps inspect a small number of separation examples for the clean condition.
         """
         y_true, y_pred, y_scores = [], [], []
+        raw_labels = []
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
         desc = "Clean (sep+cls)" if use_separation else "Clean (cls only)"
 
@@ -652,6 +682,7 @@ class ValidationPipeline:
                 y_true.append(1)
                 y_pred.append(pred)
                 y_scores.append(conf)
+                raw_labels.append(getattr(row, "orig_label", row.label))
             except Exception as e:
                 import traceback
 
@@ -670,6 +701,7 @@ class ValidationPipeline:
                 y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
+                raw_labels.append(getattr(row, "orig_label", row.label))
             except Exception as e:
                 import traceback
 
@@ -680,7 +712,12 @@ class ValidationPipeline:
         metrics.si_snr_scores = si_snr_scores
         metrics.sdr_scores = sdr_scores
         metrics.si_sdr_scores = si_sdr_scores
-        metrics.compute(np.array(y_true), np.array(y_pred), np.array(y_scores))
+        metrics.compute(
+            np.array(y_true),
+            np.array(y_pred),
+            np.array(y_scores),
+            raw_labels=raw_labels,
+        )
         return metrics
 
     def validate_mixtures(
@@ -701,6 +738,7 @@ class ValidationPipeline:
           - the separated outputs (either single COI head or all sources)
         """
         y_true, y_pred, y_scores = [], [], []
+        raw_labels = []
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
         actual_snrs: List[float] = []
         desc = "Mixtures (sep+cls)" if use_separation else "Mixtures (cls only)"
@@ -811,6 +849,7 @@ class ValidationPipeline:
                 y_true.append(1)
                 y_pred.append(pred)
                 y_scores.append(conf)
+                raw_labels.append(getattr(row, "orig_label", row.label))
             except Exception as e:
                 import traceback
 
@@ -829,6 +868,7 @@ class ValidationPipeline:
                 y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
+                raw_labels.append(getattr(row, "orig_label", row.label))
             except Exception as e:
                 import traceback
 

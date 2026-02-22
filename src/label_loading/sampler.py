@@ -1,7 +1,8 @@
 """Sampler function that samples all samples from the datasets containing the class of interest and sample non-interest samples to the desired ratio."""
 
-from .metadata_loader import load_metadata_datasets, split_seperation_classification
 import pandas as pd
+
+from .metadata_loader import load_metadata_datasets, split_seperation_classification
 
 
 def get_coi(metadata_df: pd.DataFrame, target_class: list[str]) -> pd.DataFrame:
@@ -82,6 +83,10 @@ def sample_non_coi(
         sampled_dfs.append(sampled_non_coi_split_df)
 
     result_df = pd.concat(sampled_dfs, ignore_index=True)
+    # keep a copy of whatever was in `label` before it gets converted to a
+    # binary indicator – the validation/plotting code can then report which
+    # original classes were confused.
+    result_df["orig_label"] = result_df["label"]
     print(f"\nTotal sampled dataset: {len(result_df)} samples")
     print("  By split:")
     for split in ["train", "val", "test"]:
@@ -121,7 +126,7 @@ def test_sampler():
         "helicopter",
         "Propeller airscrew",
     ]
-    
+
     # Train experiment test
     # target_classes = [
     #     "Rail transport",
@@ -145,7 +150,9 @@ def test_sampler():
         coi_ratio=0.25,  # Aim for 25% plane sounds
     )
 
-    # 4. Create binary labels: 1 for plane, 0 for non-plane
+    # 4. Preserve the original labels and then create binary labels: 1 for plane,
+    #    0 for non-plane.  ``orig_label`` will be kept alongside the binary column.
+    sampled_df["orig_label"] = sampled_df["label"]
     sampled_df["binary_label"] = sampled_df["label"].apply(
         lambda x: (
             1
