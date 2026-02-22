@@ -289,7 +289,16 @@ class ValidationPipeline:
             self.classifier_sample_rate * self.segment_length
         )
         self.segment_samples = int(self.sample_rate * self.segment_length)
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Prefer the second CUDA device (index 1) when more than one GPU is present.
+        # If a second GPU isn't available we fall back to the CPU rather than using
+        # the first GPU; this matches the requirement to "use the second cuda gpu
+        # if available and else the cpu".
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            self.device = "cuda:1"
+        else:
+            self.device = "cpu"
+        # report the choice so users can immediately see which hardware will be used
+        print(f"ValidationPipeline using device: {self.device}")
         # will be populated when a separation checkpoint is loaded
         self.target_classes = None
 
