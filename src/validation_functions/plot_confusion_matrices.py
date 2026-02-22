@@ -21,7 +21,13 @@ def create_confusion_matrix_figure(
     cm_data: dict, title: str, show_percentages: bool = True, model_info: dict = None
 ) -> go.Figure:
     """
-    Create a Plotly confusion matrix heatmap.
+    Create a Plotly confusion matrix heatmap with an adjacent mini‑table showing
+    which class transitions were mis‑predicted.
+
+    The figure is composed of two subplots side‑by‑side: the heatmap on the left
+    and a small table on the right listing the two possible wrong transitions
+    (negative -> positive and positive -> negative) along with their counts
+    (and percentages if requested).
 
     Args:
         cm_data: Dictionary with tp, tn, fp, fn values
@@ -39,12 +45,10 @@ def create_confusion_matrix_figure(
 
     # Create confusion matrix array
     # Format: [[TN, FP], [FN, TP]]
-    # Rows = Actual (Negative, Positive), Cols = Predicted (Negative, Positive)
     cm = np.array([[tn, fp], [fn, tp]])
-
     total = cm.sum()
 
-    # Create text annotations
+    # Create heatmap text annotations
     if show_percentages:
         text = [
             [
@@ -59,20 +63,62 @@ def create_confusion_matrix_figure(
     else:
         text = [[f"TN: {tn}", f"FP: {fp}"], [f"FN: {fn}", f"TP: {tp}"]]
 
-    # Create heatmap
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=cm,
-            x=["Predicted Negative", "Predicted Positive"],
-            y=["Actual Negative", "Actual Positive"],
-            text=text,
-            texttemplate="%{text}",
-            textfont={"size": 14},
-            colorscale="Blues",
-            showscale=True,
-            hovertemplate="Actual: %{y}<br>Predicted: %{x}<br>Count: %{z}<extra></extra>",
-        )
+    # build misclassification table values; prefer per‑label counts if present,
+    # otherwise fall back to the simple two‑transition summary.
+    if "misclassified_per_label" in cm_data:
+        per_label = cm_data["misclassified_per_label"]
+        # keys may be strings (due to JSON) – sort numerically
+        sorted_keys = sorted(per_label.keys(), key=lambda x: int(x))
+        mis_labels = [f"Class {k}" for k in sorted_keys]
+        mis_counts = [per_label[k] for k in sorted_keys]
+    else:
+        mis_labels = ["Actual 0 → Pred 1", "Actual 1 → Pred 0"]
+        mis_counts = [fp, fn]
+
+    if show_percentages:
+        mis_entries = [f"{c} ({c / total * 100:.1f}%)" for c in mis_counts]
+    else:
+        mis_entries = [str(c) for c in mis_counts]
+
+    # construct subplot grid
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        column_widths=[0.7, 0.3],
+        specs=[[{"type": "heatmap"}, {"type": "table"}]],
+        horizontal_spacing=0.02,
     )
+
+    # add heatmap trace
+    heatmap = go.Heatmap(
+        z=cm,
+        x=["Predicted Negative", "Predicted Positive"],
+        y=["Actual Negative", "Actual Positive"],
+        text=text,
+        texttemplate="%{text}",
+        textfont={"size": 14},
+        colorscale="Blues",
+        showscale=True,
+        hovertemplate="Actual: %{y}<br>Predicted: %{x}<br>Count: %{z}<extra></extra>",
+    )
+    fig.add_trace(heatmap, row=1, col=1)
+
+    # add misclassification table trace
+    table = go.Table(
+        header=dict(
+            values=["Transition", "Count"],
+            fill_color=["paleturquoise", "paleturquoise"],
+            align="left",
+            font=dict(color="black", size=12),
+        ),
+        cells=dict(
+            values=[mis_labels, mis_entries],
+            fill_color=["lavender", "lavender"],
+            align="left",
+            font=dict(color="black", size=11),
+        ),
+    )
+    fig.add_trace(table, row=1, col=2)
 
     full_title = title
     if model_info:
@@ -83,11 +129,13 @@ def create_confusion_matrix_figure(
 
     fig.update_layout(
         title=dict(text=full_title, font=dict(size=16)),
-        xaxis=dict(title="Predicted Label", side="bottom"),
-        yaxis=dict(title="Actual Label", autorange="reversed"),
-        width=500,
+        width=700,
         height=450,
     )
+
+    # update only the heatmap axes
+    fig.update_xaxes(title="Predicted Label", side="bottom", row=1, col=1)
+    fig.update_yaxes(title="Actual Label", autorange="reversed", row=1, col=1)
 
     return fig
 
@@ -176,6 +224,28 @@ def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
         fig.update_xaxes(title_text="Predicted", row=row, col=col)
         fig.update_yaxes(title_text="Actual", autorange="reversed", row=row, col=col)
 
+        # annotate misclassification counts just below the heatmap; use
+        # per‑label dictionary if available.
+        if "misclassified_per_label" in data:
+            per_label = data["misclassified_per_label"]
+            # sort by numeric label
+            items = sorted(per_label.items(), key=lambda kv: int(kv[0]))
+            mis_text = "<br>".join(f"Class {k}: {v}" for k, v in items)
+        else:
+            mis_text = f"FP: {fp}<br>FN: {fn}"
+
+        axis_idx = idx + 1
+        fig.add_annotation(
+            x=0.5,
+            y=-0.2,
+            xref=f"x{axis_idx} domain",
+            yref=f"y{axis_idx} domain",
+            text=mis_text,
+            showarrow=False,
+            align="center",
+            font=dict(size=11),
+        )
+
     title_text = "Confusion Matrices - Classifying Trains"
     if model_info:
         separator = model_info.get("separator", "")
@@ -187,6 +257,9 @@ def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
         title=dict(text=title_text, font=dict(size=20)),
         width=900,
         height=800,
+        # give extra room at the bottom so our mis‑classification annotations
+        # added below each subplot aren’t cut off
+        margin=dict(b=100),
     )
 
     return fig

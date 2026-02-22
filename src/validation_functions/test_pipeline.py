@@ -76,9 +76,16 @@ class ClassificationMetrics:
     matthews_corrcoef: float = 0.0
 
     n_samples: int = 0
+    labels: List[int] = field(default_factory=list)
     predictions: List[int] = field(default_factory=list)
     confidences: List[float] = field(default_factory=list)
-    labels: List[int] = field(default_factory=list)
+    # Keep track of how many times each *transition* (true → predicted) occurred.
+    # this is a dictionary mapping strings like "0->1" or "3->7" to counts.
+    misclassified_transitions: Dict[str, int] = field(default_factory=dict)
+    # count how often each true label ends up being mis‑classified, regardless of
+    # the incorrect target; useful for seeing which classes the model struggles
+    # with overall.
+    misclassified_per_label: Dict[int, int] = field(default_factory=dict)
 
     # Signal-level separation quality metrics (populated when reference is available)
     si_snr_scores: List[float] = field(default_factory=list)
@@ -98,6 +105,8 @@ class ClassificationMetrics:
         self.n_samples = len(y_true)
         self.labels = y_true.tolist()
         self.predictions = y_pred.tolist()
+        # reset misclassified info in case the same object is reused
+        self.misclassified = {}
         if y_scores is not None:
             self.confidences = y_scores.tolist()
 
@@ -129,6 +138,20 @@ class ClassificationMetrics:
             (tp * tn - fp * fn) / mcc_denom if mcc_denom > 0 else 0.0
         )
 
+        # count up misclassification transitions
+        for true_val, pred_val in zip(y_true, y_pred):
+            if true_val != pred_val:
+                key = f"{true_val}->{pred_val}"
+                self.misclassified_transitions[key] = (
+                    self.misclassified_transitions.get(key, 0) + 1
+                )
+                # also increment the per‑true‑label counter
+                self.misclassified_per_label[true_val] = (
+                    self.misclassified_per_label.get(true_val, 0) + 1
+                )
+
+        # Aggregate signal metrics if populated
+
         # Aggregate signal metrics if populated
         if self.si_snr_scores:
             self.mean_si_snr = float(np.mean(self.si_snr_scores))
@@ -147,6 +170,17 @@ Accuracy:  {self.accuracy:.4f}    Precision: {self.precision:.4f}
 Recall:    {self.recall:.4f}    F1-Score:  {self.f1_score:.4f}
 Specificity: {self.specificity:.4f}  Balanced Acc: {self.balanced_accuracy:.4f}
 MCC: {self.matthews_corrcoef:.4f}"""
+
+        # provide a quick summary of which class‑to‑class *transitions* were wrong
+        s += (
+            f"\n\nMisclassified transition counts:\n"
+            f"  Actual 0 → Pred 1: {self.misclassified_transitions.get('0->1', 0)}\n"
+            f"  Actual 1 → Pred 0: {self.misclassified_transitions.get('1->0', 0)}"
+        )
+        if self.misclassified_per_label:
+            s += "\nMisclassified by true label:\n"
+            for cls, cnt in sorted(self.misclassified_per_label.items()):
+                s += f"  Class {cls}: {cnt}\n"
 
         if self.mean_si_snr is not None:
             s += f"""
@@ -190,6 +224,10 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
                 "max": float(max(self.actual_snrs)),
                 "mean": float(np.mean(self.actual_snrs)),
             }
+        if self.misclassified_transitions:
+            d["misclassified_transitions"] = self.misclassified_transitions
+        if self.misclassified_per_label:
+            d["misclassified_per_label"] = self.misclassified_per_label
         return d
 
 
