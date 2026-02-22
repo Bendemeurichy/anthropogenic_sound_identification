@@ -6,6 +6,18 @@ sound, computes and saves spectrograms of both inputs, creates a mixture at a
 configurable SNR, runs source separation through a specified model checkpoint,
 and saves all outputs (WAVs + spectrogram plots).
 
+Several helper routines have been added to this module for
+post‑hoc visualisation:
+
+* ``plot_spectrogram_from_wav`` – load a WAV and write a single spectrogram
+  PNG.
+* ``plot_multiple_wav_spectrograms`` – batch version of the above.
+* ``plot_combined_spectrograms`` / ``plot_combined_spectrograms_from_wavs`` –
+  produce a vertically stacked comparison figure akin to the one generated
+  by the full demo.
+
+These utilities can be imported and used independently of the demo pipeline.
+
 This script uses the ValidationPipeline from test_pipeline.py to load both
 the separation and classification models (exactly as done during validation),
 but only exercises separation for this audible demo.
@@ -64,6 +76,9 @@ SAMPLE_RATE = 16_000  # Default, will be updated in main()
 N_FFT = 1024
 HOP_LENGTH = 256
 WIN_LENGTH = 1024
+# human hearing range - used when plotting so that axes extend at least
+# this far even if the underlying sample rate is lower than 40 kHz.
+HUMAN_HEARING_MAX = 20_000
 
 # Default file locations (relative to this script)
 DEFAULT_COI_PATH = _SCRIPT_DIR / "plane.wav"
@@ -137,19 +152,55 @@ def create_mixture_from_sources(
     return mixture, clean_wavs, actual_snr
 
 
-def compute_spectrogram(wav: torch.Tensor) -> np.ndarray:
-    """Return the log-magnitude spectrogram (freq x time) as a numpy array."""
-    spec = torch.stft(
-        wav,
+def compute_spectrogram(
+    wav: torch.Tensor,
+    sr: int = SAMPLE_RATE,
+    display_sr: int | None = None,
+    n_mels: int = 128,
+) -> tuple[np.ndarray, int]:
+    """
+    Return a log-magnitude Mel-spectrogram (n_mels x time) as a numpy array.
+
+    ``wav`` is assumed to be sampled at ``sr``.  We optionally resample the
+    waveform to a higher rate before computing the Mel transform so the
+    resulting figure can cover the full human hearing band.
+
+    If ``display_sr`` is provided it is used as the target rate for the STFT.
+    Otherwise we pick
+
+        max(sr, HUMAN_HEARING_MAX * 2)
+
+    which guarantees at least 20 kHz of frequency content in the result.  The
+    function returns ``(mel_spec_db, used_sr)`` where ``used_sr`` is the sample
+    rate actually employed (useful when labelling axes).
+    """
+    # choose a display rate if none was requested
+    if display_sr is None:
+        display_sr = max(sr, HUMAN_HEARING_MAX * 2)
+
+    # resample waveform if required
+    if display_sr != sr:
+        wav = torchaudio.transforms.Resample(sr, display_sr)(wav.unsqueeze(0)).squeeze(
+            0
+        )
+        sr = display_sr
+
+    # Compute Mel-spectrogram (torchaudio returns power by default)
+    # MelSpectrogram expects input shape (channel, samples)
+    mel_transform = torchaudio.transforms.MelSpectrogram(
+        sample_rate=sr,
         n_fft=N_FFT,
         hop_length=HOP_LENGTH,
         win_length=WIN_LENGTH,
-        window=torch.hann_window(WIN_LENGTH),
-        return_complex=True,
+        n_mels=n_mels,
+        power=2.0,
     )
-    mag = torch.abs(spec)
-    log_mag = 20 * torch.log10(mag + 1e-8)
-    return log_mag.cpu().numpy()
+    mel_spec = mel_transform(wav.unsqueeze(0))[0]  # (n_mels, time)
+
+    # Convert power to dB for plotting
+    mel_spec_db = 10.0 * torch.log10(mel_spec + 1e-8)
+
+    return mel_spec_db.cpu().numpy(), sr
 
 
 def plot_spectrogram(
@@ -158,23 +209,178 @@ def plot_spectrogram(
     save_path: Path,
     sr: int = SAMPLE_RATE,
 ) -> None:
-    """Plot a single spectrogram and save to *save_path*."""
+    """Plot a Mel-spectrogram (mel x time) with informative y-axis (Hz) and save to *save_path*."""
     fig, ax = plt.subplots(figsize=(10, 4))
+    # time extent in seconds
+    time_sec = spec.shape[1] * HOP_LENGTH / sr
+    n_mels = spec.shape[0]
+
+    # We display the matrix with vertical axis as Mel bands (0..n_mels)
     im = ax.imshow(
         spec,
         aspect="auto",
         origin="lower",
         cmap="magma",
-        extent=(0, spec.shape[1] * HOP_LENGTH / sr, 0, sr / 2),
+        extent=(0, time_sec, 0, n_mels),
     )
+
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
     ax.set_title(title)
+
+    # Map a few Mel-band positions back to Hz for readable tick labels.
+    # Uses the standard mel <-> hz conversion:
+    #   mel = 2595 * log10(1 + f/700)
+    #   f   = 700 * (10^(mel/2595) - 1)
+    def mel_to_hz(mel_val: float) -> float:
+        return 700.0 * (10.0 ** (mel_val / 2595.0) - 1.0)
+
+    # mel_max corresponding to Nyquist (sr/2)
+    mel_max = 2595.0 * np.log10(1.0 + (sr / 2.0) / 700.0)
+
+    # Choose a small set of ticks evenly spaced on the mel axis
+    num_ticks = 6
+    mel_ticks = np.linspace(0.0, mel_max, num_ticks)
+    # Convert mel values to corresponding bin indices in [0, n_mels-1]
+    mel_bin_indices = (mel_ticks / mel_max) * (n_mels - 1)
+    # Positions for imshow (extent uses 0..n_mels), so use those indices directly
+    y_positions = mel_bin_indices
+
+    # Format Hz labels (use k for thousands)
+    def fmt_hz(hz: float) -> str:
+        if hz >= 1000:
+            return f"{hz / 1000:.1f}k"
+        return f"{int(hz)}"
+
+    hz_labels = [fmt_hz(mel_to_hz(m)) for m in mel_ticks]
+
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(hz_labels)
+
     fig.colorbar(im, ax=ax, label="dB")
     fig.tight_layout()
     fig.savefig(str(save_path), dpi=150)
     plt.close(fig)
     print(f"  Saved spectrogram -> {save_path}")
+
+
+def plot_spectrogram_from_wav(
+    wav_path: Path,
+    save_path: Path,
+    title: str | None = None,
+    sr: int = SAMPLE_RATE,
+) -> None:
+    """Load a WAV file, compute its spectrogram, and save a plot.
+
+    Convenience wrapper that handles the I/O and plotting in one call.  The
+    audio is loaded and resampled to ``sr``; the spectrogram computation will
+    upsample further if necessary so that the resulting figure contains actual
+    values covering the full human hearing band (up to ~20 kHz).
+    """
+    wav = load_wav(wav_path, target_sr=sr)
+    spec, used_sr = compute_spectrogram(wav, sr=sr)
+    if title is None:
+        title = f"Spectrogram - {wav_path.name}"
+    plot_spectrogram(spec, title, save_path, sr=used_sr)
+
+
+def plot_multiple_wav_spectrograms(
+    wav_paths: list[Path],
+    out_dir: Path,
+    sr: int = SAMPLE_RATE,
+) -> None:
+    """Plot spectrograms for a list of WAV files and save them to *out_dir*.
+
+    Each output file is named with a timestamp to avoid collisions.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for wav_path in wav_paths:
+        stem = wav_path.stem.replace(" ", "_")
+        save_path = out_dir / f"spectrogram_{stem}_{ts}.png"
+        plot_spectrogram_from_wav(wav_path, save_path, title=wav_path.name, sr=sr)
+
+
+def plot_combined_spectrograms(
+    specs: list[np.ndarray],
+    titles: list[str],
+    save_path: Path,
+    sr: int = SAMPLE_RATE,
+) -> None:
+    """Create a combined vertical figure from a list of Mel-spectrograms.
+
+    Each input in ``specs`` is expected to be a Mel-spectrogram (n_mels x time).
+    The y-axis tick labels are shown in Hz for easier human interpretation.
+    """
+    n_plots = len(specs)
+    fig, axes = plt.subplots(n_plots, 1, figsize=(12, 3.5 * n_plots))
+    # ``subplots`` returns a single Axes object when n_plots == 1, so
+    # normalise to a list so the later loop works uniformly.
+    if n_plots == 1:
+        axes = [axes]
+
+    for ax, spec, title in zip(axes, specs, titles):
+        time_sec = spec.shape[1] * HOP_LENGTH / sr
+        n_mels = spec.shape[0]
+        im = ax.imshow(
+            spec,
+            aspect="auto",
+            origin="lower",
+            cmap="magma",
+            extent=(0, time_sec, 0, n_mels),
+        )
+        ax.set_ylabel("Freq (Hz)")
+        ax.set_title(title)
+
+        # Create mel->Hz ticks as in single plot function
+        def mel_to_hz(mel_val: float) -> float:
+            return 700.0 * (10.0 ** (mel_val / 2595.0) - 1.0)
+
+        mel_max = 2595.0 * np.log10(1.0 + (sr / 2.0) / 700.0)
+        num_ticks = 6
+        mel_ticks = np.linspace(0.0, mel_max, num_ticks)
+        mel_bin_indices = (mel_ticks / mel_max) * (n_mels - 1)
+        y_positions = mel_bin_indices
+
+        def fmt_hz(hz: float) -> str:
+            if hz >= 1000:
+                return f"{hz / 1000:.1f}k"
+            return f"{int(hz)}"
+
+        hz_labels = [fmt_hz(mel_to_hz(m)) for m in mel_ticks]
+        ax.set_yticks(y_positions)
+        ax.set_yticklabels(hz_labels)
+
+        fig.colorbar(im, ax=ax, label="dB")
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.tight_layout()
+    fig.savefig(str(save_path), dpi=150)
+    plt.close(fig)
+    print(f"  Saved combined spectrogram -> {save_path}")
+
+
+def plot_combined_spectrograms_from_wavs(
+    wav_paths: list[Path],
+    save_path: Path,
+    titles: list[str] | None = None,
+    sr: int = SAMPLE_RATE,
+) -> None:
+    """Load several WAVs, compute their spectrograms, and make a combined plot.
+
+    Titles default to the basename of each file if not supplied.
+    """
+    specs = []
+    used_sr: int | None = None
+    for p in wav_paths:
+        wav = load_wav(p, target_sr=sr)
+        spec, used_sr = compute_spectrogram(wav, sr=sr)
+        specs.append(spec)
+
+    if titles is None:
+        titles = [p.name for p in wav_paths]
+
+    plot_combined_spectrograms(specs, titles, save_path, sr=(used_sr or sr))
 
 
 def save_wav(wav: torch.Tensor, path: Path, sr: int = SAMPLE_RATE) -> None:
@@ -284,18 +490,24 @@ def main() -> None:
     # 2. Compute & save spectrograms for both inputs
     # ------------------------------------------------------------------
     print("\n[2/6] Computing and saving input spectrograms")
-    coi_spec = compute_spectrogram(coi_wav)
-    bg_spec = compute_spectrogram(bg_wav)
+    # determine display rate for plotting (at least twice the human-hearing
+    # limit so the spec contains real values up to ~20 kHz)
+    plot_sr = max(SAMPLE_RATE, HUMAN_HEARING_MAX * 2)
+
+    coi_spec, _ = compute_spectrogram(coi_wav, sr=SAMPLE_RATE, display_sr=plot_sr)
+    bg_spec, _ = compute_spectrogram(bg_wav, sr=SAMPLE_RATE, display_sr=plot_sr)
 
     plot_spectrogram(
         coi_spec,
         "COI Input - plane.wav",
         out_dir / f"spectrogram_coi_input_{ts}.png",
+        sr=plot_sr,
     )
     plot_spectrogram(
         bg_spec,
         "Background Input - honk.wav",
         out_dir / f"spectrogram_bg_input_{ts}.png",
+        sr=plot_sr,
     )
 
     # ------------------------------------------------------------------
@@ -342,11 +554,12 @@ def main() -> None:
     save_wav(clean_sources[0], clean_coi_path)
     save_wav(clean_sources[1], clean_bg_path)
 
-    mix_spec = compute_spectrogram(mixture)
+    mix_spec, _ = compute_spectrogram(mixture, sr=SAMPLE_RATE, display_sr=plot_sr)
     plot_spectrogram(
         mix_spec,
         f"Mixture (SNR={actual_snr:.1f} dB)",
         out_dir / f"spectrogram_mixture_{ts}.png",
+        sr=plot_sr,
     )
 
     # ------------------------------------------------------------------
@@ -375,20 +588,18 @@ def main() -> None:
     sep_specs = []
     for i in range(n_sources):
         label = "COI (plane)" if i == COI_HEAD_INDEX else "Background (honk)"
-        spec = compute_spectrogram(separated[i])
+        spec, _ = compute_spectrogram(separated[i], sr=SAMPLE_RATE, display_sr=plot_sr)
         sep_specs.append(spec)
         plot_spectrogram(
             spec,
             f"Separated - {label} (src{i})",
             out_dir / f"spectrogram_separated_src{i}_{ts}.png",
+            sr=plot_sr,
         )
 
     # ------------------------------------------------------------------
     # Combined comparison figure
     # ------------------------------------------------------------------
-    n_plots = 2 + 1 + n_sources  # 2 inputs + 1 mixture + n_sources separated
-    fig, axes = plt.subplots(n_plots, 1, figsize=(12, 3.5 * n_plots))
-
     titles = [
         "COI Input - plane.wav",
         "Background Input - honk.wav",
@@ -400,29 +611,8 @@ def main() -> None:
         titles.append(f"Separated - {label} (src{i})")
         specs_all.append(sep_specs[i])
 
-    for ax, spec, title in zip(axes, specs_all, titles):
-        im = ax.imshow(
-            spec,
-            aspect="auto",
-            origin="lower",
-            cmap="magma",
-            extent=(
-                0,
-                spec.shape[1] * HOP_LENGTH / SAMPLE_RATE,
-                0,
-                SAMPLE_RATE / 2,
-            ),
-        )
-        ax.set_ylabel("Freq (Hz)")
-        ax.set_title(title)
-        fig.colorbar(im, ax=ax, label="dB")
-
-    axes[-1].set_xlabel("Time (s)")
-    fig.tight_layout()
     combined_path = out_dir / f"spectrograms_combined_{ts}.png"
-    fig.savefig(str(combined_path), dpi=150)
-    plt.close(fig)
-    print(f"  Saved combined spectrogram -> {combined_path}")
+    plot_combined_spectrograms(specs_all, titles, combined_path, sr=plot_sr)
 
     # ------------------------------------------------------------------
     # Summary
@@ -443,4 +633,26 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    wav_files = [
+        Path(
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_coi_clean_1.wav"
+        ),
+        Path(
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_bg_clean_1.wav"
+        ),
+        Path(
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_created_1.wav"
+        ),
+        Path(
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_separated_coi_head_1.wav"
+        ),
+        Path(
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_separated_src1_1.wav"
+        ),
+    ]
+    plot_combined_spectrograms_from_wavs(
+        wav_files,
+        Path("separation_output_demo/combined_mixture.png"),
+        titles=["Train", "Background", "Mixture", "Separated", "Background"],
+    )

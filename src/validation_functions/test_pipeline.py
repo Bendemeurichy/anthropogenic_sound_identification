@@ -218,27 +218,66 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
         return s
 
     def to_dict(self):
+        """Return a JSON-serializable dictionary representation of the metrics.
+
+        This ensures any numpy / torch scalar/array types are converted to native
+        Python `int`/`float`/`list` types so json.dump won't fail or produce
+        non-serializable objects.
+        """
+
+        def _sanitize(obj):
+            """Recursively convert numpy/torch types to native Python types."""
+            # Local imports so module-level imports remain unchanged and to keep
+            # this function self-contained.
+            import numpy as _np
+
+            # torch may not be available in all contexts where this method is used
+            _torch = None
+            try:
+                import torch as _t
+
+                _torch = _t
+            except Exception:
+                _torch = None
+
+            if isinstance(obj, dict):
+                return {str(k): _sanitize(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_sanitize(v) for v in obj]
+            if _torch is not None and isinstance(obj, _torch.Tensor):
+                # Convert tensors to numpy first, then sanitize
+                return _sanitize(obj.detach().cpu().numpy())
+            if isinstance(obj, _np.ndarray):
+                return _sanitize(obj.tolist())
+            # numpy scalar types
+            if isinstance(obj, _np.integer):
+                return int(obj)
+            if isinstance(obj, _np.floating):
+                return float(obj)
+            # Fallback: plain Python ints/floats/strs remain unchanged
+            return obj
+
         d = {
             "confusion_matrix": {
-                "tp": self.true_positives,
-                "tn": self.true_negatives,
-                "fp": self.false_positives,
-                "fn": self.false_negatives,
+                "tp": int(self.true_positives),
+                "tn": int(self.true_negatives),
+                "fp": int(self.false_positives),
+                "fn": int(self.false_negatives),
             },
-            "accuracy": self.accuracy,
-            "precision": self.precision,
-            "recall": self.recall,
-            "f1_score": self.f1_score,
-            "specificity": self.specificity,
-            "balanced_accuracy": self.balanced_accuracy,
-            "mcc": self.matthews_corrcoef,
+            "accuracy": float(self.accuracy),
+            "precision": float(self.precision),
+            "recall": float(self.recall),
+            "f1_score": float(self.f1_score),
+            "specificity": float(self.specificity),
+            "balanced_accuracy": float(self.balanced_accuracy),
+            "mcc": float(self.matthews_corrcoef),
         }
         if self.mean_si_snr is not None:
             d["signal_metrics"] = {
-                "mean_si_snr_db": self.mean_si_snr,
-                "mean_sdr_db": self.mean_sdr,
-                "mean_si_sdr_db": self.mean_si_sdr,
-                "n_signal_samples": len(self.si_snr_scores),
+                "mean_si_snr_db": float(self.mean_si_snr),
+                "mean_sdr_db": float(self.mean_sdr),
+                "mean_si_sdr_db": float(self.mean_si_sdr),
+                "n_signal_samples": int(len(self.si_snr_scores)),
             }
         if self.actual_snrs:
             d["actual_snr_stats"] = {
@@ -247,17 +286,23 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
                 "mean": float(np.mean(self.actual_snrs)),
             }
         if self.misclassified_transitions:
-            d["misclassified_transitions"] = self.misclassified_transitions
+            # Ensure counts are native ints
+            d["misclassified_transitions"] = {
+                str(k): int(v) for k, v in self.misclassified_transitions.items()
+            }
         if self.misclassified_per_label:
-            d["misclassified_per_label"] = self.misclassified_per_label
+            d["misclassified_per_label"] = {
+                str(k): int(v) for k, v in self.misclassified_per_label.items()
+            }
         if self.misclassified_raw_counts:
             d["misclassified_raw_counts"] = {
-                str(k): v for k, v in self.misclassified_raw_counts.items()
+                str(k): int(v) for k, v in self.misclassified_raw_counts.items()
             }
-        if self.raw_labels:
+        if getattr(self, "raw_labels", None):
             # preserve the sequence of original labels for downstream inspection
-            d["raw_labels"] = list(self.raw_labels)
-        return d
+            d["raw_labels"] = [(_sanitize(x)) for x in list(self.raw_labels)]
+        # Sanitize any remaining numpy/torch types recursively before returning
+        return _sanitize(d)
 
 
 # ============================================================================
