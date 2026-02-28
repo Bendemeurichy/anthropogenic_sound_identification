@@ -41,8 +41,8 @@ model:
 
 # Training settings - optimized for COI separation
 training:
-  batch_size: 8
-  grad_accum_steps: 4
+  batch_size: 4
+  grad_accum_steps: 8
   use_amp: true
   num_epochs: 400
   lr: 3e-4
