@@ -74,13 +74,13 @@ def get_freesound_labels(csv_path: str):
             continue
 
         try:
-            labels = request_labels_file(freesound_id, client)
+            labels = request_labels_file(idx, freesound_id, client)
             # store as JSON string for reliable round-tripping
             df.at[idx, "labels"] = json.dumps(labels, ensure_ascii=False)
             # save after each successful retrieval so progress is persisted
             df.to_csv(out_path, index=False)
             # polite pause
-            time.sleep(0.5)
+            time.sleep(1)
         except Exception as e:
             msg = str(e).lower()
             # detect rate-limit and save & exit so user can rerun to resume
@@ -105,7 +105,7 @@ def get_freesound_labels(csv_path: str):
 
 
 def request_labels_file(
-    freesound_id: int, client: freesound.FreesoundClient
+    idx: int, freesound_id: int, client: freesound.FreesoundClient
 ) -> list[str]:
     """Make an API call to retrieve the labels for a given freesound sample.
 
@@ -124,7 +124,7 @@ def request_labels_file(
         category: str = sound.category
 
         print(
-            f"Retrieved labels for freesound ID {freesound_id}: {labels}, category: {category}"
+            f"Retrieved labels for freesound Index:{idx} ,ID {freesound_id}: {labels}, category: {category}"
         )
         return labels
     except Exception as e:

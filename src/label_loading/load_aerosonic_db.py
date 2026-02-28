@@ -32,7 +32,7 @@ def load_aerosonic_db(path: str) -> pd.DataFrame:
     df["filename"] = prefix + df["filename"].astype(str)
 
     df["dataset"] = "aerosonicdb"
-    df["label"] = df["class"].apply(lambda x: "plane" if x == 1 else "background")
+    df["label"] = df["class"].apply(lambda x: "airplane" if x == 1 else "background")
     df["start_time"] = df["offset"].apply(lambda x: str(x))
     df["end_time"] = (df["offset"] + df["duration"]).apply(lambda x: str(x))
 
