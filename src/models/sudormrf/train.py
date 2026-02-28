@@ -1212,7 +1212,7 @@ def main():
                     f"  - {dataset}: {(~sampled_df['file_exists'] & sampled_df['dataset'].str.contains(dataset)).sum()} missing"
                 )
                 print(
-                    f"  - file format of missing file is {sampled_df[~sampled_df['file_exists'] & sampled_df['dataset'].str.contains(dataset)][0]}"
+                    f"  - file format of missing file is {sampled_df[~sampled_df['file_exists'] & sampled_df['dataset'].str.contains(dataset)].iloc(0)}"
                 )
         sampled_df = sampled_df[sampled_df["file_exists"]]
     sampled_df = sampled_df.drop(columns=["file_exists"])
