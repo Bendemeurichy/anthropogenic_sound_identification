@@ -21,13 +21,10 @@ def create_confusion_matrix_figure(
     cm_data: dict, title: str, show_percentages: bool = True, model_info: dict = None
 ) -> go.Figure:
     """
-    Create a Plotly confusion matrix heatmap with an adjacent mini‑table showing
-    which class transitions were mis‑predicted.
+    Create a Plotly confusion matrix heatmap.
 
-    The figure is composed of two subplots side‑by‑side: the heatmap on the left
-    and a small table on the right listing the two possible wrong transitions
-    (negative -> positive and positive -> negative) along with their counts
-    (and percentages if requested).
+    The figure now contains only the heatmap itself; any auxiliary table showing
+    misclassification counts has been removed.
 
     Args:
         cm_data: Dictionary with tp, tn, fp, fn values
@@ -63,38 +60,11 @@ def create_confusion_matrix_figure(
     else:
         text = [[f"TN: {tn}", f"FP: {fp}"], [f"FN: {fn}", f"TP: {tp}"]]
 
-    # build misclassification table values; prefer raw‑label counts first,
-    # then the binary per‑label summary, otherwise fall back to the simple
-    # two‑transition summary.
-    if "misclassified_raw_counts" in cm_data:
-        per_raw = cm_data["misclassified_raw_counts"]
-        # sort keys as strings so the order is stable
-        sorted_keys = sorted(per_raw.keys(), key=lambda x: str(x))
-        mis_labels = [str(k) for k in sorted_keys]
-        mis_counts = [per_raw[k] for k in sorted_keys]
-    elif "misclassified_per_label" in cm_data:
-        per_label = cm_data["misclassified_per_label"]
-        # keys may be strings (due to JSON) – sort numerically
-        sorted_keys = sorted(per_label.keys(), key=lambda x: int(x))
-        mis_labels = [f"Class {k}" for k in sorted_keys]
-        mis_counts = [per_label[k] for k in sorted_keys]
-    else:
-        mis_labels = ["Actual 0 → Pred 1", "Actual 1 → Pred 0"]
-        mis_counts = [fp, fn]
+    # the small misclassification‑count table is no longer part of the figure,
+    # so we drop the previous logic that assembled labels and counts.
 
-    if show_percentages:
-        mis_entries = [f"{c} ({c / total * 100:.1f}%)" for c in mis_counts]
-    else:
-        mis_entries = [str(c) for c in mis_counts]
-
-    # construct subplot grid
-    fig = make_subplots(
-        rows=1,
-        cols=2,
-        column_widths=[0.7, 0.3],
-        specs=[[{"type": "heatmap"}, {"type": "table"}]],
-        horizontal_spacing=0.02,
-    )
+    # construct figure containing only the heatmap
+    fig = go.Figure()
 
     # add heatmap trace
     heatmap = go.Heatmap(
@@ -108,24 +78,7 @@ def create_confusion_matrix_figure(
         showscale=True,
         hovertemplate="Actual: %{y}<br>Predicted: %{x}<br>Count: %{z}<extra></extra>",
     )
-    fig.add_trace(heatmap, row=1, col=1)
-
-    # add misclassification table trace
-    table = go.Table(
-        header=dict(
-            values=["Transition", "Count"],
-            fill_color=["paleturquoise", "paleturquoise"],
-            align="left",
-            font=dict(color="black", size=12),
-        ),
-        cells=dict(
-            values=[mis_labels, mis_entries],
-            fill_color=["lavender", "lavender"],
-            align="left",
-            font=dict(color="black", size=11),
-        ),
-    )
-    fig.add_trace(table, row=1, col=2)
+    fig.add_trace(heatmap)
 
     full_title = title
     if model_info:
@@ -141,8 +94,8 @@ def create_confusion_matrix_figure(
     )
 
     # update only the heatmap axes
-    fig.update_xaxes(title="Predicted Label", side="bottom", row=1, col=1)
-    fig.update_yaxes(title="Actual Label", autorange="reversed", row=1, col=1)
+    fig.update_xaxes(title="Predicted Label", side="bottom")
+    fig.update_yaxes(title="Actual Label", autorange="reversed")
 
     return fig
 
@@ -150,6 +103,10 @@ def create_confusion_matrix_figure(
 def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
     """
     Create a combined figure with all confusion matrices, ensuring consistent scale.
+
+    Misclassification counts are not shown; previous versions added text
+    annotations under each subplot describing false positives/negatives, but
+    those have been removed.
 
     Args:
         results: Dictionary containing all test results
@@ -231,31 +188,9 @@ def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
         fig.update_xaxes(title_text="Predicted", row=row, col=col)
         fig.update_yaxes(title_text="Actual", autorange="reversed", row=row, col=col)
 
-        # annotate misclassification counts just below the heatmap; use
-        # per‑label dictionary if available.
-        if "misclassified_raw_counts" in data:
-            per_raw = data["misclassified_raw_counts"]
-            items = sorted(per_raw.items(), key=lambda kv: str(kv[0]))
-            mis_text = "<br>".join(f"{k}: {v}" for k, v in items)
-        elif "misclassified_per_label" in data:
-            per_label = data["misclassified_per_label"]
-            # sort by numeric label
-            items = sorted(per_label.items(), key=lambda kv: int(kv[0]))
-            mis_text = "<br>".join(f"Class {k}: {v}" for k, v in items)
-        else:
-            mis_text = f"FP: {fp}<br>FN: {fn}"
-
-        axis_idx = idx + 1
-        fig.add_annotation(
-            x=0.5,
-            y=-0.2,
-            xref=f"x{axis_idx} domain",
-            yref=f"y{axis_idx} domain",
-            text=mis_text,
-            showarrow=False,
-            align="center",
-            font=dict(size=11),
-        )
+        # previously the function added a text annotation below each subplot
+        # listing misclassification counts.  Those annotations have been removed
+        # so the heatmap alone is shown.
 
     title_text = "Confusion Matrices - Classifying Trains"
     if model_info:
@@ -271,6 +206,86 @@ def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
         # give extra room at the bottom so our mis‑classification annotations
         # added below each subplot aren’t cut off
         margin=dict(b=100),
+    )
+
+    return fig
+
+
+def create_top_misclassified_figure(
+    results: dict, model_info: dict = None
+) -> go.Figure:
+    """
+    Create a combined bar chart showing the top 10 misclassified raw labels
+    for each test. Each subplot corresponds to one run/test and displays the
+    ten labels with the highest misclassification counts (from
+    `misclassified_raw_counts`).
+
+    Args:
+        results: Dictionary containing all test results
+        model_info: Optional dictionary with model information
+
+    Returns:
+        Plotly Figure object with subplots.
+    """
+    # Filter to only include test results (exclude checkpoint_paths, etc.)
+    test_names = [
+        k
+        for k in results.keys()
+        if isinstance(results[k], dict) and "confusion_matrix" in results[k]
+    ]
+    n_tests = len(test_names)
+
+    # Calculate grid dimensions
+    n_cols = 2
+    n_rows = (n_tests + 1) // 2
+
+    fig = make_subplots(
+        rows=n_rows,
+        cols=n_cols,
+        subplot_titles=[name.replace("_", " ").title() for name in test_names],
+        horizontal_spacing=0.25,
+        vertical_spacing=0.15,
+    )
+
+    for idx, name in enumerate(test_names):
+        row = idx // n_cols + 1
+        col = idx % n_cols + 1
+
+        data = results[name]
+        mis_raw = data.get("misclassified_raw_counts", {})
+        if mis_raw:
+            items = sorted(mis_raw.items(), key=lambda kv: kv[1], reverse=True)[:10]
+            labels = [str(k) for k, _ in items]
+            counts = [v for _, v in items]
+        else:
+            labels = []
+            counts = []
+
+        bar = go.Bar(
+            x=counts,
+            y=labels,
+            orientation="h",
+            marker_color="darkorange",
+            text=counts,
+            textposition="auto",
+            showlegend=False,
+        )
+        fig.add_trace(bar, row=row, col=col)
+        fig.update_xaxes(title_text="Count", row=row, col=col)
+        # reverse y‑axis so highest values appear at the top
+        fig.update_yaxes(autorange="reversed", row=row, col=col)
+
+    title_text = "Top misclassified labels"
+    if model_info:
+        separator = model_info.get("separator", "")
+        classifier = model_info.get("classifier", "")
+        if separator and classifier:
+            title_text += f" ({separator} + {classifier})"
+
+    fig.update_layout(
+        title=dict(text=title_text, font=dict(size=20)),
+        width=1100,
+        height=800,
     )
 
     return fig
@@ -565,8 +580,8 @@ def extract_model_info(results: dict) -> dict:
 
 def main():
     # Path to results file
-    results_dir = Path(__file__).parent / "validation_examples_train"
-    results_file = results_dir / "results_20260219_152550.json"
+    results_dir = Path(__file__).parent / "validation_examples_planes"
+    results_file = results_dir / "results_20260222_231459.json"
 
     #  SudoRMRF
     # "results_20260211_003754.json"
@@ -636,6 +651,12 @@ def main():
     metrics_bar_path = output_dir / "metrics_bar_chart.png"
     metrics_bar_fig.write_image(str(metrics_bar_path), scale=2)
     print(f"Saved: {metrics_bar_path}")
+
+    # Create top misclassified labels figure (combined across runs)
+    top_mis_fig = create_top_misclassified_figure(test_results, model_info)
+    top_mis_path = output_dir / "top_misclassified_labels.png"
+    top_mis_fig.write_image(str(top_mis_path), scale=2)
+    print(f"Saved: {top_mis_path}")
 
 
 if __name__ == "__main__":

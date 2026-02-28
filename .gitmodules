@@ -2,9 +2,9 @@
 	path = src/models/sudormrf/base
 	url = https://github.com/Bendemeurichy/sudo_rm_rf.git
 
-[submodule "src/models/xumx/base"]
-	path = src/models/xumx/base
-	url = https://github.com/sevagh/xumx-sliCQ.git
+[submodule "src/models/tuss/base"]
+	path = src/models/tuss/base
+	url = https://github.com/merlresearch/unified-source-separation.git
 
 [submodule "src/models/clapsep/base"]
 	path = src/models/clapsep/base

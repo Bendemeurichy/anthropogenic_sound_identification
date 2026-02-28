@@ -22,8 +22,8 @@ import torchaudio
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from config import Config
-from train import create_model
+from .config import Config
+from .train import create_model
 
 # Check for environment variable to use old separation head
 USE_OLD_SEPARATION_HEAD = os.environ.get("USE_OLD_SEPARATION_HEAD", "0") == "1"
@@ -35,13 +35,13 @@ if USE_OLD_SEPARATION_HEAD:
     _BACKGROUND_HEAD_INDEX = 1
     _NUM_SOURCES = 2
 else:
-    from seperation_head import (
+    from .seperation_head import (
         BACKGROUND_HEAD_INDEX as _BACKGROUND_HEAD_INDEX,
     )
-    from seperation_head import (
+    from .seperation_head import (
         COI_HEAD_INDEX as _COI_HEAD_INDEX,
     )
-    from seperation_head import (
+    from .seperation_head import (
         NUM_SOURCES as _NUM_SOURCES,
     )
 

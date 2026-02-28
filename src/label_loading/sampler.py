@@ -96,6 +96,88 @@ def sample_non_coi(
     return result_df
 
 
+def assemble_aerosonic_experiment(
+    metadata_df: pd.DataFrame,
+    include_freesound_bg: bool = True,
+    include_aerosonic_bg: bool = True,
+    include_esc50_bg: bool = False,
+    random_state: int = 42,
+) -> dict:
+    """Assemble dataset pairs for the aerosonic experiment.
+
+    Returns a dict with keys:
+      - 'train_pairs': DataFrame of foreground/background pairs for training
+      - 'aerosonic_test': aerosonic test-split metadata (for model testing)
+      - 'risoux_test': risoux metadata (independent test set)
+
+    Pairing policy: each aerosonic train foreground (plane) is paired with a
+    randomly sampled background drawn from the requested background sources.
+    """
+    from sklearn.utils import resample
+
+    rng = random_state
+
+    # Foregrounds: aerosonic train planes
+    aero = metadata_df[metadata_df["dataset"] == "aerosonicdb"].copy()
+    aero_train_fg = aero[(aero["split"] == "train") & (aero["label"] == "plane")].copy()
+
+    # aerosonic test split for final evaluation
+    aerosonic_test = aero[aero["split"] == "test"].copy()
+
+    # risoux independent test set (if present)
+    risoux_test = metadata_df[metadata_df["dataset"] == "risoux_test"].copy()
+
+    # Build background pool
+    bg_datasets = []
+    if include_aerosonic_bg:
+        bg_datasets.append("aerosonicdb")
+    if include_freesound_bg:
+        bg_datasets.append("freesound")
+    if include_esc50_bg:
+        bg_datasets.append("esc50")
+
+    bg_pool = pd.DataFrame()
+    if bg_datasets:
+        bg_pool = metadata_df[metadata_df["dataset"].isin(bg_datasets)].copy()
+        # exclude plane foregrounds from background pool
+        bg_pool = bg_pool[
+            ~((bg_pool["dataset"] == "aerosonicdb") & (bg_pool["label"] == "plane"))
+        ]
+
+    if bg_pool.empty:
+        raise ValueError("No background samples found for requested background sources")
+
+    # For each foreground, sample a random background (with replacement if needed)
+    n_fg = len(aero_train_fg)
+    sampled_bg = resample(
+        bg_pool, replace=(len(bg_pool) < n_fg), n_samples=n_fg, random_state=rng
+    )
+
+    pairs = aero_train_fg.reset_index(drop=True).copy()
+    sampled_bg = sampled_bg.reset_index(drop=True).copy()
+
+    # Compose paired DataFrame
+    paired = pd.DataFrame(
+        {
+            "foreground_filename": pairs["filename"],
+            "foreground_dataset": pairs.get("dataset", ["aerosonicdb"] * n_fg),
+            "foreground_start": pairs.get("start_time"),
+            "foreground_end": pairs.get("end_time"),
+            "background_filename": sampled_bg["filename"],
+            "background_dataset": sampled_bg["dataset"],
+            "background_start": sampled_bg.get("start_time"),
+            "background_end": sampled_bg.get("end_time"),
+            "split": "train",
+        }
+    )
+
+    return {
+        "train_pairs": paired,
+        "aerosonic_test": aerosonic_test,
+        "risoux_test": risoux_test,
+    }
+
+
 def test_sampler():
     print("Loading dataset metadata...")
     # Use absolute path from project root

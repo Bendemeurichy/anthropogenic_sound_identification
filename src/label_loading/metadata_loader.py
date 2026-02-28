@@ -4,58 +4,42 @@ Filenames can be used to sample data for finetuning.
 """
 
 import pandas as pd
-from .load_audioset import load_audioset
+
+from .load_aerosonic_db import load_aerosonic_db
 from .load_esc50 import load_esc50
-from .load_fsd50k import load_fsd50k
-from .load_sounddesc import load_sounddesc
+from .load_freesound import load_freesound
+from .load_risoux_test import load_risoux_test
 
 # Dataset file configuration
 DATASET_CONFIG = {
-    "audioset": {
-        "train": "audioset/audioset_train_strong.tsv",
-        "eval": "audioset/audioset_eval_strong.tsv",
-        "labels": "audioset/mid_to_display_name.tsv",
-    },
     "esc50": {
         "metadata": "esc50/esc50.csv",
     },
-    "fsd50k": {
-        "dev": "fsd50k_labels/dev.csv",
-        "eval": "fsd50k_labels/eval.csv",
+    "aerosonicdb": {
+        "metadata": "aerosonicDB/sample_meta.csv",
     },
-    "sounddesc": {
-        "descriptions": "sounddesc/sounddescs_descriptions.pkl",
-        "categories": "sounddesc/sounddescs_categories.pkl",
-        "splits": "sounddesc/splits_sounddesc/group_filtered_split01",
+    "risoux_test": {
+        "metadata": "risoux_test/annotations.csv",
+    },
+    "freesound": {
+        "metadata": "freesound_curation/source_freesound_field_recordings_links.csv",
     },
 }
 
 # Audio file path prefixes for each dataset
 # Adjust these paths according to your actual data directory structure
 DATASET_AUDIO_PATHS = {
-    "audioset": {
-        "base": "audioset_strong/wavs",  # Base path for AudioSet audio files
-        "train": "train",  # train files in audioset/audio/train/
-        "val": "train",  # val files also in train directory
-        "test": "eval",  # test files in audioset/audio/eval/
-    },
     "esc50": {
         "base": "ESC-50-master/audio",  # Base path for ESC-50 audio files
-        "train": "",  # All files in esc50/audio/ directly
-        "val": "",
-        "test": "",
     },
-    "fsd50k": {
-        "base": "FSD50K/clips",  # Base path for FSD50K audio files
-        "train": "dev",  # train/val in fsd50k/audio/dev_audio/
-        "val": "dev",
-        "test": "eval",  # test in fsd50k/audio/eval_audio/
+    "aerosonicdb": {
+        "base": "AeroSonicDB/8371595/audio",  # Base path for AerosonicDB audio files
     },
-    "sounddesc": {
-        "base": "SoundDesc/audios",  # Base path for SoundDesc audio files
-        "train": "",  # All files in sounddesc/audio/ directly
-        "val": "",
-        "test": "",
+    "risoux_test": {
+        "base": "Risoux_test/10701274/audio_recordings",  # Base path for Risoux test audio files
+    },
+    "freesound": {
+        "base": "Backgrounds/Background/Background",  # Base path for Freesound audio files
     },
 }
 
@@ -74,30 +58,30 @@ def add_audio_file_paths(df: pd.DataFrame, audio_base_path: str) -> pd.DataFrame
 
     # Create a copy to avoid modifying the original
     df = df.copy()
-    
+
     # Build paths using a vectorized approach with groupby
     def build_path(row):
         dataset = row["dataset"]
         split = row["split"]
         filename = row["filename"]
-        
+
         if dataset not in DATASET_AUDIO_PATHS:
             return str(Path(audio_base_path) / filename)
-        
+
         dataset_config = DATASET_AUDIO_PATHS[dataset]
         base = dataset_config["base"]
         split_dir = dataset_config.get(split, "")
-        
+
         if split_dir:
             return str(Path(audio_base_path) / base / split_dir / filename)
         else:
             return str(Path(audio_base_path) / base / filename)
-    
+
     # Use vectorized operations by creating full paths with string formatting
     # This is more efficient than apply(axis=1) for large DataFrames
     for dataset in df["dataset"].unique():
         dataset_mask = df["dataset"] == dataset
-        
+
         if dataset not in DATASET_AUDIO_PATHS:
             # Fallback: just use base path + filename
             base_path_obj = Path(audio_base_path)
@@ -107,28 +91,26 @@ def add_audio_file_paths(df: pd.DataFrame, audio_base_path: str) -> pd.DataFrame
         else:
             dataset_config = DATASET_AUDIO_PATHS[dataset]
             base = dataset_config["base"]
-            
+
             # Process each split within this dataset
             for split in df.loc[dataset_mask, "split"].unique():
                 split_mask = dataset_mask & (df["split"] == split)
                 split_dir = dataset_config.get(split, "")
-                
+
                 if split_dir:
                     base_path_obj = Path(audio_base_path) / base / split_dir
                 else:
                     base_path_obj = Path(audio_base_path) / base
-                
+
                 # Use vectorized apply on filtered series
                 df.loc[split_mask, "filename"] = df.loc[split_mask, "filename"].apply(
                     lambda fname: str(base_path_obj / fname)
                 )
-    
+
     return df
 
 
-def load_metadata_datasets(
-    datasets_path: str, audio_base_path: str | None = None
-) -> pd.DataFrame:
+def load_metadata_datasets(datasets_path: str, audio_base_path: str) -> pd.DataFrame:
     """Loads labels from all datasets.
     Args:
         datasets_path: Path of directory containing label metadata files.
@@ -136,27 +118,24 @@ def load_metadata_datasets(
     Returns:
         pandas.DataFrame: DataFrame containing all labels.
     """
-    audioset = load_audioset(
-        f"{datasets_path}/{DATASET_CONFIG['audioset']['train']}",
-        f"{datasets_path}/{DATASET_CONFIG['audioset']['eval']}",
-        f"{datasets_path}/{DATASET_CONFIG['audioset']['labels']}",
-    )
     esc50 = load_esc50(f"{datasets_path}/{DATASET_CONFIG['esc50']['metadata']}")
-    fsd50k = load_fsd50k(
-        f"{datasets_path}/{DATASET_CONFIG['fsd50k']['dev']}",
-        f"{datasets_path}/{DATASET_CONFIG['fsd50k']['eval']}",
+
+    #! Aerosonic for plane experiment
+    aerosonic = load_aerosonic_db(
+        f"{datasets_path}/{DATASET_CONFIG['aerosonicdb']['metadata']}"
     )
-    sounddesc = load_sounddesc(
-        f"{datasets_path}/{DATASET_CONFIG['sounddesc']['descriptions']}",
-        f"{datasets_path}/{DATASET_CONFIG['sounddesc']['categories']}",
-        f"{datasets_path}/{DATASET_CONFIG['sounddesc']['splits']}",
+    risoux = load_risoux_test(
+        f"{datasets_path}/{DATASET_CONFIG['risoux_test']['metadata']}"
     )
 
-    master_set = pd.concat([audioset, esc50, fsd50k, sounddesc], ignore_index=True)
+    freesound = load_freesound(
+        audio_base_path=f"{audio_base_path}/{DATASET_AUDIO_PATHS['freesound']['base']}",
+        metadata=f"{datasets_path}/{DATASET_CONFIG['freesound']['metadata']}",
+    )
 
-    # Add full file paths if audio_base_path is provided
-    if audio_base_path:
-        master_set = add_audio_file_paths(master_set, audio_base_path)
+    master_set = pd.concat([esc50, aerosonic, risoux, freesound], ignore_index=True)
+
+    master_set = add_audio_file_paths(master_set, audio_base_path)
 
     return master_set
 
@@ -177,15 +156,15 @@ def split_seperation_classification(
     val_df = master_set[master_set["split"] == "val"].copy()
     test_df = master_set[master_set["split"] == "test"].copy()
 
-    # Shuffle and split train into 70-30 for separation vs classification
+    # Shuffle and split train into 80-20 for separation vs classification
     train_shuffled = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
-    train_sep_size = int(0.7 * len(train_shuffled))
+    train_sep_size = int(0.8 * len(train_shuffled))
     separation_train = train_shuffled.iloc[:train_sep_size].copy()
     classification_train = train_shuffled.iloc[train_sep_size:].copy()
 
-    # Shuffle and split val into 70-30 for separation vs classification
+    # Shuffle and split val into 80-20 for separation vs classification
     val_shuffled = val_df.sample(frac=1, random_state=43).reset_index(drop=True)
-    val_sep_size = int(0.7 * len(val_shuffled))
+    val_sep_size = int(0.8 * len(val_shuffled))
     separation_val = val_shuffled.iloc[:val_sep_size].copy()
     classification_val = val_shuffled.iloc[val_sep_size:].copy()
 

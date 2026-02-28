@@ -636,23 +636,23 @@ if __name__ == "__main__":
     # main()
     wav_files = [
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_coi_clean_1.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/clean_sep/clean_coi_1.wav"
         ),
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_bg_clean_1.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/clean_sep/separated_coi_head_1.wav"
         ),
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_created_1.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/clean_sep/separated_src1_1.wav"
         ),
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_separated_coi_head_1.wav"
-        ),
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_train/mixture_sep/mixture_separated_src1_1.wav"
-        ),
+        # Path(
+        #     "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/mixture_sep/mixture_separated_coi_head_1.wav"
+        # ),
+        # Path(
+        #     "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/mixture_sep/mixture_separated_src1_1.wav"
+        # ),
     ]
     plot_combined_spectrograms_from_wavs(
         wav_files,
-        Path("separation_output_demo/combined_mixture.png"),
-        titles=["Train", "Background", "Mixture", "Separated", "Background"],
+        Path("separation_output_demo/combined_clean_plane.png"),
+        titles=["Train", "Separated", "Background"],
     )
