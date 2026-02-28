@@ -52,7 +52,7 @@ def load_freesound(audio_base_path: str, metadata: str | None) -> pd.DataFrame:
     return df
 
 
-def resolve_labels(filenames: list[str], metadata: str | None) -> pd.DataFrame:
+def resolve_labels(filepaths: list[str], metadata: str | None) -> pd.DataFrame:
     """Resolve labels for a list of filenames based on the metadata csv.
     Args:
         filenames: List of audio filenames to resolve labels for.
@@ -60,16 +60,29 @@ def resolve_labels(filenames: list[str], metadata: str | None) -> pd.DataFrame:
     Returns:
         pandas.DataFrame: DataFrame containing filename and labels for each sample.
     """
-    pass
+    metadata_df = pd.read_csv(metadata)
+
+    labels = []
+    for filepath in filepaths:
+        label = _resolve_label(filepath, metadata_df)
+        labels.append(label)
+
+    df = pd.DataFrame({"filename": filepaths, "label": labels})
+
+    return df
 
 
-def _resolve_label(filename: str, metadata: pd.DataFrame) -> list[str]:
+def _resolve_label(filepath: str, metadata: pd.DataFrame) -> list[str]:
     """Function that returns the labels of one single file based on the metadata.
     Args:
         filename: Name of the audio file, used to match with metadata.
         metadata: DataFrame containing the metadata for all samples, including labels.
     """
-    pass
+
+    filename = Path(filepath).name
+    index = _get_index(filename)
+    label = metadata.loc[metadata["index"] == index, "labels"].values
+    return [label]
 
 
 def _get_index(filename: str) -> int:
