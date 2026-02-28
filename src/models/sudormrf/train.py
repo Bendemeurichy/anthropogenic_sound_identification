@@ -1204,6 +1204,16 @@ def main():
     if (~sampled_df["file_exists"]).any():
         missing = (~sampled_df["file_exists"]).sum()
         print(f"⚠️  Found {missing} missing files, dropping...")
+        for dataset in ["esc50", "aerosonicdb", "freesound", "risoux_test"]:
+            if (
+                ~sampled_df["file_exists"] & sampled_df["dataset"].str.contains(dataset)
+            ).any():
+                print(
+                    f"  - {dataset}: {(~sampled_df['file_exists'] & sampled_df['dataset'].str.contains(dataset)).sum()} missing"
+                )
+                print(
+                    f"  - file format of missing file is {sampled_df[~sampled_df['file_exists'] & sampled_df['dataset'].str.contains(dataset)][0]}"
+                )
         sampled_df = sampled_df[sampled_df["file_exists"]]
     sampled_df = sampled_df.drop(columns=["file_exists"])
     print(f"✅ Final dataset: {len(sampled_df)} samples")

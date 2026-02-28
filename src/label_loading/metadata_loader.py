@@ -119,19 +119,37 @@ def load_metadata_datasets(datasets_path: str, audio_base_path: str) -> pd.DataF
         pandas.DataFrame: DataFrame containing all labels.
     """
     esc50 = load_esc50(f"{datasets_path}/{DATASET_CONFIG['esc50']['metadata']}")
+    print(f"Found {len(esc50)} samples in ESC-50 dataset.")
+    print(f"For train set: {len(esc50[esc50['split'] == 'train'])} samples")
+    print(f"For val set: {len(esc50[esc50['split'] == 'val'])} samples")
+    print(f"For test set: {len(esc50[esc50['split'] == 'test'])} samples")
 
     #! Aerosonic for plane experiment
     aerosonic = load_aerosonic_db(
         f"{datasets_path}/{DATASET_CONFIG['aerosonicdb']['metadata']}"
     )
+    print(f"Found {len(aerosonic)} samples in AerosonicDB dataset.")
+    print(f"For train set: {len(aerosonic[aerosonic['split'] == 'train'])} samples")
+    print(f"For val set: {len(aerosonic[aerosonic['split'] == 'val'])} samples")
+    print(f"For test set: {len(aerosonic[aerosonic['split'] == 'test'])} samples")
+
     risoux = load_risoux_test(
         f"{datasets_path}/{DATASET_CONFIG['risoux_test']['metadata']}"
     )
+    print("Risoux is only for testing, check this.")
+    print(f"Found {len(risoux)} samples in Risoux test dataset.")
+    print(f"For train set: {len(risoux[risoux['split'] == 'train'])} samples")
+    print(f"For val set: {len(risoux[risoux['split'] == 'val'])} samples")
+    print(f"For test set: {len(risoux[risoux['split'] == 'test'])} samples")
 
     freesound = load_freesound(
         audio_base_path=f"{audio_base_path}/{DATASET_AUDIO_PATHS['freesound']['base']}",
         metadata=f"{datasets_path}/{DATASET_CONFIG['freesound']['metadata']}",
     )
+    print(f"Found {len(freesound)} background samples in Freesound dataset.")
+    print(f"For train set: {len(freesound[freesound['split'] == 'train'])} samples")
+    print(f"For val set: {len(freesound[freesound['split'] == 'val'])} samples")
+    print(f"For test set: {len(freesound[freesound['split'] == 'test'])} samples")
 
     master_set = pd.concat([esc50, aerosonic, risoux, freesound], ignore_index=True)
 
