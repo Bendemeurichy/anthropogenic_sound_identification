@@ -10,13 +10,7 @@ data:
   # were targeted.
   target_classes:
     - "airplane"
-    - "Aircraft"
-    - "Fixed-wing aircraft, airplane"
-    - "Aircraft engine"
-    - "Fixed-wing_aircraft_and_airplane"
-    - "Helicopter"
-    - "helicopter"
-    - "Propeller airscrew"
+    - "Airplane"
   background_only_prob: 0.15
   # How many non-COI files to sum for background-only examples
   background_mix_n: 2
