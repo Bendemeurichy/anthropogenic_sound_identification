@@ -31,6 +31,14 @@ def load_aerosonic_db(path: str) -> pd.DataFrame:
     # Build filename (keep existing behavior of leading slash)
     df["filename"] = prefix + df["filename"].astype(str)
 
+    # Assing a 80-20 train-val split on the training samples (test samples should remain unchanged)
+    train_df = df[df["split"] == "train"].copy()
+    train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
+    val_size = int(0.2 * len(train_df))
+    train_df.loc[:val_size, "split"] = "val"
+    train_df.loc[val_size:, "split"] = "train"
+    df.update(train_df)
+
     df["dataset"] = "aerosonicdb"
     df["label"] = df["class"].apply(lambda x: "airplane" if x == 1 else "background")
     df["start_time"] = df["offset"].apply(lambda x: str(x))
@@ -40,7 +48,7 @@ def load_aerosonic_db(path: str) -> pd.DataFrame:
 
 
 def test_load_aerosonic_db():
-    path = "../../data/metadata/aerosonicDB/sample_meta.csv"
+    path = "/home/bendm/Thesis/project/code/data/metadata/aerosonicDB/sample_meta.csv"
     df = load_aerosonic_db(path)
     assert not df.empty, "DataFrame should not be empty"
     assert any(
@@ -60,11 +68,21 @@ def test_load_aerosonic_db():
         "Dataset column should only contain 'aerosonicdb'"
     )
     assert set(df["label"].unique()) == {
-        "plane",
+        "airplane",
         "background",
-    }, "Label column should only contain 'plane' and 'background'"
+    }, "Label column should only contain 'airplane' and 'background'"
 
     print("All tests passed for load_aerosonic_db!")
+    print(
+        f"training airplane samples: {len(df[df['split'] == 'train'][df['label'] == 'airplane'])}"
+    )
+    print(
+        f"validation airplane samples: {len(df[df['split'] == 'val'][df['label'] == 'airplane'])}"
+    )
+    print(
+        f"testing airplane samples: {len(df[df['split'] == 'test'][df['label'] == 'airplane'])}"
+    )
+
     print(df.head())
 
 
