@@ -1166,7 +1166,7 @@ def main():
     separation_metadata, _ = split_seperation_classification(all_metadata)
 
     print(f"Loaded {len(all_metadata)} total samples")
-    print(f"Using {len(separation_metadata)} for separation training (70%)")
+    print(f"Using {len(separation_metadata)} for separation training (80%)")
 
     # Target classes are now specified in the configuration YAML.  Read them
     # from the loaded config object rather than hard-coding them here.
