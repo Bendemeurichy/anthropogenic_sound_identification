@@ -1,9 +1,8 @@
 """Load plane COI samples from aerosonicdb. Samples should only be used as foreground samples."""
 
-import json
-import os
 from typing import List, Optional
 
+import numpy as np
 import pandas as pd
 
 
@@ -26,18 +25,24 @@ def load_aerosonic_db(path: str) -> pd.DataFrame:
 
     # Coerce to numeric (handles "1"/"0" strings), treat invalid/missing as 0 (background)
     cls = pd.to_numeric(df["class"], errors="coerce").fillna(0).astype(int)
-    prefix = cls.map({1: "/1/", 0: "/0/"})
+    prefix = cls.map({1: "1/", 0: "0/"})
 
     # Build filename (keep existing behavior of leading slash)
     df["filename"] = prefix + df["filename"].astype(str)
 
     # Assing a 80-20 train-val split on the training samples (test samples should remain unchanged)
-    train_df = df[df["split"] == "train"].copy()
-    train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
-    val_size = int(0.2 * len(train_df))
-    train_df.loc[:val_size, "split"] = "val"
-    train_df.loc[val_size:, "split"] = "train"
-    df.update(train_df)
+    train_mask = df["split"] == "train"
+    train_indices = df[train_mask].index.to_numpy()
+
+    _rng = np.random.default_rng(42)
+    shuffled_train_idx = _rng.permutation(train_indices)
+
+    val_size = int(0.2 * len(shuffled_train_idx))
+    # default all to train, then mark val indices explicitly
+    df.loc[train_indices, "split"] = "train"
+    if val_size > 0:
+        val_idx = shuffled_train_idx[:val_size]
+        df.loc[val_idx, "split"] = "val"
 
     df["dataset"] = "aerosonicdb"
     df["label"] = df["class"].apply(lambda x: "airplane" if x == 1 else "background")

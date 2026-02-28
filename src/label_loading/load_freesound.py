@@ -34,20 +34,26 @@ def load_freesound(audio_base_path: str, metadata: str | None) -> pd.DataFrame:
     df["start_time"] = 0.0
     df["end_time"] = None
 
-    # assign randomly 80-20 train-test split
+    # assign randomly 80-20 train-test split (robust, positional indexing)
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
     test_size = int(0.2 * len(df))
-    df.loc[:test_size, "split"] = "test"
-    df.loc[test_size:, "split"] = "train"
 
-    # assign 80-20 train-validation split to training set randomly
-    train_df = df[df["split"] == "train"].copy()
-    train_df = train_df.sample(frac=1, random_state=43).reset_index(drop=True)
-    val_size = int(0.2 * len(train_df))
-    train_df.loc[:val_size, "split"] = "val"
-    train_df.loc[val_size:, "split"] = "train"
+    # default everything to 'train', then mark the first `test_size` rows as 'test'
+    df["split"] = "train"
+    if test_size > 0:
+        df.iloc[:test_size, df.columns.get_loc("split")] = "test"
 
-    df.update(train_df)
+    # assign 80-20 train-validation split to training set (keep original indices)
+    train_idx = df[df["split"] == "train"].index.to_numpy()
+    # shuffle those indices deterministically
+    import numpy as _np
+    _rng = _np.random.default_rng(42)
+    shuffled_train_idx = _rng.permutation(train_idx)
+    val_size = int(0.2 * len(shuffled_train_idx))
+    if val_size > 0:
+        val_idx = shuffled_train_idx[:val_size]
+        df.loc[val_idx, "split"] = "val"
+
 
     return df
 
