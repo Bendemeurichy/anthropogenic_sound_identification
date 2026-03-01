@@ -1,8 +1,73 @@
 """Sampler function that samples all samples from the datasets containing the class of interest and sample non-interest samples to the desired ratio."""
 
+import os
+import struct
+
+import numpy as np
 import pandas as pd
 
 from .metadata_loader import load_metadata_datasets, split_seperation_classification
+
+
+def _get_wav_duration_fast(filepath: str) -> float:
+    """Fast extraction of wav file duration by reading its header."""
+    try:
+        size = os.path.getsize(filepath)
+        if size < 44:
+            return 5.0
+
+        with open(filepath, "rb") as f:
+            header = f.read(44)
+
+        if header[0:4] != b"RIFF" or header[8:12] != b"WAVE":
+            return 5.0
+
+        # simple assumption for standard 44-byte header:
+        byte_rate = struct.unpack("<I", header[28:32])[0]
+        if byte_rate > 0:
+            return max(0.1, (size - 44) / byte_rate)
+    except Exception:
+        pass
+
+    try:
+        import torchaudio
+
+        info = torchaudio.info(filepath)
+        return info.num_frames / info.sample_rate
+    except Exception:
+        return 5.0
+
+
+def add_durations(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure that the 'duration' column is populated."""
+    df = df.copy()
+    if "duration" not in df.columns:
+        df["duration"] = pd.NA
+
+    def get_duration(row):
+        if pd.notna(row.get("duration")):
+            return float(row["duration"])
+        if pd.notna(row.get("start_time")) and pd.notna(row.get("end_time")):
+            try:
+                return float(row["end_time"]) - float(row["start_time"])
+            except (ValueError, TypeError):
+                pass
+        return _get_wav_duration_fast(row["filename"])
+
+    mask = df["duration"].isna()
+    if mask.any():
+        print(
+            f"Calculating durations for {mask.sum()} files... (This may take a moment)"
+        )
+        try:
+            from tqdm import tqdm
+
+            tqdm.pandas(desc="Computing durations")
+            df.loc[mask, "duration"] = df[mask].progress_apply(get_duration, axis=1)
+        except ImportError:
+            df.loc[mask, "duration"] = df[mask].apply(get_duration, axis=1)
+
+    return df
 
 
 def get_coi(metadata_df: pd.DataFrame, target_class: list[str]) -> pd.DataFrame:
@@ -42,43 +107,82 @@ def sample_non_coi(
     metadata_df: pd.DataFrame,
     coi_df: pd.DataFrame,
     coi_ratio: float = 0.25,
+    segment_duration: float = 5.0,
+    segment_stride: float = 5.0,
 ) -> pd.DataFrame:
     """Sample non-class-of-interest (non-COI) samples to achieve the desired COI ratio.
     Args:
         metadata_df: DataFrame containing all dataset metadata.
         coi_df: DataFrame containing all samples with the class of interest.
         coi_ratio: Desired ratio of COI samples in the final sampled dataset.
+        segment_duration: Length of segments in seconds.
+        segment_stride: Stride between segments in seconds.
     Returns:
         pandas.DataFrame: DataFrame containing sampled non-COI samples.
     Raises:
         ValueError: If not enough non-COI samples available in any split.
     """
+    metadata_df = add_durations(metadata_df)
+
+    # Evaluate estimated segments for COI files to calculate the target non-COI segments
+    coi_df = coi_df.copy()
+    coi_df["duration"] = metadata_df.loc[coi_df.index, "duration"]
+
+    def est_segments(dur):
+        if pd.isna(dur):
+            return 1
+        dur = max(0.1, float(dur))
+        if dur < segment_duration:
+            return 1
+        return 1 + int((dur - segment_duration) / segment_stride)
+
+    metadata_df["est_segments"] = metadata_df["duration"].apply(est_segments)
+    coi_df["est_segments"] = coi_df["duration"].apply(est_segments)
+
     sampled_dfs = [coi_df]
 
     print(f"\nSampling non-COI with target ratio: {coi_ratio}")
 
     for split in ["train", "val", "test"]:
         coi_split_df = coi_df[coi_df["split"] == split]
-        num_coi = len(coi_split_df)
-        num_non_coi_needed = int(num_coi * ((1 - coi_ratio) / coi_ratio))
+        num_coi_segments = coi_split_df["est_segments"].sum()
+        num_non_coi_segments_needed = int(
+            num_coi_segments * ((1 - coi_ratio) / coi_ratio)
+        )
 
         non_coi_split_df = metadata_df[
             (metadata_df["split"] == split) & (~metadata_df.index.isin(coi_df.index))
         ]
 
         print(f"  {split}:")
-        print(f"    COI samples: {num_coi}")
-        print(f"    Non-COI needed: {num_non_coi_needed}")
-        print(f"    Non-COI available: {len(non_coi_split_df)}")
+        print(f"    COI files: {len(coi_split_df)} (Est. segments: {num_coi_segments})")
+        print(f"    Non-COI segments needed: {num_non_coi_segments_needed}")
 
-        if len(non_coi_split_df) < num_non_coi_needed:
-            raise ValueError(
-                f"Insufficient non-COI samples in {split}: "
-                f"need {num_non_coi_needed}, have {len(non_coi_split_df)}"
+        shuffled_non_coi = non_coi_split_df.sample(frac=1, random_state=42)
+        cumulative_segments = shuffled_non_coi["est_segments"].cumsum()
+
+        mask = cumulative_segments <= num_non_coi_segments_needed
+        num_files_needed = mask.sum() + 1
+
+        if num_files_needed > len(shuffled_non_coi):
+            num_files_needed = len(shuffled_non_coi)
+            total_avail = (
+                cumulative_segments.iloc[-1] if len(cumulative_segments) > 0 else 0
             )
+            if total_avail < num_non_coi_segments_needed:
+                print(
+                    f"    Warning: Insufficient non-COI segments in {split}. Needed {num_non_coi_segments_needed}, have {total_avail} across {len(shuffled_non_coi)} files."
+                )
 
-        sampled_non_coi_split_df = non_coi_split_df.sample(
-            n=num_non_coi_needed, random_state=42
+        sampled_non_coi_split_df = shuffled_non_coi.head(num_files_needed)
+        actual_segments_sampled = (
+            sampled_non_coi_split_df["est_segments"].sum()
+            if len(sampled_non_coi_split_df) > 0
+            else 0
+        )
+
+        print(
+            f"    Non-COI files sampled: {len(sampled_non_coi_split_df)} (Est. segments: {actual_segments_sampled})"
         )
         sampled_dfs.append(sampled_non_coi_split_df)
 
@@ -87,11 +191,17 @@ def sample_non_coi(
     # binary indicator – the validation/plotting code can then report which
     # original classes were confused.
     result_df["orig_label"] = result_df["label"]
-    print(f"\nTotal sampled dataset: {len(result_df)} samples")
+
+    print(f"\nTotal sampled dataset: {len(result_df)} files")
+    total_segments = result_df["est_segments"].sum()
+    print(f"Total estimated segments: {total_segments}")
+
     print("  By split:")
     for split in ["train", "val", "test"]:
-        split_count = len(result_df[result_df["split"] == split])
-        print(f"    {split}: {split_count}")
+        split_df = result_df[result_df["split"] == split]
+        print(
+            f"    {split}: {len(split_df)} files ({split_df['est_segments'].sum()} segments)"
+        )
 
     return result_df
 

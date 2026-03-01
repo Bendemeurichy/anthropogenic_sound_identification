@@ -307,6 +307,14 @@ class AudioDataset(Dataset):
         self.coi_files = split_df.loc[coi_mask, "filename"].tolist()
         self.non_coi_files = split_df.loc[~coi_mask, "filename"].tolist()
 
+        self.file_to_bounds = {}
+        if "start_time" in split_df.columns or "end_time" in split_df.columns:
+            for _, row in split_df.iterrows():
+                fname = row["filename"]
+                st = float(row["start_time"]) if pd.notna(row.get("start_time")) else 0.0
+                et = float(row["end_time"]) if pd.notna(row.get("end_time")) else None
+                self.file_to_bounds[fname] = (st, et)
+
         # File to class mapping for multi-class
         self.file_to_class = {}
         if n_coi_classes > 1 and "coi_class" in split_df.columns:
@@ -371,6 +379,9 @@ class AudioDataset(Dataset):
         segments = []
         for filepath in self.coi_files:
             class_idx = int(self.file_to_class.get(filepath, 0))
+            bounds = self.file_to_bounds.get(filepath, (0.0, None))
+            start_sec, end_sec = bounds
+            
             try:
                 info = torchaudio.info(filepath)
                 orig_sr = info.sample_rate
@@ -382,14 +393,21 @@ class AudioDataset(Dataset):
                     1, int(self.segment_stride_samples * orig_sr / self.sample_rate)
                 )
 
+                start_frame = int(start_sec * orig_sr)
+                end_frame = int(end_sec * orig_sr) if end_sec is not None else num_frames
+                end_frame = min(end_frame, num_frames)
+                
+                valid_frames = max(0, end_frame - start_frame)
+
                 n_segs = (
                     1
-                    if num_frames <= seg_frames
-                    else 1 + max(0, (num_frames - seg_frames) // stride_frames)
+                    if valid_frames <= seg_frames
+                    else 1 + max(0, (valid_frames - seg_frames) // stride_frames)
                 )
                 for s in range(n_segs):
+                    offset = start_frame + s * stride_frames
                     segments.append(
-                        (filepath, s * stride_frames, seg_frames, class_idx)
+                        (filepath, offset, seg_frames, class_idx)
                     )
             except Exception:
                 segments.append((filepath, 0, None, class_idx))
@@ -412,6 +430,9 @@ class AudioDataset(Dataset):
         num_frames: int | None = None,
     ) -> torch.Tensor:
         """Load and preprocess audio segment."""
+        bounds = getattr(self, "file_to_bounds", {}).get(filepath, (0.0, None))
+        start_sec, end_sec = bounds
+        
         try:
             info = torchaudio.info(filepath)
             orig_sr = info.sample_rate
@@ -419,11 +440,17 @@ class AudioDataset(Dataset):
                 1, int(self.segment_samples * orig_sr / self.sample_rate)
             )
 
+            start_frame = int(start_sec * orig_sr)
+            total_frames = int(info.num_frames)
+            end_frame = int(end_sec * orig_sr) if end_sec is not None else total_frames
+            end_frame = min(end_frame, total_frames)
+
             if frame_offset is None:
-                max_offset = max(0, int(info.num_frames) - seg_frames)
-                offset = (
-                    int(self._rng.integers(0, max_offset + 1)) if max_offset > 0 else 0
-                )
+                max_offset = max(start_frame, end_frame - seg_frames)
+                if max_offset > start_frame:
+                    offset = int(self._rng.integers(start_frame, max_offset + 1))
+                else:
+                    offset = start_frame
             else:
                 offset = int(frame_offset)
 
@@ -438,12 +465,17 @@ class AudioDataset(Dataset):
                 1, int(self.segment_samples * orig_sr / self.sample_rate)
             )
             num_actual_frames = waveform.shape[-1]
+            
+            start_frame = int(start_sec * orig_sr)
+            end_frame = int(end_sec * orig_sr) if end_sec is not None else num_actual_frames
+            end_frame = min(end_frame, num_actual_frames)
 
             if frame_offset is None:
-                max_offset = max(0, num_actual_frames - seg_frames)
-                offset = (
-                    int(self._rng.integers(0, max_offset + 1)) if max_offset > 0 else 0
-                )
+                max_offset = max(start_frame, end_frame - seg_frames)
+                if max_offset > start_frame:
+                    offset = int(self._rng.integers(start_frame, max_offset + 1))
+                else:
+                    offset = start_frame
             else:
                 offset = int(frame_offset)
 
