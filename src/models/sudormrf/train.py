@@ -183,12 +183,21 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     sisnr_db = 10.0 * torch.log10(sisnr_lin + eps)
 
     # Handle silent/weak targets
-    # For truly silent targets, reward low output energy with scores up to 12 dB
-    # This ensures background-only samples can achieve comparable loss to COI samples
-    # Cap at 12 dB to stay balanced with class_weight=1.2 and typical COI SI-SNR (~10-12 dB)
-    silence_score = torch.clamp(
-        -10.0 * torch.log10(est_energy / min_energy + eps), min=-30.0, max=12.0
-    )
+    # For truly silent targets, reward low output energy with scores up to 12 dB.
+    #
+    # Key design constraints:
+    #   1. Standard SI-SNR gives zero gradient when target == 0 (s_true = 0 always),
+    #      so we need a separate energy-based penalty for silent targets.
+    #   2. Use MEAN energy (not sum) so the score is T-independent and comparable
+    #      in magnitude to typical SI-SNR values.
+    #   3. NO lower clamp here — the outer return clamp handles the reporting floor.
+    #      A min clamp here would kill the gradient whenever the score falls below it,
+    #      which for a unit-variance output (mean_energy ≈ 1) would be:
+    #          -10 * log10(1 + eps) ≈ 0 dB  → NOT clamped → gradient flows ✓
+    #      With the old sum-based formula and min=-30 clamp the score was always
+    #      ≈ -60 dB → clamped to -30 → zero gradient on every background-only sample.
+    est_mean_energy = est_zm.pow(2).mean(dim=-1)
+    silence_score = torch.clamp(-10.0 * torch.log10(est_mean_energy + eps), max=12.0)
     sisnr_db = torch.where(target_is_zero, silence_score, sisnr_db)
     sisnr_db = torch.where(
         target_is_weak & ~target_is_zero, torch.clamp(sisnr_db, -20.0, 20.0), sisnr_db
@@ -1045,7 +1054,12 @@ def validate_epoch(
     """Validate for one epoch."""
     model.eval()
     running_loss, n_samples = 0.0, 0
-    all_coi_sisnr, all_bg_sisnr = [], []
+    # Split COI metrics into COI-present vs COI-absent (background-only) samples
+    # so the reported number reflects actual separation quality, not a blend of
+    # the two very different regimes.
+    all_coi_present_sisnr: list[float] = []
+    all_coi_absent_sisnr: list[float] = []
+    all_bg_sisnr: list[float] = []
 
     use_amp = use_amp and str(device).startswith("cuda")
     autocast_ctx = (
@@ -1074,18 +1088,47 @@ def validate_epoch(
             running_loss += batch_loss * B
             n_samples += B
 
-            # SI-SNR metrics
+            # SI-SNR metrics - separate COI-present from COI-absent samples
             try:
                 n_src = outputs.shape[1]
-                coi_sisnr = torch.stack(
-                    [sisnr(outputs[:, i], clean_wavs[:, i]) for i in range(n_src - 1)]
-                ).mean()
+
+                # Aggregate SI-SNR across all COI heads (index 0 .. n_src-2)
+                # Shape: (n_coi_heads, B)
+                coi_per_sample = torch.stack(
+                    [sisnr(outputs[:, i], clean_wavs[:, i]) for i in range(n_src - 1)],
+                    dim=0,
+                ).mean(dim=0)  # (B,)
+
+                # Determine which samples have a real COI target
+                # Use the mean energy across all COI heads for the check
+                coi_target_energy = torch.stack(
+                    [clean_wavs[:, i].pow(2).mean(dim=-1) for i in range(n_src - 1)],
+                    dim=0,
+                ).mean(dim=0)  # (B,)
+                coi_present_mask = coi_target_energy > SILENCE_ENERGY_EPS  # (B,)
+
+                if coi_present_mask.any():
+                    all_coi_present_sisnr.append(
+                        float(coi_per_sample[coi_present_mask].mean().item())
+                    )
+                if (~coi_present_mask).any():
+                    all_coi_absent_sisnr.append(
+                        float(coi_per_sample[~coi_present_mask].mean().item())
+                    )
+
                 bg_sisnr = sisnr(outputs[:, -1], clean_wavs[:, -1]).mean()
-                all_coi_sisnr.append(float(coi_sisnr.item()))
                 all_bg_sisnr.append(float(bg_sisnr.item()))
+
+                # Progress bar shows the COI-present SI-SNR when available,
+                # falling back to the full batch average otherwise
+                coi_display = (
+                    coi_per_sample[coi_present_mask].mean()
+                    if coi_present_mask.any()
+                    else coi_per_sample.mean()
+                )
                 pbar.set_postfix(
                     loss=f"{batch_loss:.4f}",
-                    coi=f"{coi_sisnr.item():.2f}",
+                    coi=f"{coi_display.item():.2f}",
                     bg=f"{bg_sisnr.item():.2f}",
                 )
             except Exception:
@@ -1093,9 +1136,19 @@ def validate_epoch(
 
             del outputs, loss, mixture, clean_wavs
 
-    if all_coi_sisnr and all_bg_sisnr:
+    if all_bg_sisnr:
+        coi_present_str = (
+            f"{np.mean(all_coi_present_sisnr):.2f} dB"
+            if all_coi_present_sisnr
+            else "n/a"
+        )
+        coi_absent_str = (
+            f"{np.mean(all_coi_absent_sisnr):.2f} dB" if all_coi_absent_sisnr else "n/a"
+        )
         print(
-            f"  Val SI-SNR - COI: {np.mean(all_coi_sisnr):.2f} dB, BG: {np.mean(all_bg_sisnr):.2f} dB"
+            f"  Val SI-SNR - COI (present): {coi_present_str}, "
+            f"COI (absent/suppression): {coi_absent_str}, "
+            f"BG: {np.mean(all_bg_sisnr):.2f} dB"
         )
 
     return running_loss / max(n_samples, 1)
