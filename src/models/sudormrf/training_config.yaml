@@ -11,6 +11,7 @@ data:
   target_classes:
     - "airplane"
     - "Airplane"
+    - "plane"
   background_only_prob: 0.15
   # How many non-COI files to sum for background-only examples
   background_mix_n: 2
@@ -59,6 +60,6 @@ training:
   compile_backend: "eager"
   class_weight: 1.4
   aux_waveform_weight: 0.0
-  warmup_steps: 300
+  warmup_steps: 600
   validate_every_n_epochs: 1
   seed: 42

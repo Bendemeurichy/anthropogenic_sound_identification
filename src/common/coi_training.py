@@ -332,8 +332,11 @@ class COIAudioDataset(Dataset):
                 + 0.5
             )
 
-        # Precompute segments for validation/test
+        # Precompute segments for validation/test, or for long files in train
         self.coi_segments = self._compute_segments(split_df)
+
+        if self.split == "train":
+            self.coi_segments_train_files = [seg[0] for seg in self.coi_segments]
 
         # Print stats
         if n_coi_classes > 1 and "coi_class" in split_df.columns:
@@ -346,12 +349,12 @@ class COIAudioDataset(Dataset):
             )
         else:
             print(
-                f"{split} set: {len(self.coi_files)} COI, {len(self.non_coi_files)} non-COI"
+                f"{split} set: {len(self.coi_files)} unique COI files ({len(self.coi_segments)} segments), {len(self.non_coi_files)} non-COI files"
             )
-            if self.augment_multiplier > 1:
+            if self.split == "train" and self.augment_multiplier > 1:
                 print(
                     f"  → With {self.augment_multiplier}x augmentation: "
-                    f"{len(self.coi_files) * self.augment_multiplier} effective samples"
+                    f"{len(self.coi_segments_train_files) * self.augment_multiplier} effective epoch steps"
                 )
 
     def _compute_segments(
@@ -387,16 +390,19 @@ class COIAudioDataset(Dataset):
 
     def __len__(self):
         if self.split == "train":
-            if self.coi_files:
+            if self.coi_segments_train_files:
                 return (
-                    len(self.coi_files) * self.augment_multiplier
+                    len(self.coi_segments_train_files) * self.augment_multiplier
                     + self._extra_background_count
                 )
             return len(self.non_coi_files)
         return len(self.coi_segments)
 
     def _load_audio(
-        self, filepath: str, frame_offset: int = 0, num_frames: int | None = None
+        self,
+        filepath: str,
+        frame_offset: int | None = None,
+        num_frames: int | None = None,
     ) -> torch.Tensor:
         """Load and preprocess audio segment.
 
@@ -409,12 +415,36 @@ class COIAudioDataset(Dataset):
             seg_frames = num_frames or max(
                 1, int(self.segment_samples * orig_sr / self.sample_rate)
             )
+
+            if frame_offset is None:
+                max_offset = max(0, int(info.num_frames) - seg_frames)
+                offset = (
+                    int(np.random.randint(0, max_offset + 1)) if max_offset > 0 else 0
+                )
+            else:
+                offset = int(frame_offset)
+
             waveform, sr = torchaudio.load(
-                filepath, frame_offset=int(frame_offset), num_frames=int(seg_frames)
+                filepath, frame_offset=offset, num_frames=int(seg_frames)
             )
         except Exception:
             waveform, sr = torchaudio.load(filepath)
             orig_sr = sr
+
+            seg_frames = num_frames or max(
+                1, int(self.segment_samples * orig_sr / self.sample_rate)
+            )
+            num_actual_frames = waveform.shape[-1]
+
+            if frame_offset is None:
+                max_offset = max(0, num_actual_frames - seg_frames)
+                offset = (
+                    int(np.random.randint(0, max_offset + 1)) if max_offset > 0 else 0
+                )
+            else:
+                offset = int(frame_offset)
+
+            waveform = waveform[..., offset : offset + seg_frames]
 
         # Resample if needed
         if sr != self.sample_rate:
@@ -454,32 +484,18 @@ class COIAudioDataset(Dataset):
         background = None
 
         if self.split == "train":
-            coi_count = len(self.coi_files)
+            coi_count = len(self.coi_segments_train_files)
             effective_coi_count = coi_count * self.augment_multiplier
 
             if coi_count > 0 and idx < effective_coi_count:
                 # COI sample
                 actual_idx = idx % coi_count
                 augment_variant = idx // coi_count
-                coi_file = self.coi_files[actual_idx]
+                coi_file = self.coi_segments_train_files[actual_idx]
                 class_idx = int(self.file_to_class.get(coi_file, 0))
 
                 # Random offset for training
-                try:
-                    info = torchaudio.info(coi_file)
-                    seg_frames = max(
-                        1,
-                        int(self.segment_samples * info.sample_rate / self.sample_rate),
-                    )
-                    max_offset = max(0, int(info.num_frames) - seg_frames)
-                    frame_offset = (
-                        int(np.random.randint(0, max_offset + 1))
-                        if max_offset > 0
-                        else 0
-                    )
-                    coi_audio = self._load_audio(coi_file, frame_offset, seg_frames)
-                except Exception:
-                    coi_audio = self._load_audio(coi_file)
+                coi_audio = self._load_audio(coi_file, frame_offset=None)
 
                 if self.augment and augment_variant > 0:
                     coi_audio = AudioAugmentations.random_augment(
@@ -501,7 +517,10 @@ class COIAudioDataset(Dataset):
                     len(self.non_coi_files), size=max(1, self.background_mix_n)
                 )
                 background = torch.stack(
-                    [self._load_audio(self.non_coi_files[int(i)]) for i in idxs]
+                    [
+                        self._load_audio(self.non_coi_files[int(i)], frame_offset=None)
+                        for i in idxs
+                    ]
                 ).sum(dim=0)
                 sources = [
                     self._create_empty_source() for _ in range(self.n_coi_classes)
@@ -521,7 +540,8 @@ class COIAudioDataset(Dataset):
         # Add background
         if background is None:
             background = self._load_audio(
-                self.non_coi_files[np.random.randint(len(self.non_coi_files))]
+                self.non_coi_files[np.random.randint(len(self.non_coi_files))],
+                frame_offset=None,
             )
         sources.append(background)
 

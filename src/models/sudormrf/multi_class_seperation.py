@@ -9,11 +9,10 @@ Supports multiple architectural strategies:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
+from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import (
     GroupCommSudoRmRf,
 )
-from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
+from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 
 
 class SharedBackgroundMultiCOI(nn.Module):

@@ -47,13 +47,13 @@ def load_freesound(audio_base_path: str, metadata: str | None) -> pd.DataFrame:
     train_idx = df[df["split"] == "train"].index.to_numpy()
     # shuffle those indices deterministically
     import numpy as _np
+
     _rng = _np.random.default_rng(42)
     shuffled_train_idx = _rng.permutation(train_idx)
     val_size = int(0.2 * len(shuffled_train_idx))
     if val_size > 0:
         val_idx = shuffled_train_idx[:val_size]
         df.loc[val_idx, "split"] = "val"
-
 
     return df
 
@@ -101,3 +101,16 @@ def _get_index(filename: str) -> int:
     padded_index = filename.split("_")[0]
 
     return int(padded_index.lstrip("0"))
+
+
+def test_freesound_loading():
+    """Test function for load_freesound."""
+    df = load_freesound(
+        audio_base_path="/home/bendm/Thesis/project/data/freesound/audio",
+        metadata="/home/bendm/Thesis/project/data/freesound_curation/metadata.csv",
+    )
+    print(df.head())
+
+
+if __name__ == "__main__":
+    test_freesound_loading()
