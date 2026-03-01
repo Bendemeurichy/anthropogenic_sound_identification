@@ -296,6 +296,9 @@ class AudioDataset(Dataset):
         self._rng = np.random.default_rng(42)
         self._resamplers: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
         self._resampler_cache_max = int(RESAMPLER_CACHE_MAX)
+        self._file_native_info: dict[
+            str, tuple[int, int]
+        ] = {}  # filepath -> (orig_sr, total_frames)
 
         # Filter and extract file lists
         if split == "test":
@@ -311,7 +314,9 @@ class AudioDataset(Dataset):
         if "start_time" in split_df.columns or "end_time" in split_df.columns:
             for _, row in split_df.iterrows():
                 fname = row["filename"]
-                st = float(row["start_time"]) if pd.notna(row.get("start_time")) else 0.0
+                st = (
+                    float(row["start_time"]) if pd.notna(row.get("start_time")) else 0.0
+                )
                 et = float(row["end_time"]) if pd.notna(row.get("end_time")) else None
                 self.file_to_bounds[fname] = (st, et)
 
@@ -323,13 +328,11 @@ class AudioDataset(Dataset):
         # Precompute segments for validation/test, or for long files in train
         self.coi_segments = self._compute_segments(split_df)
 
-        # In train, replace files with segments so we get a larger epoch
-        # where long files are sampled multiple times instead of just once per epoch.
+        # In train, keep the full segment tuples so __getitem__ can load each
+        # segment at its proper offset (with a small random jitter for
+        # diversity) instead of picking a fully random crop.
         if self.split == "train":
-            # Each entry in coi_segments is (filepath, frame_offset, num_frames, class_idx)
-            # We just pull the filepaths to act as the pool of items.
-            # (This effectively gives us more "slots" in the epoch for longer files)
-            self.coi_segments_train_files = [seg[0] for seg in self.coi_segments]
+            self.coi_segments_train = list(self.coi_segments)
 
         # Background-only sample count
         self._extra_background_count = 0
@@ -337,7 +340,7 @@ class AudioDataset(Dataset):
             if split == "train":
                 self._extra_background_count = int(
                     self.background_only_prob
-                    * len(self.coi_segments_train_files)
+                    * len(self.coi_segments_train)
                     * self.augment_multiplier
                     + 0.5
                 )
@@ -361,7 +364,7 @@ class AudioDataset(Dataset):
             )
             if split == "train" and self.augment_multiplier > 1:
                 print(
-                    f"  → With {self.augment_multiplier}x augmentation: {len(self.coi_segments_train_files) * self.augment_multiplier} effective epoch steps"
+                    f"  → With {self.augment_multiplier}x augmentation: {len(self.coi_segments_train) * self.augment_multiplier} effective epoch steps"
                 )
             if self._extra_background_count > 0:
                 print(
@@ -381,11 +384,12 @@ class AudioDataset(Dataset):
             class_idx = int(self.file_to_class.get(filepath, 0))
             bounds = self.file_to_bounds.get(filepath, (0.0, None))
             start_sec, end_sec = bounds
-            
+
             try:
                 info = torchaudio.info(filepath)
                 orig_sr = info.sample_rate
                 num_frames = int(info.num_frames)
+                self._file_native_info[filepath] = (orig_sr, num_frames)
                 seg_frames = max(
                     1, int(self.segment_samples * orig_sr / self.sample_rate)
                 )
@@ -394,9 +398,11 @@ class AudioDataset(Dataset):
                 )
 
                 start_frame = int(start_sec * orig_sr)
-                end_frame = int(end_sec * orig_sr) if end_sec is not None else num_frames
+                end_frame = (
+                    int(end_sec * orig_sr) if end_sec is not None else num_frames
+                )
                 end_frame = min(end_frame, num_frames)
-                
+
                 valid_frames = max(0, end_frame - start_frame)
 
                 n_segs = (
@@ -406,18 +412,16 @@ class AudioDataset(Dataset):
                 )
                 for s in range(n_segs):
                     offset = start_frame + s * stride_frames
-                    segments.append(
-                        (filepath, offset, seg_frames, class_idx)
-                    )
+                    segments.append((filepath, offset, seg_frames, class_idx))
             except Exception:
                 segments.append((filepath, 0, None, class_idx))
         return segments
 
     def __len__(self):
         if self.split == "train":
-            if self.coi_segments_train_files:
+            if hasattr(self, "coi_segments_train") and self.coi_segments_train:
                 return (
-                    len(self.coi_segments_train_files) * self.augment_multiplier
+                    len(self.coi_segments_train) * self.augment_multiplier
                     + self._extra_background_count
                 )
             return len(self.non_coi_files)
@@ -432,7 +436,7 @@ class AudioDataset(Dataset):
         """Load and preprocess audio segment."""
         bounds = getattr(self, "file_to_bounds", {}).get(filepath, (0.0, None))
         start_sec, end_sec = bounds
-        
+
         try:
             info = torchaudio.info(filepath)
             orig_sr = info.sample_rate
@@ -465,9 +469,11 @@ class AudioDataset(Dataset):
                 1, int(self.segment_samples * orig_sr / self.sample_rate)
             )
             num_actual_frames = waveform.shape[-1]
-            
+
             start_frame = int(start_sec * orig_sr)
-            end_frame = int(end_sec * orig_sr) if end_sec is not None else num_actual_frames
+            end_frame = (
+                int(end_sec * orig_sr) if end_sec is not None else num_actual_frames
+            )
             end_frame = min(end_frame, num_actual_frames)
 
             if frame_offset is None:
@@ -503,22 +509,70 @@ class AudioDataset(Dataset):
             )
         return waveform[: self.segment_samples]
 
+    def _jittered_offset(
+        self, base_offset: int, seg_frames: int | None, filepath: str
+    ) -> int:
+        """Return *base_offset* with a small random jitter.
+
+        The jitter is at most ±half-stride (in native-sr frames) and is clamped
+        so that the resulting window stays within the file's valid region.
+        This gives training diversity while still systematically covering the
+        whole file across an epoch.
+        """
+        if seg_frames is None:
+            return base_offset
+
+        cached = self._file_native_info.get(filepath)
+        if cached is None:
+            # Fallback: should not happen if _compute_segments ran first
+            try:
+                info = torchaudio.info(filepath)
+                cached = (info.sample_rate, int(info.num_frames))
+                self._file_native_info[filepath] = cached
+            except Exception:
+                return base_offset
+
+        orig_sr, total_frames = cached
+        bounds = self.file_to_bounds.get(filepath, (0.0, None))
+        start_sec, end_sec = bounds
+
+        start_frame = int(start_sec * orig_sr)
+        end_frame = int(end_sec * orig_sr) if end_sec is not None else total_frames
+        end_frame = min(end_frame, total_frames)
+
+        half_stride = max(
+            1, int(self.segment_stride_samples * orig_sr / self.sample_rate) // 2
+        )
+        jitter = int(self._rng.integers(-half_stride, half_stride + 1))
+        offset = base_offset + jitter
+
+        # Clamp to valid region
+        offset = max(start_frame, offset)
+        offset = min(offset, max(start_frame, end_frame - seg_frames))
+        return offset
+
     def __getitem__(self, idx):
         background = None
 
         if self.split == "train":
-            coi_count = len(self.coi_segments_train_files)
+            coi_count = len(self.coi_segments_train)
             effective_coi_count = coi_count * self.augment_multiplier
 
             if coi_count > 0 and idx < effective_coi_count:
-                # COI sample
+                # COI sample – use precomputed segment offset with jitter
                 actual_idx = idx % coi_count
                 augment_variant = idx // coi_count
-                coi_file = self.coi_segments_train_files[actual_idx]
-                class_idx = int(self.file_to_class.get(coi_file, 0))
+                filepath, base_offset, seg_frames, class_idx = self.coi_segments_train[
+                    actual_idx
+                ]
 
-                # Random offset for training
-                coi_audio = self._load_audio(coi_file, frame_offset=None)
+                # Jitter the offset so the model sees slightly different
+                # cuts each epoch while still systematically covering the
+                # whole file (unlike a fully random crop).
+                offset = self._jittered_offset(base_offset, seg_frames, filepath)
+                coi_audio = self._load_audio(
+                    filepath, frame_offset=offset, num_frames=seg_frames
+                )
 
                 if self.augment and augment_variant > 0:
                     coi_audio = AudioAugmentations.random_augment(coi_audio, self._rng)

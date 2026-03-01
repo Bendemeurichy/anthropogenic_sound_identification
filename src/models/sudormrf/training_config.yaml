@@ -16,7 +16,7 @@ data:
   # How many non-COI files to sum for background-only examples
   background_mix_n: 2
   # Augmentation multiplier: each COI sample seen 3x with random augmentations
-  augment_multiplier: 3
+  augment_multiplier: 2
 
 # Model settings - using proven SuDoRM-RF defaults
 model:
@@ -35,7 +35,7 @@ model:
   # COI separation head U-ConvBlocks
   # 0 = simple architecture (PReLU + Conv1d)
   # >0 = enhanced architecture with N UConvBlocks per branch for class-specific feature extraction
-  num_head_conv_blocks: 1
+  num_head_conv_blocks: 2
   # Expanded dimension for UConvBlock internal processing
   # null/None = use in_channels (512), or set explicitly (e.g., 128 for smaller model)
   expanded_channels: null
