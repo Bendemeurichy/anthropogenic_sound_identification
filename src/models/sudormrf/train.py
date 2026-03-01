@@ -314,10 +314,22 @@ class AudioDataset(Dataset):
         if "start_time" in split_df.columns or "end_time" in split_df.columns:
             for _, row in split_df.iterrows():
                 fname = row["filename"]
-                st = (
-                    float(row["start_time"]) if pd.notna(row.get("start_time")) else 0.0
-                )
-                et = float(row["end_time"]) if pd.notna(row.get("end_time")) else None
+                try:
+                    st = (
+                        float(row["start_time"])
+                        if pd.notna(row.get("start_time"))
+                        else 0.0
+                    )
+                except (ValueError, TypeError):
+                    st = 0.0
+                try:
+                    et = (
+                        float(row["end_time"])
+                        if pd.notna(row.get("end_time"))
+                        else None
+                    )
+                except (ValueError, TypeError):
+                    et = None
                 self.file_to_bounds[fname] = (st, et)
 
         # File to class mapping for multi-class
@@ -380,6 +392,7 @@ class AudioDataset(Dataset):
     ) -> list[tuple[str, int, int | None, int]]:
         """Compute segments for each COI file."""
         segments = []
+        info_failures = 0
         for filepath in self.coi_files:
             class_idx = int(self.file_to_class.get(filepath, 0))
             bounds = self.file_to_bounds.get(filepath, (0.0, None))
@@ -390,31 +403,45 @@ class AudioDataset(Dataset):
                 orig_sr = info.sample_rate
                 num_frames = int(info.num_frames)
                 self._file_native_info[filepath] = (orig_sr, num_frames)
-                seg_frames = max(
-                    1, int(self.segment_samples * orig_sr / self.sample_rate)
-                )
-                stride_frames = max(
-                    1, int(self.segment_stride_samples * orig_sr / self.sample_rate)
-                )
+            except Exception as exc:
+                info_failures += 1
+                if info_failures <= 5:
+                    print(f"  ⚠ torchaudio.info() failed for {filepath}: {exc}")
+                # Fallback: use bounds-based duration or est_segments from the
+                # dataframe so we can still create a reasonable number of
+                # segments even when the file header can't be read.
+                orig_sr = self.sample_rate  # assume target sr as approximation
+                if end_sec is not None and end_sec > start_sec:
+                    num_frames = int(end_sec * orig_sr)
+                else:
+                    num_frames = self.segment_samples  # single segment fallback
+                self._file_native_info[filepath] = (orig_sr, num_frames)
 
-                start_frame = int(start_sec * orig_sr)
-                end_frame = (
-                    int(end_sec * orig_sr) if end_sec is not None else num_frames
-                )
-                end_frame = min(end_frame, num_frames)
+            seg_frames = max(1, int(self.segment_samples * orig_sr / self.sample_rate))
+            stride_frames = max(
+                1, int(self.segment_stride_samples * orig_sr / self.sample_rate)
+            )
 
-                valid_frames = max(0, end_frame - start_frame)
+            start_frame = int(start_sec * orig_sr)
+            end_frame = int(end_sec * orig_sr) if end_sec is not None else num_frames
+            end_frame = min(end_frame, num_frames)
 
-                n_segs = (
-                    1
-                    if valid_frames <= seg_frames
-                    else 1 + max(0, (valid_frames - seg_frames) // stride_frames)
-                )
-                for s in range(n_segs):
-                    offset = start_frame + s * stride_frames
-                    segments.append((filepath, offset, seg_frames, class_idx))
-            except Exception:
-                segments.append((filepath, 0, None, class_idx))
+            valid_frames = max(0, end_frame - start_frame)
+
+            n_segs = (
+                1
+                if valid_frames <= seg_frames
+                else 1 + max(0, (valid_frames - seg_frames) // stride_frames)
+            )
+            for s in range(n_segs):
+                offset = start_frame + s * stride_frames
+                segments.append((filepath, offset, seg_frames, class_idx))
+
+        if info_failures > 0:
+            print(
+                f"  ⚠ torchaudio.info() failed for {info_failures}/{len(self.coi_files)} COI files "
+                f"(used bounds/fallback for segment estimation)"
+            )
         return segments
 
     def __len__(self):
@@ -433,59 +460,96 @@ class AudioDataset(Dataset):
         frame_offset: int | None = None,
         num_frames: int | None = None,
     ) -> torch.Tensor:
-        """Load and preprocess audio segment."""
+        """Load and preprocess audio segment.
+
+        Never loads more than a bounded window from disk to avoid OOM on
+        multi-hour files.
+        """
         bounds = getattr(self, "file_to_bounds", {}).get(filepath, (0.0, None))
         start_sec, end_sec = bounds
 
-        try:
-            info = torchaudio.info(filepath)
-            orig_sr = info.sample_rate
-            seg_frames = num_frames or max(
-                1, int(self.segment_samples * orig_sr / self.sample_rate)
-            )
+        # --- resolve native sample-rate and file length ---
+        cached = self._file_native_info.get(filepath)
+        if cached is not None:
+            orig_sr, total_frames = cached
+        else:
+            try:
+                info = torchaudio.info(filepath)
+                orig_sr = info.sample_rate
+                total_frames = int(info.num_frames)
+                self._file_native_info[filepath] = (orig_sr, total_frames)
+            except Exception:
+                # Can't even read the header – load a bounded chunk and
+                # hope for the best.  Cap at 2× segment length so we
+                # never pull in the entire file.
+                max_load = self.segment_samples * 2
+                try:
+                    waveform, sr = torchaudio.load(
+                        filepath, frame_offset=0, num_frames=max_load
+                    )
+                except Exception:
+                    # Absolute last resort – return silence
+                    return torch.zeros(self.segment_samples)
+                orig_sr = sr
+                total_frames = waveform.shape[-1]
+                self._file_native_info[filepath] = (orig_sr, total_frames)
 
-            start_frame = int(start_sec * orig_sr)
-            total_frames = int(info.num_frames)
-            end_frame = int(end_sec * orig_sr) if end_sec is not None else total_frames
-            end_frame = min(end_frame, total_frames)
+                seg_frames = num_frames or max(
+                    1, int(self.segment_samples * orig_sr / self.sample_rate)
+                )
+                waveform = waveform[:, :seg_frames]
+                if sr != self.sample_rate:
+                    key = (sr, self.sample_rate)
+                    if key not in self._resamplers:
+                        if len(self._resamplers) >= self._resampler_cache_max:
+                            self._resamplers.pop(next(iter(self._resamplers)))
+                        self._resamplers[key] = torchaudio.transforms.Resample(
+                            sr, self.sample_rate
+                        )
+                    waveform = self._resamplers[key](waveform)
+                if waveform.shape[0] > 1:
+                    waveform = waveform.mean(dim=0, keepdim=True)
+                waveform = waveform.squeeze(0)
+                if waveform.shape[0] < self.segment_samples:
+                    waveform = torch.nn.functional.pad(
+                        waveform, (0, self.segment_samples - waveform.shape[0])
+                    )
+                return waveform[: self.segment_samples]
 
-            if frame_offset is None:
-                max_offset = max(start_frame, end_frame - seg_frames)
-                if max_offset > start_frame:
-                    offset = int(self._rng.integers(start_frame, max_offset + 1))
-                else:
-                    offset = start_frame
+        # --- compute the window to read ---
+        seg_frames = num_frames or max(
+            1, int(self.segment_samples * orig_sr / self.sample_rate)
+        )
+
+        start_frame = int(start_sec * orig_sr)
+        end_frame = int(end_sec * orig_sr) if end_sec is not None else total_frames
+        end_frame = min(end_frame, total_frames)
+
+        if frame_offset is None:
+            max_offset = max(start_frame, end_frame - seg_frames)
+            if max_offset > start_frame:
+                offset = int(self._rng.integers(start_frame, max_offset + 1))
             else:
-                offset = int(frame_offset)
+                offset = start_frame
+        else:
+            offset = int(frame_offset)
 
+        # Clamp so we never read past end of file
+        offset = max(0, min(offset, max(0, total_frames - seg_frames)))
+
+        try:
             waveform, sr = torchaudio.load(
                 filepath, frame_offset=offset, num_frames=int(seg_frames)
             )
         except Exception:
-            waveform, sr = torchaudio.load(filepath)
-            orig_sr = sr
-
-            seg_frames = num_frames or max(
-                1, int(self.segment_samples * orig_sr / self.sample_rate)
-            )
-            num_actual_frames = waveform.shape[-1]
-
-            start_frame = int(start_sec * orig_sr)
-            end_frame = (
-                int(end_sec * orig_sr) if end_sec is not None else num_actual_frames
-            )
-            end_frame = min(end_frame, num_actual_frames)
-
-            if frame_offset is None:
-                max_offset = max(start_frame, end_frame - seg_frames)
-                if max_offset > start_frame:
-                    offset = int(self._rng.integers(start_frame, max_offset + 1))
-                else:
-                    offset = start_frame
-            else:
-                offset = int(frame_offset)
-
-            waveform = waveform[:, offset : offset + seg_frames]
+            # Retry without offset constraints (some backends dislike
+            # frame_offset near EOF).  Still bounded to seg_frames.
+            try:
+                waveform, sr = torchaudio.load(
+                    filepath, frame_offset=0, num_frames=int(seg_frames)
+                )
+            except Exception:
+                return torch.zeros(self.segment_samples)
 
         # Resample if needed
         if sr != self.sample_rate:
@@ -989,8 +1053,16 @@ def validate_epoch(
 
 def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioDataset]:
     """Create dataloader for specified split."""
+    # Read a minimal probe of the header to discover which optional columns
+    # (start_time, end_time, duration, …) are actually present in the CSV so
+    # that AudioDataset can use file-level bounds for segmentation.
+    header_cols = pd.read_csv(config.data.df_path, nrows=0).columns.tolist()
+
     usecols = ["filename", "label", "split"]
-    if getattr(config.data, "n_coi_classes", 1) > 1:
+    for optional_col in ("start_time", "end_time", "duration", "est_segments"):
+        if optional_col in header_cols:
+            usecols.append(optional_col)
+    if getattr(config.data, "n_coi_classes", 1) > 1 and "coi_class" in header_cols:
         usecols.append("coi_class")
 
     df = pd.read_csv(config.data.df_path, usecols=usecols)
