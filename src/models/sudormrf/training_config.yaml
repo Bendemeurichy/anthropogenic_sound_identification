@@ -42,16 +42,16 @@ model:
 
 # Training settings - optimized for COI separation
 training:
-  batch_size: 4
-  grad_accum_steps: 8
+  batch_size: 2
+  grad_accum_steps: 16
   use_amp: true
   num_epochs: 400
   lr: 3e-4
   weight_decay: 1e-2
-  num_workers: 2
+  num_workers: 1
   pin_memory: true
   persistent_workers: true
-  prefetch_factor: 2
+  prefetch_factor: 1
   clip_grad_norm: 5.0
   patience: 35
   checkpoint_dir: "checkpoints"
