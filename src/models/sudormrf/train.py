@@ -72,6 +72,66 @@ BG_SCALE_MAX = 3.0
 RESAMPLER_CACHE_MAX = 8
 
 
+def _get_audio_info(filepath: str) -> tuple[int, int]:
+    """Return (sample_rate, num_frames) for an audio file.
+
+    Tries, in order:
+      1. ``torchaudio.info`` (available in torchaudio ≥ 0.9)
+      2. ``soundfile.info``  (pip install soundfile – almost always a
+         torchaudio dependency)
+      3. ``torchaudio.load`` with ``num_frames=1`` to obtain the sample
+         rate, then estimates total frames from file size (WAV only).
+
+    Raises ``RuntimeError`` if none of the strategies succeed.
+    """
+    # --- strategy 1: torchaudio.info ---
+    if hasattr(torchaudio, "info"):
+        try:
+            info = torchaudio.info(filepath)
+            return int(info.sample_rate), int(info.num_frames)
+        except Exception:
+            pass
+
+    # --- strategy 2: soundfile ---
+    try:
+        import soundfile as sf
+
+        info = sf.info(filepath)
+        return int(info.samplerate), int(info.frames)
+    except Exception:
+        pass
+
+    # --- strategy 3: torchaudio.load + file-size heuristic ---
+    try:
+        waveform, sr = torchaudio.load(filepath, num_frames=1)
+        n_channels = waveform.shape[0]
+        # Estimate total frames from file size (assumes 16-bit PCM WAV
+        # with a 44-byte header).  This is imprecise for compressed
+        # formats but still better than nothing.
+        import struct as _struct
+
+        file_size = os.path.getsize(filepath)
+        bytes_per_sample = 2  # 16-bit default
+        try:
+            with open(filepath, "rb") as f:
+                header = f.read(44)
+            if header[:4] == b"RIFF" and header[8:12] == b"WAVE":
+                bits_per_sample = _struct.unpack_from("<H", header, 34)[0]
+                bytes_per_sample = max(1, bits_per_sample // 8)
+        except Exception:
+            pass
+        data_bytes = max(0, file_size - 44)
+        total_frames = data_bytes // (bytes_per_sample * max(1, n_channels))
+        return int(sr), max(1, total_frames)
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        f"Cannot determine audio info for {filepath}: "
+        "torchaudio.info, soundfile, and torchaudio.load all failed"
+    )
+
+
 # =============================================================================
 # Loss Functions
 # =============================================================================
@@ -399,9 +459,7 @@ class AudioDataset(Dataset):
             start_sec, end_sec = bounds
 
             try:
-                info = torchaudio.info(filepath)
-                orig_sr = info.sample_rate
-                num_frames = int(info.num_frames)
+                orig_sr, num_frames = _get_audio_info(filepath)
                 self._file_native_info[filepath] = (orig_sr, num_frames)
             except Exception as exc:
                 info_failures += 1
@@ -474,9 +532,7 @@ class AudioDataset(Dataset):
             orig_sr, total_frames = cached
         else:
             try:
-                info = torchaudio.info(filepath)
-                orig_sr = info.sample_rate
-                total_frames = int(info.num_frames)
+                orig_sr, total_frames = _get_audio_info(filepath)
                 self._file_native_info[filepath] = (orig_sr, total_frames)
             except Exception:
                 # Can't even read the header – load a bounded chunk and
@@ -590,8 +646,7 @@ class AudioDataset(Dataset):
         if cached is None:
             # Fallback: should not happen if _compute_segments ran first
             try:
-                info = torchaudio.info(filepath)
-                cached = (info.sample_rate, int(info.num_frames))
+                cached = _get_audio_info(filepath)
                 self._file_native_info[filepath] = cached
             except Exception:
                 return base_offset
