@@ -141,6 +141,20 @@ def main():
     csv_path = "/home/bendm/Thesis/project/code/data/metadata/freesound_curation/source_freesound_field_recordings_links.csv"
     print("putting labels in freesound dataset")
     get_freesound_labels(csv_path)
+    # remove_empty_labels(csv_path.replace(".csv", "_with_labels.csv"))
+
+
+def remove_empty_labels(csv_path: str):
+    """Utility function to remove rows with empty labels from the output csv."""
+    df = pd.read_csv(csv_path)
+    # Empty out labels column to None where array is empty or blank, don't drop rows
+    df["labels"] = df["labels"].apply(
+        lambda x: None if str(x).strip() in ["", "[]"] else x
+    )
+    df.to_csv(csv_path, index=False)
+    print(
+        f"Removed labels from rows with empty labels. Updated file saved to {csv_path}"
+    )
 
 
 if __name__ == "__main__":

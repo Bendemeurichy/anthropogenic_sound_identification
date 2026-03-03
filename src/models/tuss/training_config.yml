@@ -1,0 +1,147 @@
+# TUSS fine-tuning configuration for COI (aircraft/train/bird) separation.
+# Loaded directly by train.py – no command-line argument required.
+
+data:
+  df_path: "data/aircraft_data.csv"
+  sample_rate: 48000 # TUSS operates natively at 48 kHz
+  segment_length: 6.0 # seconds; matches TUSS pretrained chunk_size
+  snr_range: [-5, 5] # dB range for COI / background mixing
+  # Semantic labels that map to each coi_prompt below (same order).
+  # A file is assigned to coi_prompts[i] when its label matches target_classes[i].
+  target_classes:
+    - ["airplane", "Airplane", "plane", "aircraft"] # → coi_prompts[0] = "airplane"
+    - ["train", "Train", "railway", "rail"] # → coi_prompts[1] = "train"
+    - ["bird", "Bird", "birds", "birdsong"] # → coi_prompts[2] = "bird"
+  background_only_prob: 0.15 # fraction of training steps that are BG-only
+  background_mix_n: 2 # how many non-COI files to sum for a BG example
+  augment_multiplier: 2 # each COI segment seen N times per epoch w/ augmentation
+
+model:
+  # Path to the pretrained TUSS directory (relative to train.py).
+  # Must contain hparams.yaml and checkpoints/model.pth.
+  # Set to null to initialise the model from scratch using the architecture
+  # block below (not recommended – very data-hungry).
+  pretrained_path: "base/pretrained_models/tuss.medium.2-4src"
+
+  # Learnable prompt tokens for each COI class.  These names are injected
+  # into the model's ParameterDict and used as query strings at every
+  # forward pass.  Order must match target_classes above.
+  coi_prompts:
+    - "airplane"
+    - "train"
+    - "bird"
+
+  # Prompt token used for the background / residual head.
+  bg_prompt: "background"
+
+  # Which pretrained prompt vector to use as warm-start for new COI prompts.
+  # "sfx" is the closest acoustically to environmental / mechanical sounds.
+  coi_prompt_init_from: "sfx"
+
+  # Which pretrained prompt vector to use as warm-start for the background prompt.
+  bg_prompt_init_from: "sfxbg"
+
+  # Fine-tuning strategy:
+  #   false → fine-tune the entire network end-to-end (recommended)
+  #   true  → freeze the backbone; only update prompt embeddings
+  freeze_backbone: false
+
+  # ------------------------------------------------------------------ #
+  # Architecture settings – only used when pretrained_path is null.    #
+  # These mirror tuss.medium.2-4src defaults for easy comparison.      #
+  # ------------------------------------------------------------------ #
+  encoder_name: stft
+  encoder_conf:
+    fft_size: 2048
+    window_length: 2048
+    hop_length: 512
+    window_type: sqrt_hann
+    normalize: null
+
+  decoder_name: stft
+  decoder_conf:
+    fft_size: 2048
+    window_length: 2048
+    hop_length: 512
+    window_type: sqrt_hann
+    normalize: null
+
+  separator_name: tuss
+  separator_conf:
+    # Prompt vocabulary that the from-scratch model will know about.
+    # When loading from a checkpoint this list is taken from the checkpoint's
+    # hparams.yaml; the new COI / BG prompts are then injected on top.
+    prompts:
+      - speech
+      - sfx
+      - sfxbg
+      - drums
+      - bass
+      - vocals
+      - other
+      - musicbg
+    nblocks_cross_prompt_module: 4
+    conf_cross_prompt_module:
+      emb_dim: 64
+      num_groups: 8
+      tf_order: ft
+      n_heads: 4
+      flash_attention: false
+      attention_dim: 128
+      freq_ffn_config:
+        - conf: { dim_inner: 384, conv1d_kernel: 4, conv1d_shift: 1 }
+        - conf: { dim_inner: 384, conv1d_kernel: 4, conv1d_shift: 1 }
+      frame_ffn_config:
+        - conf: { dim_inner: 384, conv1d_kernel: 1, conv1d_shift: 1 }
+        - conf: { dim_inner: 384, conv1d_kernel: 1, conv1d_shift: 1 }
+    nblocks_cond_tse_module: 2
+    conf_cond_tse_module:
+      emb_dim: 64
+      num_groups: 8
+      tf_order: ft
+      n_heads: 4
+      flash_attention: false
+      attention_dim: 96
+      freq_ffn_config:
+        - conf: { dim_inner: 256, conv1d_kernel: 4, conv1d_shift: 1 }
+        - conf: { dim_inner: 256, conv1d_kernel: 4, conv1d_shift: 1 }
+      frame_ffn_config:
+        - conf: { dim_inner: 256, conv1d_kernel: 4, conv1d_shift: 1 }
+        - conf: { dim_inner: 256, conv1d_kernel: 4, conv1d_shift: 1 }
+    sample_rate: 48000
+    stft_size: 2048
+    use_sos_token: true
+
+  css_conf:
+    segment_size: 6
+    shift_size: 6
+    solve_perm: false
+    normalize_segment_scale: false
+    sample_rate: 48000
+
+  variance_normalization: true
+
+training:
+  batch_size: 2
+  grad_accum_steps: 8 # effective batch = 2 × 8 = 16
+  use_amp: true
+  num_epochs: 200
+  # Lower LR than from-scratch training; the pretrained backbone is already
+  # well-initialised so we only need a gentle nudge.
+  lr: 5.0e-5
+  weight_decay: 1.0e-2
+  num_workers: 4
+  pin_memory: true
+  clip_grad_norm: 5.0
+  patience: 30
+  checkpoint_dir: "checkpoints"
+  device: "cuda"
+  # COI head weight: loss = (coi_weight * mean(coi_snrs) + bg_snr) / (coi_weight + 1)
+  coi_weight: 1.5
+  # Hyper-parameters forwarded to snr_with_zeroref_loss
+  snr_max: 30
+  zero_ref_loss_weight: 0.1
+  # Linear warm-up for the first N optimiser steps
+  warmup_steps: 300
+  validate_every_n_epochs: 1
+  seed: 42

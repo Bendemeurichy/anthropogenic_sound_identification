@@ -6,6 +6,10 @@
 	path = src/models/tuss/base
 	url = https://github.com/merlresearch/unified-source-separation.git
 
+[submodule "src/models/clapsep/checkpoint/CLAPSep"]
+	path = src/modules/clapsep/checkpoint/CLAPSep
+	url = https://huggingface.co/spaces/AisakaMikoto/CLAPSep
+
 [submodule "src/models/clapsep/base"]
 	path = src/models/clapsep/base
 	url = https://github.com/Aisaka0v0/CLAPSep.git
