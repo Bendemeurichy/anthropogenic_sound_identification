@@ -1,0 +1,180 @@
+# =============================================================================
+# TUSS Fine-tuning Configuration
+# =============================================================================
+#
+# PROMPTS & TARGET CLASSES
+# ─────────────────────────
+# coi_prompts   : the prompt name(s) injected into the TUSS model, one per
+#                 class-of-interest (COI).  Pick short, descriptive names.
+# bg_prompt     : a single prompt used for the background (non-COI) stream.
+#
+# target_classes: maps dataset label strings → prompt indices.
+#                 Must be a list-of-lists with the same length as coi_prompts.
+#                 Each inner list contains every label string in your metadata
+#                 CSV that should be treated as that class.
+#
+#   Example – planes only (current setup):
+#     coi_prompts:    ["airplane"]
+#     target_classes: [["airplane", "aircraft", "jet", "propeller_airplane"]]
+#
+#   Example – planes + birds + train (future expansion):
+#     coi_prompts:    ["airplane", "bird", "train"]
+#     target_classes:
+#       - ["airplane", "aircraft", "jet", "propeller_airplane"]
+#       - ["bird", "bird_song", "bird_chirp"]
+#       - ["train", "railway", "rail_vehicle"]
+#
+# coi_prompt_init_from : which pretrained TUSS prompt to warm-start each COI
+#                        prompt from.  "sfx" works well for foreground sounds.
+# bg_prompt_init_from  : "sfxbg" is the pretrained background prompt.
+#
+# =============================================================================
+
+data:
+  # Path is overwritten at runtime with the sampled dataset CSV;
+  # set it here only if you are resuming from a pre-built CSV.
+  df_path: ""
+
+  sample_rate: 48000 # Hz – must match your audio files
+  segment_length: 6.0 # seconds per training crop
+
+  # SNR range (dB) when mixing a COI source on top of background
+  snr_range: [-5, 5]
+
+  # -----------------------------------------------------------------------
+  # TARGET CLASSES
+  # Map label strings from your metadata CSV to the COI prompts below.
+  # This is a list-of-lists: one inner list per entry in model.coi_prompts.
+  # -----------------------------------------------------------------------
+  target_classes:
+    # Class 0 → model.coi_prompts[0] = "airplane"
+    - [
+        "airplane",
+        "aircraft",
+        "jet",
+        "propeller_airplane",
+        "fixed-wing_aircraft",
+      ]
+
+  # Probability that a training sample contains *only* background (no COI)
+  background_only_prob: 0.15
+
+  # How many background clips to mix together per sample
+  background_mix_n: 2
+
+  # Each audio file is used this many times per epoch (with different
+  # augmentations / offsets), effectively multiplying dataset size
+  augment_multiplier: 2
+
+model:
+  # Path to the pretrained TUSS checkpoint directory (relative to train.py).
+  # Set to null to train from scratch using the architecture fields below.
+  pretrained_path: "base/pretrained_models/tuss.medium.2-4src"
+
+  # -----------------------------------------------------------------------
+  # PROMPTS
+  # -----------------------------------------------------------------------
+  # One prompt name per COI class.  Must match the length of target_classes.
+  coi_prompts:
+    - "airplane"
+
+  # Prompt used for the background / residual stream
+  bg_prompt: "background"
+
+  # Pretrained TUSS prompt to warm-start each new COI prompt from.
+  # "sfx"   → foreground sound-effects prompt  (good for most events)
+  # "sfxbg" → background sound-effects prompt
+  # "music" / "speech" → available in the pretrained model as well
+  coi_prompt_init_from: "sfx"
+  bg_prompt_init_from: "sfxbg"
+
+  # Set to true to freeze all backbone weights and only learn prompt vectors.
+  # Faster and less prone to overfitting on small datasets; set to false for
+  # full fine-tuning when you have enough data.
+  freeze_backbone: false
+
+  # -----------------------------------------------------------------------
+  # Architecture (only used when pretrained_path is null)
+  # -----------------------------------------------------------------------
+  encoder_name: "stft"
+  encoder_conf: {}
+  decoder_name: "stft"
+  decoder_conf: {}
+  separator_name: "tuss"
+  separator_conf: {}
+  css_conf: {}
+  variance_normalization: true
+
+training:
+  batch_size: 2 # per-GPU batch size (keep low if VRAM is tight)
+  grad_accum_steps: 8 # effective batch = batch_size × grad_accum_steps = 16
+  use_amp: true # mixed-precision training (fp16); disable if unstable
+
+  num_epochs: 200
+  patience: 30 # early-stop after this many epochs without improvement
+
+  lr: 5.0e-5
+  weight_decay: 1.0e-2
+  warmup_steps: 300 # linear LR warm-up
+
+  clip_grad_norm: 5.0
+
+  # Loss weights
+  coi_weight: 1.5 # up-weight COI streams relative to background
+  zero_ref_loss_weight: 0.1 # penalty for estimating energy when target is silent
+  snr_max: 30 # clip SNR loss at this value (dB)
+
+  num_workers: 4
+  pin_memory: true
+
+  # Device to train on.  Can be overridden at runtime with --device / --gpu.
+  # Accepted values:
+  #   "cuda"    → use the default (best) GPU
+  #   "cuda:0"  → first GPU  (explicit index)
+  #   "cuda:1"  → second GPU
+  #   "cpu"     → force CPU (slow, for debugging only)
+  device: "cuda"
+  seed: 42
+
+  checkpoint_dir: "checkpoints"
+  validate_every_n_epochs: 1
+
+# =============================================================================
+# QUICK-START RECIPES
+# =============================================================================
+#
+# ── Phase 1: planes + background (current) ──────────────────────────────────
+#
+#   model:
+#     coi_prompts: ["airplane"]
+#     bg_prompt:   "background"
+#   data:
+#     target_classes:
+#       - ["airplane", "aircraft", "jet", "propeller_airplane"]
+#
+# ── Phase 2: add birds ───────────────────────────────────────────────────────
+#
+#   model:
+#     coi_prompts: ["airplane", "bird"]
+#     bg_prompt:   "background"
+#   data:
+#     target_classes:
+#       - ["airplane", "aircraft", "jet", "propeller_airplane"]
+#       - ["bird", "bird_song", "bird_chirp"]
+#
+# ── Phase 3: planes + birds + trains ────────────────────────────────────────
+#
+#   model:
+#     coi_prompts: ["airplane", "bird", "train"]
+#     bg_prompt:   "background"
+#   data:
+#     target_classes:
+#       - ["airplane", "aircraft", "jet", "propeller_airplane"]
+#       - ["bird", "bird_song", "bird_chirp"]
+#       - ["train", "railway", "rail_vehicle"]
+#
+# To resume from a Phase 1 checkpoint in Phase 2, point pretrained_path at
+# the Phase 1 checkpoint directory – the existing "airplane" and "background"
+# prompt vectors will be reused automatically; only "bird" will be injected
+# as a new parameter.
+# =============================================================================

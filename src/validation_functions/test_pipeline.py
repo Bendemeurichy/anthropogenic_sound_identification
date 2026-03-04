@@ -395,6 +395,23 @@ class ValidationPipeline:
             self.separator = SeparationInference.from_checkpoint(
                 sep_path, device=self.device
             )
+            # Propagate sample_rate and segment_length from the checkpoint config,
+            # mirroring what is done for CLAPSep above. Without this the pipeline
+            # would keep its hardcoded defaults (16 kHz / 5 s) while the model
+            # was trained at a different rate / window length (e.g. 32 kHz / 4 s).
+            self.sample_rate = self.separator.sample_rate
+            self.segment_samples = self.separator.segment_samples
+            self.segment_length = self.segment_samples / self.sample_rate
+            print(
+                f"Separator config: sample_rate={self.sample_rate} Hz, "
+                f"segment_length={self.segment_length:.2f} s "
+                f"({self.segment_samples} samples)"
+            )
+            # Re-derive classifier segment size using the (now updated) segment_length
+            # so the classifier window stays consistent with the separator window.
+            self.classifier_segment_samples = int(
+                self.classifier_sample_rate * self.segment_length
+            )
 
         # recover and log the target class list if the checkpoint included a
         # config (it should, since the training routine saves the YAML)
@@ -430,7 +447,7 @@ class ValidationPipeline:
         return filepath
 
     def _load_audio(self, filepath: str) -> torch.Tensor:
-        """Load audio using torchaudio."""
+        """Load audio using torchaudio, resampled and truncated/padded to segment_samples."""
         filepath = self._convert_path(filepath)
         waveform, sr = torchaudio.load(filepath)
 
@@ -455,6 +472,128 @@ class ValidationPipeline:
             waveform = waveform[: self.segment_samples]
 
         return waveform
+
+    def _load_labeled_audio(
+        self,
+        filepath: str,
+        start_time=None,
+        end_time=None,
+    ) -> torch.Tensor:
+        """Load the labeled portion of a recording as a variable-length tensor.
+
+        Unlike _load_audio this method does NOT truncate to segment_samples — it
+        returns the full labeled window so callers can split it into however many
+        model-sized segments are needed.
+
+        start_time / end_time semantics:
+          - None / NaN / "unknown" / "null" → treat as absent (use whole file).
+          - A value that exceeds the file duration is assumed to be an external
+            timestamp (e.g. a YouTube offset stored in AudioSet TSVs) and is
+            silently ignored so the whole file is used instead.
+        """
+        filepath = self._convert_path(filepath)
+
+        _INVALID = {"", "nan", "none", "unknown", "null"}
+
+        t_start = 0.0
+        try:
+            if (
+                start_time is not None
+                and str(start_time).strip().lower() not in _INVALID
+            ):
+                t_start = max(0.0, float(start_time))
+        except (ValueError, TypeError):
+            t_start = 0.0
+
+        t_end: Optional[float] = None
+        try:
+            if end_time is not None and str(end_time).strip().lower() not in _INVALID:
+                t_end = float(end_time)
+        except (ValueError, TypeError):
+            t_end = None
+
+        waveform, sr = torchaudio.load(filepath)
+
+        if sr != self.sample_rate:
+            key = (sr, self.sample_rate)
+            if key not in self._resamplers:
+                self._resamplers[key] = torchaudio.transforms.Resample(
+                    sr, self.sample_rate
+                )
+            waveform = self._resamplers[key](waveform)
+
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0)
+        else:
+            waveform = waveform.squeeze(0)
+
+        total_samples = waveform.shape[0]
+
+        sample_start = int(t_start * self.sample_rate)
+
+        # If start_time is beyond end of file it is an external timestamp — ignore.
+        if sample_start >= total_samples:
+            sample_start = 0
+            t_end = None
+
+        sample_end = (
+            min(int(t_end * self.sample_rate), total_samples)
+            if t_end is not None
+            else total_samples
+        )
+
+        # Guard degenerate windows
+        if sample_end <= sample_start:
+            sample_start = 0
+            sample_end = total_samples
+
+        return waveform[sample_start:sample_end]
+
+    def _load_full_audio(self, filepath: str) -> torch.Tensor:
+        """Load the entire audio file as a variable-length tensor at self.sample_rate.
+
+        Unlike _load_labeled_audio, this method ignores start_time/end_time entirely
+        and always returns the complete file.  Use this for recording-level evaluation
+        where the ground-truth label applies to the whole recording and the classifier
+        should be given all segments to find the event of interest in any of them.
+        """
+        filepath = self._convert_path(filepath)
+        waveform, sr = torchaudio.load(filepath)
+
+        if sr != self.sample_rate:
+            key = (sr, self.sample_rate)
+            if key not in self._resamplers:
+                self._resamplers[key] = torchaudio.transforms.Resample(
+                    sr, self.sample_rate
+                )
+            waveform = self._resamplers[key](waveform)
+
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0)
+        else:
+            waveform = waveform.squeeze(0)
+
+        return waveform
+
+    def _split_into_segments(self, waveform: torch.Tensor) -> List[torch.Tensor]:
+        """Split a variable-length waveform into non-overlapping segment_samples chunks.
+
+        Each chunk is exactly segment_samples long; the final chunk is zero-padded
+        when necessary.  Always returns at least one segment.
+        """
+        n = waveform.shape[0]
+        if n == 0:
+            return [torch.zeros(self.segment_samples)]
+
+        segments = []
+        for start in range(0, max(n, 1), self.segment_samples):
+            chunk = waveform[start : start + self.segment_samples]
+            if chunk.shape[0] < self.segment_samples:
+                chunk = torch.nn.functional.pad(
+                    chunk, (0, self.segment_samples - chunk.shape[0])
+                )
+            segments.append(chunk)
+        return segments
 
     def _separate(self, waveform: torch.Tensor) -> torch.Tensor:
         """Run separation model. Returns all sources.
@@ -669,70 +808,107 @@ class ValidationPipeline:
             tqdm(df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI")
         ):
             try:
-                waveform = self._load_audio(row.filename)
+                # Load the labeled window and slice into model-sized segments.
+                # For strongly labeled recordings start_time/end_time is a tight window
+                # containing the COI; for weakly labeled recordings it spans the full
+                # file.  Either way the recording-level prediction is aggregated below
+                # with any(), so a positive on any segment counts as a positive for the
+                # whole recording.
+                waveform_full = self._load_labeled_audio(
+                    row.filename,
+                    getattr(row, "start_time", None),
+                    getattr(row, "end_time", None),
+                )
+                segments = self._split_into_segments(waveform_full)
+
+                # Optionally save the first segment of selected examples.
                 if save_dir is not None and idx in sample_choices:
-                    # save original clean COI (with suffix indicating selection index)
                     try:
                         k = list(sample_choices).index(idx)
                         torchaudio.save(
                             str(save_dir / f"clean_coi_{k}.wav"),
-                            waveform.unsqueeze(0).cpu(),
+                            segments[0].unsqueeze(0).cpu(),
                             self.sample_rate,
                         )
                     except Exception:
-                        # don't fail validation on save errors
                         print(
                             f"Warning: failed to save clean_coi for {row.filename}",
                             file=sys.stderr,
                         )
 
                 if use_separation:
-                    separated = self._separate(waveform)
-                    pred, conf = self._classify_separated(separated)
-                    # Compute signal metrics: compare COI head output to original
-                    coi_est = (
-                        separated
-                        if separated.dim() == 1
-                        else separated[self._get_coi_head_index()]
-                    )
-                    si_snr, sdr, si_sdr = self._compute_signal_metrics(
-                        waveform, coi_est
-                    )
-                    si_snr_scores.append(si_snr)
-                    sdr_scores.append(sdr)
-                    si_sdr_scores.append(si_sdr)
+                    seg_preds: List[int] = []
+                    seg_confs: List[float] = []
+                    seg_si_snr: List[float] = []
+                    seg_sdr: List[float] = []
+                    seg_si_sdr: List[float] = []
 
-                    # Save separated outputs for the chosen sample(s)
-                    if save_dir is not None and idx in sample_choices:
-                        try:
-                            k = list(sample_choices).index(idx)
-                            if separated.dim() == 1:
-                                torchaudio.save(
-                                    str(save_dir / f"separated_coi_est_{k}.wav"),
-                                    separated.unsqueeze(0).cpu(),
-                                    self.sample_rate,
-                                )
-                            else:
-                                # save all sources and the COI head separately with index suffixes
-                                for s in range(separated.shape[0]):
+                    for seg_idx, seg in enumerate(segments):
+                        separated = self._separate(seg)
+                        seg_pred, seg_conf = self._classify_separated(separated)
+                        seg_preds.append(seg_pred)
+                        seg_confs.append(seg_conf)
+
+                        coi_est = (
+                            separated
+                            if separated.dim() == 1
+                            else separated[self._get_coi_head_index()]
+                        )
+                        si_snr, sdr, si_sdr = self._compute_signal_metrics(seg, coi_est)
+                        seg_si_snr.append(si_snr)
+                        seg_sdr.append(sdr)
+                        seg_si_sdr.append(si_sdr)
+
+                        # Save separated outputs for the first segment of chosen samples.
+                        if (
+                            save_dir is not None
+                            and idx in sample_choices
+                            and seg_idx == 0
+                        ):
+                            try:
+                                k = list(sample_choices).index(idx)
+                                if separated.dim() == 1:
                                     torchaudio.save(
-                                        str(save_dir / f"separated_src{s}_{k}.wav"),
-                                        separated[s].unsqueeze(0).cpu(),
+                                        str(save_dir / f"separated_coi_est_{k}.wav"),
+                                        separated.unsqueeze(0).cpu(),
                                         self.sample_rate,
                                     )
-                                coi_head = separated[self._get_coi_head_index()]
-                                torchaudio.save(
-                                    str(save_dir / f"separated_coi_head_{k}.wav"),
-                                    coi_head.unsqueeze(0).cpu(),
-                                    self.sample_rate,
+                                else:
+                                    for s in range(separated.shape[0]):
+                                        torchaudio.save(
+                                            str(save_dir / f"separated_src{s}_{k}.wav"),
+                                            separated[s].unsqueeze(0).cpu(),
+                                            self.sample_rate,
+                                        )
+                                    coi_head = separated[self._get_coi_head_index()]
+                                    torchaudio.save(
+                                        str(save_dir / f"separated_coi_head_{k}.wav"),
+                                        coi_head.unsqueeze(0).cpu(),
+                                        self.sample_rate,
+                                    )
+                            except Exception:
+                                print(
+                                    f"Warning: failed to save separated outputs for {row.filename}",
+                                    file=sys.stderr,
                                 )
-                        except Exception:
-                            print(
-                                f"Warning: failed to save separated outputs for {row.filename}",
-                                file=sys.stderr,
-                            )
+
+                    # A recording is classified as COI if ANY segment triggers a
+                    # positive prediction.  Confidence is the maximum over all segments.
+                    pred = 1 if any(p == 1 for p in seg_preds) else 0
+                    conf = max(seg_confs)
+                    si_snr_scores.append(float(np.mean(seg_si_snr)))
+                    sdr_scores.append(float(np.mean(seg_sdr)))
+                    si_sdr_scores.append(float(np.mean(seg_si_sdr)))
                 else:
-                    pred, conf = self._classify(waveform)
+                    seg_preds = []
+                    seg_confs = []
+                    for seg in segments:
+                        seg_pred, seg_conf = self._classify(seg)
+                        seg_preds.append(seg_pred)
+                        seg_confs.append(seg_conf)
+                    pred = 1 if any(p == 1 for p in seg_preds) else 0
+                    conf = max(seg_confs)
+
                 y_true.append(1)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -746,12 +922,26 @@ class ValidationPipeline:
         # Process background samples (label=0)
         for row in tqdm(df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG"):
             try:
-                waveform = self._load_audio(row.filename)
-                if use_separation:
-                    separated = self._separate(waveform)
-                    pred, conf = self._classify_separated(separated)
-                else:
-                    pred, conf = self._classify(waveform)
+                waveform_full = self._load_labeled_audio(
+                    row.filename,
+                    getattr(row, "start_time", None),
+                    getattr(row, "end_time", None),
+                )
+                segments = self._split_into_segments(waveform_full)
+
+                seg_preds = []
+                seg_confs = []
+                for seg in segments:
+                    if use_separation:
+                        separated = self._separate(seg)
+                        seg_pred, seg_conf = self._classify_separated(separated)
+                    else:
+                        seg_pred, seg_conf = self._classify(seg)
+                    seg_preds.append(seg_pred)
+                    seg_confs.append(seg_conf)
+
+                pred = 1 if any(p == 1 for p in seg_preds) else 0
+                conf = max(seg_confs)
                 y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -796,7 +986,11 @@ class ValidationPipeline:
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
         actual_snrs: List[float] = []
         desc = "Mixtures (sep+cls)" if use_separation else "Mixtures (cls only)"
-        bg_files = df_bg["filename"].tolist()
+        # Keep per-row timing info so background clips are also sliced from
+        # their labeled window when splitting into segments.
+        bg_records = df_bg[
+            ["filename"] + [c for c in ["start_time", "end_time"] if c in df_bg.columns]
+        ].to_dict("records")
 
         # Prepare optional example saving: choose up to save_n_examples distinct indices
         save_dir = Path(save_examples_dir) if save_examples_dir else None
@@ -813,93 +1007,138 @@ class ValidationPipeline:
             tqdm(df_coi.itertuples(), total=len(df_coi), desc=f"{desc} - COI+BG")
         ):
             try:
-                coi = self._normalize(self._load_audio(row.filename))
-                # pick a random background file for this mixture
-                bg_idx = np.random.randint(len(bg_files))
-                bg_file = bg_files[bg_idx]
-                bg = self._normalize(self._load_audio(bg_file))
-                snr = np.random.uniform(*snr_range)
-                mixture, actual_snr = self._create_mixture(coi, bg, snr)
-                actual_snrs.append(actual_snr)
+                # Load full labeled windows for both COI and a random background clip,
+                # then split into matching model-sized segment pairs for mixing.
+                coi_full = self._load_labeled_audio(
+                    row.filename,
+                    getattr(row, "start_time", None),
+                    getattr(row, "end_time", None),
+                )
+                bg_idx = np.random.randint(len(bg_records))
+                bg_rec = bg_records[bg_idx]
+                bg_full = self._load_labeled_audio(
+                    bg_rec["filename"],
+                    bg_rec.get("start_time"),
+                    bg_rec.get("end_time"),
+                )
 
-                # Save chosen example inputs/mixture (for any selected indices)
-                if save_dir is not None and idx in sample_choices:
-                    try:
-                        k = list(sample_choices).index(idx)
-                        torchaudio.save(
-                            str(save_dir / f"mixture_coi_clean_{k}.wav"),
-                            coi.unsqueeze(0).cpu(),
-                            self.sample_rate,
-                        )
-                        torchaudio.save(
-                            str(save_dir / f"mixture_bg_clean_{k}.wav"),
-                            bg.unsqueeze(0).cpu(),
-                            self.sample_rate,
-                        )
-                        torchaudio.save(
-                            str(save_dir / f"mixture_created_{k}.wav"),
-                            mixture.unsqueeze(0).cpu(),
-                            self.sample_rate,
-                        )
-                    except Exception:
-                        print(
-                            f"Warning: failed to save mixture example for {row.filename}",
-                            file=sys.stderr,
-                        )
+                coi_segments = self._split_into_segments(coi_full)
+                bg_segments = self._split_into_segments(bg_full)
 
-                if use_separation:
-                    separated = self._separate(mixture)
-                    pred, conf = self._classify_separated(separated)
-                    # Compute signal metrics: compare COI head output to clean COI
-                    coi_est = (
-                        separated
-                        if separated.dim() == 1
-                        else separated[self._get_coi_head_index()]
-                    )
-                    si_snr_val, sdr_val, si_sdr_val = self._compute_signal_metrics(
-                        coi, coi_est
-                    )
-                    si_snr_scores.append(si_snr_val)
-                    sdr_scores.append(sdr_val)
-                    si_sdr_scores.append(si_sdr_val)
+                seg_preds: List[int] = []
+                seg_confs: List[float] = []
+                seg_snr_vals: List[float] = []
+                seg_si_snr: List[float] = []
+                seg_sdr: List[float] = []
+                seg_si_sdr: List[float] = []
 
-                    # Save separated outputs for the chosen mixture sample(s)
-                    if save_dir is not None and idx in sample_choices:
+                for seg_idx, coi_seg in enumerate(coi_segments):
+                    # Cycle through BG segments if fewer than COI segments.
+                    bg_seg = bg_segments[seg_idx % len(bg_segments)]
+                    coi_n = self._normalize(coi_seg)
+                    bg_n = self._normalize(bg_seg)
+                    snr = np.random.uniform(*snr_range)
+                    mixture, actual_snr = self._create_mixture(coi_n, bg_n, snr)
+                    seg_snr_vals.append(actual_snr)
+
+                    # Save first segment of chosen examples.
+                    if save_dir is not None and idx in sample_choices and seg_idx == 0:
                         try:
                             k = list(sample_choices).index(idx)
-                            if separated.dim() == 1:
-                                torchaudio.save(
-                                    str(
-                                        save_dir / f"mixture_separated_coi_est_{k}.wav"
-                                    ),
-                                    separated.unsqueeze(0).cpu(),
-                                    self.sample_rate,
-                                )
-                            else:
-                                for s in range(separated.shape[0]):
+                            torchaudio.save(
+                                str(save_dir / f"mixture_coi_clean_{k}.wav"),
+                                coi_n.unsqueeze(0).cpu(),
+                                self.sample_rate,
+                            )
+                            torchaudio.save(
+                                str(save_dir / f"mixture_bg_clean_{k}.wav"),
+                                bg_n.unsqueeze(0).cpu(),
+                                self.sample_rate,
+                            )
+                            torchaudio.save(
+                                str(save_dir / f"mixture_created_{k}.wav"),
+                                mixture.unsqueeze(0).cpu(),
+                                self.sample_rate,
+                            )
+                        except Exception:
+                            print(
+                                f"Warning: failed to save mixture example for {row.filename}",
+                                file=sys.stderr,
+                            )
+
+                    if use_separation:
+                        separated = self._separate(mixture)
+                        seg_pred, seg_conf = self._classify_separated(separated)
+                        seg_preds.append(seg_pred)
+                        seg_confs.append(seg_conf)
+
+                        coi_est = (
+                            separated
+                            if separated.dim() == 1
+                            else separated[self._get_coi_head_index()]
+                        )
+                        si_snr_val, sdr_val, si_sdr_val = self._compute_signal_metrics(
+                            coi_n, coi_est
+                        )
+                        seg_si_snr.append(si_snr_val)
+                        seg_sdr.append(sdr_val)
+                        seg_si_sdr.append(si_sdr_val)
+
+                        # Save separated outputs for first segment of chosen examples.
+                        if (
+                            save_dir is not None
+                            and idx in sample_choices
+                            and seg_idx == 0
+                        ):
+                            try:
+                                k = list(sample_choices).index(idx)
+                                if separated.dim() == 1:
                                     torchaudio.save(
                                         str(
                                             save_dir
-                                            / f"mixture_separated_src{s}_{k}.wav"
+                                            / f"mixture_separated_coi_est_{k}.wav"
                                         ),
-                                        separated[s].unsqueeze(0).cpu(),
+                                        separated.unsqueeze(0).cpu(),
                                         self.sample_rate,
                                     )
-                                coi_head = separated[self._get_coi_head_index()]
-                                torchaudio.save(
-                                    str(
-                                        save_dir / f"mixture_separated_coi_head_{k}.wav"
-                                    ),
-                                    coi_head.unsqueeze(0).cpu(),
-                                    self.sample_rate,
+                                else:
+                                    for s in range(separated.shape[0]):
+                                        torchaudio.save(
+                                            str(
+                                                save_dir
+                                                / f"mixture_separated_src{s}_{k}.wav"
+                                            ),
+                                            separated[s].unsqueeze(0).cpu(),
+                                            self.sample_rate,
+                                        )
+                                    coi_head = separated[self._get_coi_head_index()]
+                                    torchaudio.save(
+                                        str(
+                                            save_dir
+                                            / f"mixture_separated_coi_head_{k}.wav"
+                                        ),
+                                        coi_head.unsqueeze(0).cpu(),
+                                        self.sample_rate,
+                                    )
+                            except Exception:
+                                print(
+                                    f"Warning: failed to save separated outputs for mixture {row.filename}",
+                                    file=sys.stderr,
                                 )
-                        except Exception:
-                            print(
-                                f"Warning: failed to save separated outputs for mixture {row.filename}",
-                                file=sys.stderr,
-                            )
-                else:
-                    pred, conf = self._classify(mixture)
+                    else:
+                        seg_pred, seg_conf = self._classify(mixture)
+                        seg_preds.append(seg_pred)
+                        seg_confs.append(seg_conf)
+
+                # Aggregate across segments: positive if any segment detects COI.
+                pred = 1 if any(p == 1 for p in seg_preds) else 0
+                conf = max(seg_confs)
+                actual_snrs.append(float(np.mean(seg_snr_vals)))
+                if use_separation:
+                    si_snr_scores.append(float(np.mean(seg_si_snr)))
+                    sdr_scores.append(float(np.mean(seg_sdr)))
+                    si_sdr_scores.append(float(np.mean(seg_si_sdr)))
+
                 y_true.append(1)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -913,12 +1152,26 @@ class ValidationPipeline:
         # Process background-only samples (label=0)
         for row in tqdm(df_bg.itertuples(), total=len(df_bg), desc=f"{desc} - BG only"):
             try:
-                waveform = self._load_audio(row.filename)
-                if use_separation:
-                    separated = self._separate(waveform)
-                    pred, conf = self._classify_separated(separated)
-                else:
-                    pred, conf = self._classify(waveform)
+                waveform_full = self._load_labeled_audio(
+                    row.filename,
+                    getattr(row, "start_time", None),
+                    getattr(row, "end_time", None),
+                )
+                segments = self._split_into_segments(waveform_full)
+
+                seg_preds = []
+                seg_confs = []
+                for seg in segments:
+                    if use_separation:
+                        separated = self._separate(seg)
+                        seg_pred, seg_conf = self._classify_separated(separated)
+                    else:
+                        seg_pred, seg_conf = self._classify(seg)
+                    seg_preds.append(seg_pred)
+                    seg_confs.append(seg_conf)
+
+                pred = 1 if any(p == 1 for p in seg_preds) else 0
+                conf = max(seg_confs)
                 y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -954,14 +1207,20 @@ class ValidationPipeline:
         seed: int = 42,
         save_examples_dir: str = None,
         save_n_examples: int = 1,
+        only_dataset: Optional[str] = None,
+        exclude_datasets: Optional[List[str]] = None,
     ) -> Dict[str, ClassificationMetrics]:
         """Run full validation suite.
 
         Args:
-            split: Dataset split to evaluate on.
+            split: Dataset split to evaluate on (e.g. ``"test"``).  When
+                ``only_dataset`` is set the split filter is skipped and all
+                rows belonging to that dataset are used directly.
             snr_range: (min, max) SNR in dB for mixture creation.
             data_csv: Path to dataset CSV. Falls back to self.DATA_CSV.
-            output_dir: Directory to save JSON results.
+            output_dir: Directory to save JSON results.  The saved filename
+                includes a label derived from ``only_dataset`` or ``split`` so
+                results from different runs never overwrite each other.
             seed: Random seed for reproducibility of mixture creation.
             save_examples_dir: If provided, save example audio for up to `save_n_examples`
                 random separations in the clean separation run and up to `save_n_examples`
@@ -970,6 +1229,15 @@ class ValidationPipeline:
                 - <save_examples_dir>/mixture_sep
             save_n_examples: Number of random examples to save for each of clean and
                 mixture tests (1..N). Defaults to 1.
+            only_dataset: If provided, ignore the ``split`` filter and instead
+                keep only rows whose ``dataset`` column equals this value.
+                Use this to evaluate an independent test set (e.g.
+                ``only_dataset="risoux_test"``) in complete isolation from the
+                normal training-domain test splits.
+            exclude_datasets: Optional list of dataset names to drop before
+                applying the split filter.  Use this to remove an independent
+                test set (e.g. ``exclude_datasets=["risoux_test"]``) from a
+                normal ``split="test"`` run so the two are never conflated.
         """
         # Set seeds for reproducibility
         np.random.seed(seed)
@@ -978,13 +1246,42 @@ class ValidationPipeline:
 
         csv_path = data_csv or self.DATA_CSV
         df = pd.read_csv(csv_path)
-        df_split = df[df["split"] == split]
+
+        # ------------------------------------------------------------------
+        # Dataset-level filtering
+        # ------------------------------------------------------------------
+        if only_dataset is not None:
+            # Evaluate a single independent dataset regardless of split value.
+            if "dataset" not in df.columns:
+                print(
+                    f"[Warning] 'dataset' column not found in CSV; "
+                    f"'only_dataset={only_dataset}' filter cannot be applied.",
+                    file=sys.stderr,
+                )
+                df_split = df[df["split"] == split]
+            else:
+                df_split = df[df["dataset"] == only_dataset].reset_index(drop=True)
+        else:
+            # Normal path: filter by split, optionally excluding certain datasets.
+            if exclude_datasets and "dataset" in df.columns:
+                df = df[~df["dataset"].isin(exclude_datasets)]
+            elif exclude_datasets:
+                print(
+                    "[Warning] 'dataset' column not found in CSV; "
+                    "'exclude_datasets' filter cannot be applied.",
+                    file=sys.stderr,
+                )
+            df_split = df[df["split"] == split]
+
         df_coi = df_split[df_split["label"] == 1].reset_index(drop=True)
         df_bg = df_split[df_split["label"] == 0].reset_index(drop=True)
 
+        # Human-readable label for logging and output filenames.
+        run_label = only_dataset if only_dataset is not None else split
+
         print(f"\n{'=' * 60}")
         print(
-            f"Validation on {split.upper()} set: {len(df_coi)} COI, {len(df_bg)} background"
+            f"Validation on {run_label.upper()} set: {len(df_coi)} COI, {len(df_bg)} background"
         )
         print(f"SNR range: {snr_range} dB")
         print(f"{'=' * 60}\n")
@@ -993,6 +1290,10 @@ class ValidationPipeline:
         # semantic labels the model was trained to treat as COI.
         if getattr(self, "target_classes", None):
             print(f"Target classes: {self.target_classes}")
+        if only_dataset:
+            print(f"[Independent test set] only_dataset={only_dataset!r}")
+        if exclude_datasets:
+            print(f"[Excluded from this run] exclude_datasets={exclude_datasets!r}")
 
         results = {}
 
@@ -1045,13 +1346,18 @@ class ValidationPipeline:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             results_dict = {k: v.to_dict() for k, v in results.items()}
-            # Add checkpoint paths to output
+            results_dict["split"] = split
+            if only_dataset:
+                results_dict["only_dataset"] = only_dataset
             results_dict["checkpoint_paths"] = {
                 "separator": str(self.sep_checkpoint_path),
                 "classifier": str(self.cls_checkpoint_path),
             }
-            with open(Path(output_dir) / f"results_{ts}.json", "w") as f:
+            tag = f"{split}_{only_dataset}" if only_dataset else split
+            out_file = Path(output_dir) / f"results_{tag}_{ts}.json"
+            with open(out_file, "w") as f:
                 json.dump(results_dict, f, indent=2)
+            print(f"\nResults saved to {out_file}")
 
         return results
 
@@ -1208,12 +1514,28 @@ def main():
     pipeline.load_models(
         sep_checkpoint=SEP_CHECKPOINT, cls_weights=CLS_WEIGHTS, use_clapsep=True
     )
+
+    # Pass 1: standard held-out test split (esc50, aerosonicdb, freesound)
     pipeline.run(
         split="test",
         snr_range=(-5, 5),
         data_csv=DATA_CSV,
         output_dir="./validation_results",
-        save_examples_dir=f"./validation_examples_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        save_examples_dir="./validation_examples_test",
+        save_n_examples=2,
+        exclude_datasets=["risoux_test"],
+    )
+
+    # Pass 2: independent Risoux test set — kept separate because
+    # load_risoux_test() assigns split="test" to all its rows, so it
+    # must be filtered by dataset name rather than split name.
+    pipeline.run(
+        split="test",
+        only_dataset="risoux_test",
+        snr_range=(-5, 5),
+        data_csv=DATA_CSV,
+        output_dir="./validation_results",
+        save_examples_dir="./validation_examples_risoux_test",
         save_n_examples=2,
     )
 

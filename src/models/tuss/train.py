@@ -7,7 +7,8 @@ warm-starting them from the existing "sfx" / "sfxbg" vectors.  The full network 
 then fine-tuned on a COI dataset using snr_with_zeroref_loss so that absent sources
 (zero-energy targets) are handled gracefully.
 
-Config is read from training_config.yml in the same directory – no CLI args needed.
+Config is read from training_config.yaml in the same directory.
+Pass --device / --gpu on the command line to override the device without editing the YAML.
 
 Dataset expectations (same CSV format as sudormrf):
     - 'filename' : path to wav file
@@ -16,18 +17,15 @@ Dataset expectations (same CSV format as sudormrf):
     - 'coi_class': integer index (0 … n_coi_classes-1)  [added by this script]
 """
 
+import argparse
 import gc
 import json
 import math
-import os
 import sys
 from contextlib import nullcontext
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-
-from dataclasses import asdict, dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -70,7 +68,61 @@ BG_SCALE_MIN = 0.1
 BG_SCALE_MAX = 3.0
 RESAMPLER_CACHE_MAX = 8
 
-CONFIG_PATH = _SCRIPT_DIR / "training_config.yml"
+CONFIG_PATH = _SCRIPT_DIR / "training_config.yaml"
+
+
+# =============================================================================
+# Device resolution
+# =============================================================================
+
+
+def resolve_device(device: str | int) -> str:
+    """Return a concrete device string from a flexible specification.
+
+    Accepted forms
+    ──────────────
+    "cuda"      → "cuda:<index of best GPU>" (or "cpu" if none available)
+    "cuda:N"    → validated, falls back to "cpu" if GPU N is absent
+    N  (int)    → "cuda:N"  (e.g. 0, 1, 2 …)
+    "cpu"       → "cpu"
+
+    The resolved string is always safe to pass to ``tensor.to(device)``.
+    """
+    if isinstance(device, int):
+        device = f"cuda:{device}"
+
+    device = str(device).strip().lower()
+
+    if device == "cpu":
+        return "cpu"
+
+    if device == "cuda":
+        if not torch.cuda.is_available():
+            print("⚠️  No CUDA device found – falling back to CPU")
+            return "cpu"
+        idx = torch.cuda.current_device()
+        return f"cuda:{idx}"
+
+    if device.startswith("cuda:"):
+        if not torch.cuda.is_available():
+            print("⚠️  No CUDA device found – falling back to CPU")
+            return "cpu"
+        try:
+            idx = int(device.split(":")[1])
+        except ValueError:
+            print(f"⚠️  Invalid device string '{device}' – falling back to cuda:0")
+            idx = 0
+        n_gpus = torch.cuda.device_count()
+        if idx >= n_gpus:
+            print(
+                f"⚠️  GPU {idx} requested but only {n_gpus} GPU(s) available – "
+                f"falling back to cuda:0"
+            )
+            idx = 0
+        return f"cuda:{idx}"
+
+    print(f"⚠️  Unrecognised device '{device}' – falling back to CPU")
+    return "cpu"
 
 
 # =============================================================================
@@ -1207,7 +1259,9 @@ def train(config: Config, timestamp: str | None = None):
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     use_amp = config.training.use_amp and str(config.training.device).startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+    # GradScaler needs the backend string ("cuda"), not "cuda:N"
+    _amp_backend = str(config.training.device).split(":")[0]
+    scaler = torch.amp.GradScaler(_amp_backend, enabled=use_amp) if use_amp else None
 
     validate_every_n = int(config.training.validate_every_n_epochs)
     best_val_loss = float("inf")
@@ -1305,8 +1359,47 @@ def train(config: Config, timestamp: str | None = None):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Train the TUSS model for COI sound separation.",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    device_group = parser.add_mutually_exclusive_group()
+    device_group.add_argument(
+        "--device",
+        "-d",
+        type=str,
+        default=None,
+        metavar="DEVICE",
+        help=(
+            "Device to train on.  Overrides training_config.yaml.\n"
+            "Examples:\n"
+            "  --device cuda        (use default / best GPU)\n"
+            "  --device cuda:0      (first GPU)\n"
+            "  --device cuda:1      (second GPU)\n"
+            "  --device cpu         (force CPU)"
+        ),
+    )
+    device_group.add_argument(
+        "--gpu",
+        type=int,
+        default=None,
+        metavar="INDEX",
+        help="GPU index shorthand.  --gpu 1 is equivalent to --device cuda:1.",
+    )
+    args = parser.parse_args()
+
     print(f"Loading config from {CONFIG_PATH}")
     config = Config.from_yaml(CONFIG_PATH)
+
+    # Apply CLI device override (--gpu takes precedence when both somehow set,
+    # but argparse enforces mutual exclusion so only one can be present).
+    if args.gpu is not None:
+        config.training.device = resolve_device(args.gpu)
+    elif args.device is not None:
+        config.training.device = resolve_device(args.device)
+    else:
+        # Validate / normalise whatever is in the YAML
+        config.training.device = resolve_device(config.training.device)
 
     print(f"Device:      {config.training.device}")
     print(f"COI prompts: {config.model.coi_prompts}")
@@ -1328,7 +1421,7 @@ def main():
     target_classes = config.data.target_classes
     if not target_classes:
         raise ValueError(
-            "target_classes is empty – add class label lists to training_config.yml"
+            "target_classes is empty – add class label lists to training_config.yaml"
         )
 
     # Support a flat list (single class) or a list of lists (multi-class)
