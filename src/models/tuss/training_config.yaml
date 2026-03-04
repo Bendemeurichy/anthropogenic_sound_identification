@@ -48,13 +48,7 @@ data:
   # -----------------------------------------------------------------------
   target_classes:
     # Class 0 → model.coi_prompts[0] = "airplane"
-    - [
-        "airplane",
-        "aircraft",
-        "jet",
-        "propeller_airplane",
-        "fixed-wing_aircraft",
-      ]
+    - ["airplane", "Airplane", "plane"]
 
   # Probability that a training sample contains *only* background (no COI)
   background_only_prob: 0.15
@@ -108,7 +102,8 @@ model:
 training:
   batch_size: 2 # per-GPU batch size (keep low if VRAM is tight)
   grad_accum_steps: 8 # effective batch = batch_size × grad_accum_steps = 16
-  use_amp: true # mixed-precision training (fp16); disable if unstable
+  use_amp: true # mixed-precision training; disable if unstable
+  amp_dtype: "bf16" # "bf16" (recommended, matches pretrained model) or "fp16"
 
   num_epochs: 200
   patience: 30 # early-stop after this many epochs without improvement
@@ -133,11 +128,15 @@ training:
   #   "cuda:0"  → first GPU  (explicit index)
   #   "cuda:1"  → second GPU
   #   "cpu"     → force CPU (slow, for debugging only)
-  device: "cuda"
+  device: "cuda:1"
   seed: 42
 
   checkpoint_dir: "checkpoints"
   validate_every_n_epochs: 1
+
+  # Path to a checkpoint .pt file to resume training from.
+  # Leave empty to start fresh.  Example: "checkpoints/20250101_120000/best_model.pt"
+  resume_from: ""
 
 # =============================================================================
 # QUICK-START RECIPES

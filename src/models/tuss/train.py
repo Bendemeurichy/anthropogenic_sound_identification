@@ -168,6 +168,7 @@ class TrainingConfig:
     batch_size: int = 2
     grad_accum_steps: int = 8
     use_amp: bool = True
+    amp_dtype: str = "bf16"  # "bf16" (recommended, matches pretrained) or "fp16"
     num_epochs: int = 200
     lr: float = 5e-5
     weight_decay: float = 1e-2
@@ -182,6 +183,7 @@ class TrainingConfig:
     zero_ref_loss_weight: float = 0.1
     warmup_steps: int = 300
     validate_every_n_epochs: int = 1
+    resume_from: str = ""  # path to checkpoint .pt file to resume training
     seed: int = 42
 
 
@@ -246,6 +248,7 @@ class COIWeightedSNRLoss(torch.nn.Module):
         snr_max: int = 30,
         zero_ref_loss_weight: float = 0.1,
         eps: float = 1e-7,
+        amp_dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
         self.n_src = n_src
@@ -254,6 +257,8 @@ class COIWeightedSNRLoss(torch.nn.Module):
         self.snr_max = snr_max
         self.zero_ref_loss_weight = zero_ref_loss_weight
         self.eps = eps
+        # Stored so train_epoch / validate_epoch can read the dtype
+        self._amp_dtype = amp_dtype
 
     def forward(self, est: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
         """
@@ -723,6 +728,11 @@ def prepare_batch(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build mixture and normalised clean sources from the raw source tensor.
 
+    The mixture and all clean source references are normalised using the
+    **same** statistics (mean and std of the raw mixture) so that
+    ``sum(clean_sources) ≈ mixture`` is preserved.  This keeps the
+    relative scale between sources consistent with what the model sees.
+
     Args:
         sources: (B, n_coi_classes + 1, T) – COI tracks + background (last)
         snr_range: (min_snr_db, max_snr_db)
@@ -754,10 +764,33 @@ def prepare_batch(
     bg_scaling = torch.clamp(bg_scaling, BG_SCALE_MIN, BG_SCALE_MAX)
 
     bg_scaled = bg * bg_scaling
-    mixture = normalize_tensor_wav(total_coi + bg_scaled)
 
-    norm_cois = [normalize_tensor_wav(c) for c in cois]
-    norm_bg = normalize_tensor_wav(bg_scaled)
+    # ---- Joint normalisation ------------------------------------------------
+    # Compute statistics from the raw mixture and apply the *same* transform
+    # to every source so that additivity is preserved.
+    raw_mixture = total_coi + bg_scaled  # (B, T)
+    mix_mean = raw_mixture.mean(dim=-1, keepdim=True)  # (B, 1)
+    mix_std = raw_mixture.std(dim=-1, keepdim=True)  # (B, 1)
+    is_silent = mix_std < NORMALIZE_MIN_STD
+    mix_std_safe = torch.where(is_silent, torch.ones_like(mix_std), mix_std) + eps
+
+    mixture = (raw_mixture - mix_mean) / mix_std_safe
+    mixture = torch.where(is_silent, torch.zeros_like(mixture), mixture)
+
+    # Normalise each clean source with the mixture's mean/std.
+    # Each source is zero-centred around its own mean (so DC offsets don't
+    # leak between sources) but scaled by the shared std.
+    norm_cois = []
+    for c in cois:
+        c_mean = c.mean(dim=-1, keepdim=True)
+        normed = (c - c_mean) / mix_std_safe
+        normed = torch.where(is_silent, torch.zeros_like(normed), normed)
+        norm_cois.append(normed)
+
+    bg_mean = bg_scaled.mean(dim=-1, keepdim=True)
+    norm_bg = (bg_scaled - bg_mean) / mix_std_safe
+    norm_bg = torch.where(is_silent, torch.zeros_like(norm_bg), norm_bg)
+
     clean_wavs = torch.stack(norm_cois + [norm_bg], dim=1)  # (B, n_src, T)
     return mixture, clean_wavs
 
@@ -789,10 +822,14 @@ def train_epoch(
     running_loss, n_samples = 0.0, 0
     grad_norms: list[float] = []
     use_amp = use_amp and str(device).startswith("cuda")
-    if scaler is None and use_amp:
+    amp_dtype = getattr(criterion, "_amp_dtype", torch.bfloat16)
+    needs_scaler = use_amp and amp_dtype == torch.float16
+    if scaler is None and needs_scaler:
         scaler = torch.amp.GradScaler("cuda", enabled=True)
+    elif not needs_scaler:
+        scaler = None  # GradScaler is unnecessary for bf16
     autocast_ctx = (
-        torch.amp.autocast("cuda", dtype=torch.float16, enabled=True)
+        torch.amp.autocast("cuda", dtype=amp_dtype, enabled=True)
         if use_amp
         else nullcontext()
     )
@@ -821,7 +858,7 @@ def train_epoch(
 
             if not check_finite(outputs):
                 del outputs
-                if use_amp:
+                if use_amp and scaler is not None:
                     torch.cuda.empty_cache()
                     with torch.amp.autocast("cuda", enabled=False):
                         outputs = model(mixture.float(), prompts)
@@ -848,7 +885,7 @@ def train_epoch(
             continue
 
         loss_scaled = loss / grad_accum_steps
-        if use_amp:
+        if use_amp and scaler is not None:
             scaler.scale(loss_scaled).backward()
         else:
             loss_scaled.backward()
@@ -857,7 +894,7 @@ def train_epoch(
         del loss, loss_scaled
 
         if step_idx % grad_accum_steps == 0:
-            if use_amp:
+            if use_amp and scaler is not None:
                 scaler.unscale_(optimizer)
 
             grads_ok = all(
@@ -871,7 +908,7 @@ def train_epoch(
                     model.parameters(), clip_grad_norm
                 )
                 grad_norms.append(float(total_norm.item()))
-                if use_amp:
+                if use_amp and scaler is not None:
                     scaler.step(optimizer)
                     scaler.update()
                 else:
@@ -880,7 +917,7 @@ def train_epoch(
                     scheduler.step()
             else:
                 grad_norms.append(float("nan"))
-                if use_amp:
+                if use_amp and scaler is not None:
                     try:
                         scaler.update()
                     except Exception:
@@ -902,7 +939,7 @@ def train_epoch(
 
     # Flush remaining accumulated gradients
     if has_pending_grads:
-        if use_amp:
+        if use_amp and scaler is not None:
             scaler.unscale_(optimizer)
         grads_ok = all(
             torch.isfinite(p.grad).all()
@@ -915,7 +952,7 @@ def train_epoch(
                 model.parameters(), clip_grad_norm
             )
             grad_norms.append(float(total_norm.item()))
-            if use_amp:
+            if use_amp and scaler is not None:
                 scaler.step(optimizer)
                 scaler.update()
             else:
@@ -924,7 +961,7 @@ def train_epoch(
                 scheduler.step()
         else:
             grad_norms.append(float("nan"))
-            if use_amp:
+            if use_amp and scaler is not None:
                 try:
                     scaler.update()
                 except Exception:
@@ -958,8 +995,9 @@ def validate_epoch(
     bg_sisnr_vals: list[float] = []
 
     use_amp = use_amp and str(device).startswith("cuda")
+    amp_dtype = getattr(criterion, "_amp_dtype", torch.bfloat16)
     autocast_ctx = (
-        torch.amp.autocast("cuda", dtype=torch.float16, enabled=True)
+        torch.amp.autocast("cuda", dtype=amp_dtype, enabled=True)
         if use_amp
         else nullcontext()
     )
@@ -1230,11 +1268,22 @@ def train(config: Config, timestamp: str | None = None):
     train_loader, train_dataset = create_dataloader(config, "train")
     val_loader, val_dataset = create_dataloader(config, "val")
 
+    # ---- Resolve AMP dtype --------------------------------------------------
+    _amp_dtype_str = getattr(config.training, "amp_dtype", "bf16").lower()
+    if _amp_dtype_str in ("bf16", "bfloat16"):
+        amp_dtype = torch.bfloat16
+    elif _amp_dtype_str in ("fp16", "float16"):
+        amp_dtype = torch.float16
+    else:
+        print(f"⚠️  Unknown amp_dtype '{_amp_dtype_str}' – defaulting to bf16")
+        amp_dtype = torch.bfloat16
+
     criterion = COIWeightedSNRLoss(
         n_src=n_src,
         coi_weight=config.training.coi_weight,
         snr_max=config.training.snr_max,
         zero_ref_loss_weight=config.training.zero_ref_loss_weight,
+        amp_dtype=amp_dtype,
     )
 
     base_lr = float(config.training.lr)
@@ -1259,17 +1308,51 @@ def train(config: Config, timestamp: str | None = None):
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     use_amp = config.training.use_amp and str(config.training.device).startswith("cuda")
-    # GradScaler needs the backend string ("cuda"), not "cuda:N"
+    # GradScaler is only needed for fp16; bf16 has sufficient dynamic range.
     _amp_backend = str(config.training.device).split(":")[0]
-    scaler = torch.amp.GradScaler(_amp_backend, enabled=use_amp) if use_amp else None
+    needs_scaler = use_amp and amp_dtype == torch.float16
+    scaler = torch.amp.GradScaler(_amp_backend, enabled=True) if needs_scaler else None
+    print(f"AMP: {use_amp}  dtype: {amp_dtype}  GradScaler: {scaler is not None}")
 
+    # ---- Resume from checkpoint ---------------------------------------------
+    start_epoch = 1
     validate_every_n = int(config.training.validate_every_n_epochs)
     best_val_loss = float("inf")
     epochs_without_improvement = 0
     global_step = 0
     history: dict = {"train_loss": [], "val_loss": [], "grad_norms": []}
 
-    for epoch in range(1, config.training.num_epochs + 1):
+    resume_path = getattr(config.training, "resume_from", "") or ""
+    if resume_path and Path(resume_path).is_file():
+        print(f"Resuming from checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=config.training.device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        global_step = int(ckpt.get("global_step", 0))
+        best_val_loss = float(ckpt.get("val_loss", float("inf")))
+        history = ckpt.get("history", history)
+        # Restore scheduler state so the LR curve continues seamlessly.
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        else:
+            # Fallback for checkpoints saved before scheduler state was added:
+            # replay steps so the LR is consistent with where training left off.
+            print("  ⚠ No scheduler state in checkpoint – replaying steps …")
+            for _ in range(global_step):
+                scheduler.step()
+        # Restore GradScaler state (only relevant for fp16)
+        if scaler is not None and "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+        print(
+            f"  Resumed at epoch {start_epoch}, global_step {global_step}, "
+            f"best_val_loss {best_val_loss:.4f}, "
+            f"lr {optimizer.param_groups[0]['lr']:.2e}"
+        )
+    elif resume_path:
+        print(f"⚠️  resume_from path not found: {resume_path} – starting fresh")
+
+    for epoch in range(start_epoch, config.training.num_epochs + 1):
         print(f"\nEpoch {epoch}/{config.training.num_epochs}")
 
         if hasattr(train_loader.dataset, "set_epoch"):
@@ -1321,21 +1404,22 @@ def train(config: Config, timestamp: str | None = None):
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 epochs_without_improvement = 0
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "global_step": global_step,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "val_loss": val_loss,
-                        "config": config.to_dict(),
-                        "history": history,
-                        "coi_prompts": config.model.coi_prompts,
-                        "bg_prompt": config.model.bg_prompt,
-                        "all_prompts": all_prompts,
-                    },
-                    checkpoint_dir / "best_model.pt",
-                )
+                ckpt_payload = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "val_loss": val_loss,
+                    "config": config.to_dict(),
+                    "history": history,
+                    "coi_prompts": config.model.coi_prompts,
+                    "bg_prompt": config.model.bg_prompt,
+                    "all_prompts": all_prompts,
+                }
+                if scaler is not None:
+                    ckpt_payload["scaler_state_dict"] = scaler.state_dict()
+                torch.save(ckpt_payload, checkpoint_dir / "best_model.pt")
                 print(f"✓ Saved best model (val_loss: {val_loss:.4f})")
             else:
                 epochs_without_improvement += 1
