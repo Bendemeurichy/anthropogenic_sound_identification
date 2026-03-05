@@ -878,6 +878,14 @@ def train_epoch(
                     grad_norms.append(float("nan"))
                     continue
 
+            # Trim/pad outputs to match reference length (STFT/iSTFT may change length)
+            T_ref = clean_wavs.shape[-1]
+            T_est = outputs.shape[-1]
+            if T_est > T_ref:
+                outputs = outputs[..., :T_ref]
+            elif T_est < T_ref:
+                clean_wavs = clean_wavs[..., :T_est]
+
             loss = criterion(outputs.float(), clean_wavs.float())
 
         del outputs, mixture, clean_wavs
@@ -1022,6 +1030,14 @@ def validate_epoch(
 
             with autocast_ctx:
                 outputs = model(mixture, prompts)
+                # Trim/pad outputs to match reference length (STFT/iSTFT may change length)
+                T_ref = clean_wavs.shape[-1]
+                T_est = outputs.shape[-1]
+                if T_est > T_ref:
+                    outputs = outputs[..., :T_ref]
+                elif T_est < T_ref:
+                    clean_wavs = clean_wavs[..., :T_est]
+
                 loss = criterion(outputs.float(), clean_wavs.float())
 
             batch_loss = float(loss.item())
@@ -1147,6 +1163,11 @@ def create_model(config: Config) -> torch.nn.Module:
         ckpt_path = Path(pretrained_path) / "checkpoints" / "model.pth"
         print(f"Loading pretrained weights from {ckpt_path}")
         state_dict = torch.load(ckpt_path, map_location="cpu")
+        # Strip 'model.' prefix that Lightning checkpoints add
+        state_dict = {
+            (k[len("model.") :] if k.startswith("model.") else k): v
+            for k, v in state_dict.items()
+        }
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
             print(f"  Missing keys (expected for new prompts): {missing}")
