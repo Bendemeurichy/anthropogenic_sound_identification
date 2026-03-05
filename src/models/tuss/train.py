@@ -98,30 +98,30 @@ def resolve_device(device: str | int) -> str:
 
     if device == "cuda":
         if not torch.cuda.is_available():
-            print("⚠️  No CUDA device found – falling back to CPU")
+            print("No CUDA device found – falling back to CPU")
             return "cpu"
         idx = torch.cuda.current_device()
         return f"cuda:{idx}"
 
     if device.startswith("cuda:"):
         if not torch.cuda.is_available():
-            print("⚠️  No CUDA device found – falling back to CPU")
+            print("No CUDA device found – falling back to CPU")
             return "cpu"
         try:
             idx = int(device.split(":")[1])
         except ValueError:
-            print(f"⚠️  Invalid device string '{device}' – falling back to cuda:0")
+            print(f"Invalid device string '{device}' – falling back to cuda:0")
             idx = 0
         n_gpus = torch.cuda.device_count()
         if idx >= n_gpus:
             print(
-                f"⚠️  GPU {idx} requested but only {n_gpus} GPU(s) available – "
+                f"GPU {idx} requested but only {n_gpus} GPU(s) available – "
                 f"falling back to cuda:0"
             )
             idx = 0
         return f"cuda:{idx}"
 
-    print(f"⚠️  Unrecognised device '{device}' – falling back to CPU")
+    print(f"Unrecognised device '{device}' – falling back to CPU")
     return "cpu"
 
 
@@ -1275,7 +1275,7 @@ def train(config: Config, timestamp: str | None = None):
     elif _amp_dtype_str in ("fp16", "float16"):
         amp_dtype = torch.float16
     else:
-        print(f"⚠️  Unknown amp_dtype '{_amp_dtype_str}' – defaulting to bf16")
+        print(f"Unknown amp_dtype '{_amp_dtype_str}' – defaulting to bf16")
         amp_dtype = torch.bfloat16
 
     criterion = COIWeightedSNRLoss(
@@ -1350,7 +1350,7 @@ def train(config: Config, timestamp: str | None = None):
             f"lr {optimizer.param_groups[0]['lr']:.2e}"
         )
     elif resume_path:
-        print(f"⚠️  resume_from path not found: {resume_path} – starting fresh")
+        print(f"resume_from path not found: {resume_path} – starting fresh")
 
     for epoch in range(start_epoch, config.training.num_epochs + 1):
         print(f"\nEpoch {epoch}/{config.training.num_epochs}")
@@ -1552,7 +1552,7 @@ def main():
     sampled_df["file_exists"] = sampled_df["filename"].apply(lambda f: Path(f).exists())
     n_missing = (~sampled_df["file_exists"]).sum()
     if n_missing:
-        print(f"⚠️  Dropping {n_missing} missing files")
+        print(f"Dropping {n_missing} missing files")
         sampled_df = sampled_df[sampled_df["file_exists"]]
     sampled_df = sampled_df.drop(columns=["file_exists"])
     print(f"✅ Final dataset: {len(sampled_df)} samples")
