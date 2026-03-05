@@ -1349,13 +1349,38 @@ def train(config: Config, timestamp: str | None = None):
 
     validate_every_n = int(getattr(config.training, "validate_every_n_epochs", 1))
 
-    # Training loop
+    # Training loop state (may be overwritten by a resumed checkpoint below)
     best_val_loss = float("inf")
     epochs_without_improvement = 0
     global_step = 0  # cumulative optimizer steps across all epochs
     history = {"train_loss": [], "val_loss": [], "grad_norms": []}
+    start_epoch = 1
 
-    for epoch in range(1, config.training.num_epochs + 1):
+    # ------------------------------------------------------------------ #
+    # Resume from last checkpoint if one exists in checkpoint_dir         #
+    # ------------------------------------------------------------------ #
+    last_ckpt_path = checkpoint_dir / "last_checkpoint.pt"
+    if last_ckpt_path.exists():
+        print(f"\nResuming from checkpoint: {last_ckpt_path}")
+        ckpt = torch.load(last_ckpt_path, map_location=config.training.device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if scaler is not None and "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        global_step = ckpt["global_step"]
+        best_val_loss = ckpt["best_val_loss"]
+        epochs_without_improvement = ckpt["epochs_without_improvement"]
+        history = ckpt["history"]
+        print(
+            f"  Resumed at epoch {start_epoch}, global_step {global_step}, "
+            f"best_val_loss {best_val_loss:.4f}"
+        )
+    else:
+        print("No last checkpoint found — starting from scratch.")
+
+    for epoch in range(start_epoch, config.training.num_epochs + 1):
         print(f"\nEpoch {epoch}/{config.training.num_epochs}")
 
         # Re-seed dataset RNG for augmentation diversity each epoch
@@ -1431,6 +1456,23 @@ def train(config: Config, timestamp: str | None = None):
             history["val_loss"].append(None)
             print(f"Train: {train_loss:.4f}")
 
+        # ------------------------------------------------------------------ #
+        # Save last checkpoint every epoch so training can be resumed        #
+        # ------------------------------------------------------------------ #
+        last_ckpt = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "best_val_loss": best_val_loss,
+            "epochs_without_improvement": epochs_without_improvement,
+            "history": history,
+        }
+        if scaler is not None:
+            last_ckpt["scaler_state_dict"] = scaler.state_dict()
+        torch.save(last_ckpt, last_ckpt_path)
+
     # Save history
     with open(checkpoint_dir / "training_history.json", "w") as f:
         json.dump(history, f, indent=2)
@@ -1443,9 +1485,50 @@ def main():
     parser.add_argument(
         "--config", type=str, required=True, help="Path to config YAML file"
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help=(
+            "Path to an existing checkpoint directory to resume training from "
+            "(e.g. checkpoints/20240101_120000). The config.yaml and "
+            "separation_dataset.csv inside that directory will be reused."
+        ),
+    )
     args = parser.parse_args()
 
-    config = Config.from_yaml(Path(args.config))
+    # ------------------------------------------------------------------ #
+    # Resume path: reuse the existing run directory as-is                 #
+    # ------------------------------------------------------------------ #
+    if args.resume:
+        resume_dir = Path(args.resume)
+        if not resume_dir.is_dir():
+            raise FileNotFoundError(f"Resume directory not found: {resume_dir}")
+        if not (resume_dir / "last_checkpoint.pt").exists():
+            raise FileNotFoundError(
+                f"No last_checkpoint.pt found in {resume_dir}. "
+                "Cannot resume — did the first epoch complete?"
+            )
+
+        print(f"Resuming run from: {resume_dir}")
+        config = Config.from_yaml(str(resume_dir / "config.yaml"))
+        # Override config with any flags from the user-supplied config file,
+        # but keep df_path pointing at the already-sampled dataset.
+        user_config = Config.from_yaml(str(Path(args.config)))
+        config.data.df_path = str(resume_dir / "separation_dataset.csv")
+        # Allow the user to tweak training hyper-params (lr, epochs, …) via
+        # the --config file while still reusing the existing dataset/run.
+        config.training = user_config.training
+
+        timestamp = resume_dir.name
+        print(f"  Using dataset: {config.data.df_path}")
+        train(config, timestamp=timestamp)
+        return
+
+    # ------------------------------------------------------------------ #
+    # Normal (fresh) path                                                  #
+    # ------------------------------------------------------------------ #
+    config = Config.from_yaml(str(Path(args.config)))
     print("Configuration:")
     print(f"  Model: {config.model.type} ({config.model.num_blocks} blocks)")
     print(f"  Device: {config.training.device}")
