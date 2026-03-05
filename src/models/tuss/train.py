@@ -1516,12 +1516,12 @@ def main():
     if len(target_classes) != n_coi:
         raise ValueError(
             f"target_classes has {len(target_classes)} groups but "
-            f"coi_prompts has {n_coi} entries – they must match."
+            f"coi_prompts has {n_coi} entries - they must match."
         )
 
     print(f"\nTarget classes ({n_coi} groups):")
     for i, (labels, prompt) in enumerate(zip(target_classes, config.model.coi_prompts)):
-        print(f"  [{i}] {labels} → prompt='{prompt}'")
+        print(f"  [{i}] {labels} -> prompt='{prompt}'")
 
     # Build one combined set of all COI labels for get_coi / sample_non_coi
     all_coi_labels = [lbl for group in target_classes for lbl in group]
