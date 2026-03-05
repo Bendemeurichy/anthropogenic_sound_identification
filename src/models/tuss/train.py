@@ -19,6 +19,7 @@ Dataset expectations (same CSV format as sudormrf):
 
 import argparse
 import gc
+import io
 import json
 import math
 import sys
@@ -35,6 +36,9 @@ import torchaudio
 import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # Resolve paths so imports work regardless of working directory
@@ -498,7 +502,7 @@ class AudioDataset(Dataset):
             except Exception as exc:
                 failures += 1
                 if failures <= 5:
-                    print(f"  ⚠ info() failed for {filepath}: {exc}")
+                    print(f"info() failed for {filepath}: {exc}")
                 orig_sr = self.sample_rate
                 num_frames = (
                     int(end_sec * orig_sr)
