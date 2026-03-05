@@ -1555,7 +1555,7 @@ def main():
         print(f"Dropping {n_missing} missing files")
         sampled_df = sampled_df[sampled_df["file_exists"]]
     sampled_df = sampled_df.drop(columns=["file_exists"])
-    print(f"✅ Final dataset: {len(sampled_df)} samples")
+    print(f"! Final dataset: {len(sampled_df)} samples")
 
     print("\nDataset splits:")
     for split in ["train", "val", "test"]:
