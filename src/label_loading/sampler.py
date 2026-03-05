@@ -71,31 +71,47 @@ def add_durations(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_coi(metadata_df: pd.DataFrame, target_class: list[str]) -> pd.DataFrame:
-    """Get all samples containing the class of interest (COI).
+    """Get all *pure* samples of the class of interest (COI).
+
+    Only recordings whose labels exclusively consist of COI labels are kept.
+    Recordings that mix a COI label with other (non-COI) labels are discarded
+    entirely so that they neither pollute the COI set nor the background set.
+
     Args:
         metadata_df: DataFrame containing all dataset metadata.
         target_class: List of class names representing the class of interest.
     Returns:
-        pandas.DataFrame: DataFrame containing all samples with the class of interest.
+        pandas.DataFrame: DataFrame containing only pure COI samples.
     """
 
-    def _contains_target(labels):
-        """Check if labels contain any target class, handling both list and string types."""
+    def _contains_any_coi(labels):
+        """Return True if labels contain at least one COI label."""
         if isinstance(labels, list):
             return any(target in labels for target in target_class)
         elif isinstance(labels, str):
             return labels in target_class
-        else:
-            return False
+        return False
 
-    # Check if any target class is in the label array for each row
-    coi_df = metadata_df[metadata_df["label"].apply(_contains_target)].copy()
+    def _is_pure_coi(labels):
+        """Return True only if ALL labels belong to the COI set."""
+        if isinstance(labels, list):
+            return len(labels) > 0 and all(label in target_class for label in labels)
+        elif isinstance(labels, str):
+            return labels in target_class
+        return False
 
-    # Debug info
+    any_coi_mask = metadata_df["label"].apply(_contains_any_coi)
+    pure_coi_mask = metadata_df["label"].apply(_is_pure_coi)
+
+    coi_df = metadata_df[pure_coi_mask].copy()
+    mixed_count = int(any_coi_mask.sum()) - int(pure_coi_mask.sum())
+
     print(f"\nClass of Interest (COI) sampling:")
     print(f"  Total samples in metadata: {len(metadata_df)}")
-    print(f"  COI samples found: {len(coi_df)}")
-    print(f"  COI samples by split:")
+    print(f"  Recordings with any COI label: {any_coi_mask.sum()}")
+    print(f"  Mixed recordings discarded (COI + other labels): {mixed_count}")
+    print(f"  Pure COI samples kept: {len(coi_df)}")
+    print(f"  Pure COI samples by split:")
     for split in ["train", "val", "test"]:
         split_count = len(coi_df[coi_df["split"] == split])
         print(f"    {split}: {split_count}")
@@ -106,14 +122,24 @@ def get_coi(metadata_df: pd.DataFrame, target_class: list[str]) -> pd.DataFrame:
 def sample_non_coi(
     metadata_df: pd.DataFrame,
     coi_df: pd.DataFrame,
+    target_class: list[str] | None = None,
     coi_ratio: float = 0.25,
     segment_duration: float = 5.0,
     segment_stride: float = 5.0,
 ) -> pd.DataFrame:
     """Sample non-class-of-interest (non-COI) samples to achieve the desired COI ratio.
+
+    Recordings that contain *any* COI label (including mixed recordings that also
+    carry non-COI labels) are excluded from the background pool.  Pass
+    ``target_class`` to enable this stricter exclusion; without it the function
+    falls back to excluding only the rows already present in ``coi_df``.
+
     Args:
         metadata_df: DataFrame containing all dataset metadata.
-        coi_df: DataFrame containing all samples with the class of interest.
+        coi_df: DataFrame containing the *pure* COI samples (output of get_coi).
+        target_class: The same target class list used in get_coi.  When provided,
+            any recording whose label contains a COI label is excluded from the
+            non-COI pool, preventing mixed recordings from leaking into backgrounds.
         coi_ratio: Desired ratio of COI samples in the final sampled dataset.
         segment_duration: Length of segments in seconds.
         segment_stride: Stride between segments in seconds.
@@ -150,9 +176,26 @@ def sample_non_coi(
             num_coi_segments * ((1 - coi_ratio) / coi_ratio)
         )
 
-        non_coi_split_df = metadata_df[
-            (metadata_df["split"] == split) & (~metadata_df.index.isin(coi_df.index))
-        ]
+        if target_class is not None:
+            # Exclude every recording that carries any COI label so that mixed
+            # recordings (COI + other) cannot appear in the background pool.
+            def _has_any_coi(labels):
+                if isinstance(labels, list):
+                    return any(t in labels for t in target_class)
+                elif isinstance(labels, str):
+                    return labels in target_class
+                return False
+
+            any_coi_mask = metadata_df["label"].apply(_has_any_coi)
+            non_coi_split_df = metadata_df[
+                (metadata_df["split"] == split) & ~any_coi_mask
+            ]
+        else:
+            # Fallback: exclude only the rows that are already in coi_df.
+            non_coi_split_df = metadata_df[
+                (metadata_df["split"] == split)
+                & (~metadata_df.index.isin(coi_df.index))
+            ]
 
         print(f"  {split}:")
         print(f"    COI files: {len(coi_split_df)} (Est. segments: {num_coi_segments})")
@@ -330,6 +373,7 @@ def test_sampler():
     sampled_df = sample_non_coi(
         classification_metadata,
         coi_df,
+        target_class=target_classes,
         coi_ratio=0.25,  # Aim for 25% plane sounds
     )
 

@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import freesound
 import pandas as pd
@@ -142,6 +143,8 @@ def main():
     print("putting labels in freesound dataset")
     get_freesound_labels(csv_path)
     # remove_empty_labels(csv_path.replace(".csv", "_with_labels.csv"))
+    #  find_missing_indices(csv_path, csv_path.replace(".csv", "_with_labels.csv"))\
+    # remove_padding(csv_path.replace(".csv", "_with_labels.csv"))
 
 
 def remove_empty_labels(csv_path: str):
@@ -155,6 +158,51 @@ def remove_empty_labels(csv_path: str):
     print(
         f"Removed labels from rows with empty labels. Updated file saved to {csv_path}"
     )
+
+
+def find_missing_indices(csv_original: Path, csv_labels: Path) -> None:
+    """utility function to fill in missing indices from original csv that are not present in the labels csv, to ensure we have a complete set of indices for downstream processing."""
+    df_original = pd.read_csv(csv_original)
+    df_labels = pd.read_csv(csv_labels)
+
+    existing_indices = (
+        set(df_labels["index"]) if "index" in df_labels.columns else set()
+    )
+    original_indices = (
+        set(df_original["index"])
+        if "index" in df_original.columns
+        else set(df_original.index)
+    )
+
+    missing_indices = original_indices - existing_indices
+    if missing_indices:
+        print(
+            f"Found {len(missing_indices)} missing indices in labels csv. Adding them with empty labels."
+        )
+        new_rows = pd.DataFrame(
+            [{"index": idx, "labels": None} for idx in missing_indices]
+        )
+        df_labels = pd.concat([df_labels, new_rows], ignore_index=True)
+        df_labels.to_csv(csv_labels, index=False)
+        print(f"Missing indices added to {csv_labels}")
+    else:
+        print("No missing indices found between original and labels csv.")
+
+
+def remove_padding(path: Path):
+    """Utility function to remove padding from the labels column in the output csv, if any."""
+    df = pd.read_csv(path)
+    # Remove leading/trailing "/" from "search freesound" column
+    if "search freesound" in df.columns:
+        df["search freesound"] = df["search freesound"].apply(
+            lambda x: str(x).split("/")[-1] if pd.notna(x) else x
+        )
+        df.to_csv(path, index=False)
+        print(f"Removed padding from labels in {path}")
+    else:
+        print(
+            f"No 'search freesound' column found in {path}, skipping padding removal."
+        )
 
 
 if __name__ == "__main__":
