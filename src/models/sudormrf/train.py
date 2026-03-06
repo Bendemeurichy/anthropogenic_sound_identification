@@ -8,6 +8,7 @@ Expected dataframe structure:
 
 import argparse
 import gc
+import io
 import json
 import math
 import os
@@ -15,6 +16,9 @@ import sys
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
 # Pin to single GPU before importing torch (prevents multi-GPU OOM issues)
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
