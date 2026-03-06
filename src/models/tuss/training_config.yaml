@@ -119,7 +119,7 @@ training:
   zero_ref_loss_weight: 0.1 # penalty for estimating energy when target is silent
   snr_max: 30 # clip SNR loss at this value (dB)
 
-  num_workers: 4
+  num_workers: 1
   pin_memory: true
 
   # Device to train on.  Can be overridden at runtime with --device / --gpu.
