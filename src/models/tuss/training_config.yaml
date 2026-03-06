@@ -58,7 +58,7 @@ data:
 
   # Each audio file is used this many times per epoch (with different
   # augmentations / offsets), effectively multiplying dataset size
-  augment_multiplier: 2
+  augment_multiplier: 0
 
 model:
   # Path to the pretrained TUSS checkpoint directory (relative to train.py).
@@ -85,7 +85,7 @@ model:
   # Set to true to freeze all backbone weights and only learn prompt vectors.
   # Faster and less prone to overfitting on small datasets; set to false for
   # full fine-tuning when you have enough data.
-  freeze_backbone: true
+  freeze_backbone: false
 
   # -----------------------------------------------------------------------
   # Architecture (only used when pretrained_path is null)
@@ -100,8 +100,8 @@ model:
   variance_normalization: true
 
 training:
-  batch_size: 1 # per-GPU batch size (keep low if VRAM is tight)
-  grad_accum_steps: 16 # effective batch = batch_size × grad_accum_steps = 16
+  batch_size: 2 # per-GPU batch size (keep low if VRAM is tight)
+  grad_accum_steps: 8 # effective batch = batch_size × grad_accum_steps = 16
   use_amp: true # mixed-precision training; disable if unstable
   amp_dtype: "bf16" # "bf16" (recommended, matches pretrained model) or "fp16"
 
