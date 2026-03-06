@@ -58,7 +58,7 @@ data:
 
   # Each audio file is used this many times per epoch (with different
   # augmentations / offsets), effectively multiplying dataset size
-  augment_multiplier: 0
+  augment_multiplier: 1
 
 model:
   # Path to the pretrained TUSS checkpoint directory (relative to train.py).
