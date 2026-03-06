@@ -13,12 +13,22 @@ import json
 import math
 import os
 import sys
+import time
+import warnings
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+# Under pythonw there is no console and sys.stdout/stderr are None.
+# Wrap only when the underlying buffer actually exists.
+if sys.stdout is not None and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", line_buffering=True
+    )
+if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", line_buffering=True
+    )
 
 # Pin to single GPU before importing torch (prevents multi-GPU OOM issues)
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -30,6 +40,139 @@ import torch.optim as optim
 import torchaudio
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+
+# ---------------------------------------------------------------------------
+# Logging helpers for detached / pythonw runs
+# ---------------------------------------------------------------------------
+
+
+class _AutoFlushStream:
+    """Wraps a file object and flushes after every write."""
+
+    def __init__(self, f):
+        self._f = f
+
+    def write(self, text):
+        self._f.write(text)
+        self._f.flush()
+
+    def flush(self):
+        self._f.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+
+def _redirect_to_log(log_path: Path) -> None:
+    """Redirect sys.stdout and sys.stderr to *log_path* (append mode).
+
+    Only used when stdout is truly absent (pythonw launched without
+    -RedirectStandardOutput).  When the caller has already redirected stdout
+    to a file we leave that handle in place and just ensure it auto-flushes.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(log_path, "a", encoding="utf-8", buffering=1)
+    stream = _AutoFlushStream(fh)
+    sys.stdout = stream  # type: ignore[assignment]
+    sys.stderr = stream  # type: ignore[assignment]
+
+
+def _ensure_autoflush() -> None:
+    """Wrap sys.stdout/stderr with _AutoFlushStream if they exist but are not
+    a TTY.  This prevents Python's default block-buffering from holding output
+    in an 8 KB buffer when stdout is redirected to a file (e.g. via
+    Start-Process -RedirectStandardOutput)."""
+    if sys.stdout is not None and not _is_tty():
+        sys.stdout = _AutoFlushStream(sys.stdout)  # type: ignore[assignment]
+    if sys.stderr is not None and not _is_tty():
+        sys.stderr = _AutoFlushStream(sys.stderr)  # type: ignore[assignment]
+
+
+def _is_tty() -> bool:
+    """Return True only when stdout is an interactive terminal."""
+    try:
+        return sys.stdout is not None and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+class StepProgress:
+    """Minimal tqdm replacement that writes plain-text progress lines.
+
+    Used automatically when stdout is not a TTY (e.g. pythonw or a log file
+    redirect).  Prints one line every *log_every_pct* percent of steps so the
+    log file stays readable without being flooded.
+    """
+
+    def __init__(
+        self,
+        iterable,
+        desc: str = "",
+        total: int | None = None,
+        log_every_pct: float = 5.0,
+    ):
+        self._it = iterable
+        self._desc = desc
+        try:
+            self._total = total if total is not None else len(iterable)
+        except TypeError:
+            self._total = None
+        self._n = 0
+        self._postfix: dict = {}
+        self._start = time.time()
+        if self._total:
+            self._log_every = max(1, int(self._total * log_every_pct / 100))
+        else:
+            self._log_every = 10  # fallback when length is unknown
+
+    # Allow `with StepProgress(...) as p:` usage (mirrors tqdm interface)
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def __iter__(self):
+        for item in self._it:
+            yield item
+            self._n += 1
+            should_log = (self._n % self._log_every == 0) or (
+                self._total is not None and self._n == self._total
+            )
+            if should_log:
+                self._print_line()
+
+    def _print_line(self):
+        elapsed = time.time() - self._start
+        rate = self._n / elapsed if elapsed > 0 else 0.0
+        if self._total:
+            pct = 100.0 * self._n / self._total
+            eta = (self._total - self._n) / rate if rate > 0 else 0.0
+            progress = f"{self._n}/{self._total} ({pct:.0f}%) eta {eta:.0f}s"
+        else:
+            progress = f"{self._n} steps"
+        postfix = "  ".join(f"{k}={v}" for k, v in self._postfix.items())
+        sep = "  |  " if postfix else ""
+        print(f"  [{self._desc}] {progress}  {elapsed:.0f}s elapsed{sep}{postfix}")
+
+    def set_postfix(self, refresh=True, **kwargs):  # noqa: ARG002
+        self._postfix = {k: v for k, v in kwargs.items()}
+
+
+def progress_bar(iterable, desc: str = "", total: int | None = None, **tqdm_kwargs):
+    """Return a tqdm bar when interactive, StepProgress otherwise."""
+    if _is_tty():
+        return tqdm(
+            iterable,
+            desc=desc,
+            total=total,
+            leave=False,
+            ascii=True,
+            ncols=100,
+            **tqdm_kwargs,
+        )
+    return StepProgress(iterable, desc=desc, total=total)
+
 
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -887,7 +1030,7 @@ def train_epoch(
     optimizer_step = 0
     has_pending_grads = False
 
-    pbar = tqdm(dataloader, desc="Training", leave=False, ascii=True, ncols=100)
+    pbar = progress_bar(dataloader, desc="Training")
     for step_idx, sources in enumerate(pbar, start=1):
         sources = sources.to(device, non_blocking=True)
         mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=False)
@@ -1072,7 +1215,7 @@ def validate_epoch(
         else nullcontext()
     )
 
-    pbar = tqdm(dataloader, desc="Validation", leave=False, ascii=True, ncols=100)
+    pbar = progress_bar(dataloader, desc="Validation")
     with torch.no_grad():
         for sources in pbar:
             sources = sources.to(device, non_blocking=True)
@@ -1326,6 +1469,27 @@ def train(config: Config, timestamp: str | None = None):
     checkpoint_dir = Path(config.training.checkpoint_dir) / timestamp
     checkpoint_dir.mkdir(exist_ok=True, parents=True)
     config.save(checkpoint_dir / "config.yaml")
+
+    # When running detached ensure output reaches the log file promptly.
+    if not _is_tty():
+        if sys.stdout is None:
+            # pythonw launched without -RedirectStandardOutput: create our own log.
+            log_path = checkpoint_dir / "train.log"
+            _redirect_to_log(log_path)
+            print(
+                f"=== training log  started {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ==="
+            )
+            print(f"    checkpoint dir : {checkpoint_dir}")
+            print(f"    log file       : {log_path}")
+        else:
+            # stdout already redirected by the caller (e.g. Start-Process
+            # -RedirectStandardOutput): just make sure it flushes every line
+            # instead of buffering in 8 KB blocks.
+            _ensure_autoflush()
+            print(
+                f"=== training log  started {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ==="
+            )
+            print(f"    checkpoint dir : {checkpoint_dir}")
 
     # Create model and data
     print("Creating model...")
