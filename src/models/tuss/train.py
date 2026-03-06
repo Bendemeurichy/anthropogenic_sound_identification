@@ -946,7 +946,7 @@ def train_epoch(
             loss=f"{batch_loss:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}"
         )
 
-        if use_amp and step_idx % 50 == 0:
+        if str(device).startswith("cuda") and step_idx % 20 == 0:
             torch.cuda.empty_cache()
 
     # Flush remaining accumulated gradients
@@ -1003,6 +1003,7 @@ def validate_epoch(
 ) -> float:
     model.eval()
     running_loss, n_samples = 0.0, 0
+    val_step = 0
     per_class_sisnr: list[list[float]] = [[] for _ in range(criterion.n_coi)]
     bg_sisnr_vals: list[float] = []
 
@@ -1017,6 +1018,7 @@ def validate_epoch(
     pbar = tqdm(dataloader, desc="Validation", leave=False, ascii=True, ncols=100)
     with torch.no_grad():
         for sources in pbar:
+            val_step += 1
             sources = sources.to(device, non_blocking=True)
             mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=True)
             B = sources.shape[0]
@@ -1070,6 +1072,11 @@ def validate_epoch(
                 pbar.set_postfix(loss=f"{batch_loss:.4f}")
 
             del outputs, loss, mixture, clean_wavs
+            if str(device).startswith("cuda") and val_step % 20 == 0:
+                torch.cuda.empty_cache()
+
+    if str(device).startswith("cuda"):
+        torch.cuda.empty_cache()
 
     if bg_sisnr_vals:
         class_strs = [

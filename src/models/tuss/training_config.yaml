@@ -36,7 +36,7 @@ data:
   df_path: ""
 
   sample_rate: 48000 # Hz – must match your audio files
-  segment_length: 6.0 # seconds per training crop
+  segment_length: 4.0 # seconds per training crop
 
   # SNR range (dB) when mixing a COI source on top of background
   snr_range: [-5, 5]
@@ -85,7 +85,7 @@ model:
   # Set to true to freeze all backbone weights and only learn prompt vectors.
   # Faster and less prone to overfitting on small datasets; set to false for
   # full fine-tuning when you have enough data.
-  freeze_backbone: false
+  freeze_backbone: true
 
   # -----------------------------------------------------------------------
   # Architecture (only used when pretrained_path is null)
@@ -100,8 +100,8 @@ model:
   variance_normalization: true
 
 training:
-  batch_size: 2 # per-GPU batch size (keep low if VRAM is tight)
-  grad_accum_steps: 8 # effective batch = batch_size × grad_accum_steps = 16
+  batch_size: 1 # per-GPU batch size (keep low if VRAM is tight)
+  grad_accum_steps: 16 # effective batch = batch_size × grad_accum_steps = 16
   use_amp: true # mixed-precision training; disable if unstable
   amp_dtype: "bf16" # "bf16" (recommended, matches pretrained model) or "fp16"
 
