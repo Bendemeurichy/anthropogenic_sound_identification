@@ -1360,6 +1360,7 @@ def train(config: Config, timestamp: str | None = None):
     # Resume from last checkpoint if one exists in checkpoint_dir         #
     # ------------------------------------------------------------------ #
     last_ckpt_path = checkpoint_dir / "last_checkpoint.pt"
+    best_ckpt_path = checkpoint_dir / "best_model.pt"
     if last_ckpt_path.exists():
         print(f"\nResuming from checkpoint: {last_ckpt_path}")
         ckpt = torch.load(last_ckpt_path, map_location=config.training.device)
@@ -1377,8 +1378,34 @@ def train(config: Config, timestamp: str | None = None):
             f"  Resumed at epoch {start_epoch}, global_step {global_step}, "
             f"best_val_loss {best_val_loss:.4f}"
         )
+    elif best_ckpt_path.exists():
+        print(
+            f"\nNo last_checkpoint.pt found. Resuming from best_model.pt: {best_ckpt_path}"
+        )
+        ckpt = torch.load(best_ckpt_path, map_location=config.training.device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        global_step = ckpt["global_step"]
+        best_val_loss = ckpt["val_loss"]
+        # best_model.pt was saved at the best epoch, so reset counter to 0
+        epochs_without_improvement = 0
+        if "history" in ckpt:
+            history = ckpt["history"]
+        # Scheduler state was not saved in best_model.pt — fast-forward the
+        # freshly-created scheduler by stepping it global_step times so the
+        # LR curve continues from the correct position.
+        print(
+            f"  Fast-forwarding scheduler {global_step} steps to restore LR position..."
+        )
+        for _ in range(global_step):
+            scheduler.step()
+        print(
+            f"  Resumed at epoch {start_epoch}, global_step {global_step}, "
+            f"best_val_loss {best_val_loss:.4f}"
+        )
     else:
-        print("No last checkpoint found — starting from scratch.")
+        print("No checkpoint found — starting from scratch.")
 
     for epoch in range(start_epoch, config.training.num_epochs + 1):
         print(f"\nEpoch {epoch}/{config.training.num_epochs}")
@@ -1505,9 +1532,14 @@ def main():
         if not resume_dir.is_dir():
             raise FileNotFoundError(f"Resume directory not found: {resume_dir}")
         if not (resume_dir / "last_checkpoint.pt").exists():
-            raise FileNotFoundError(
-                f"No last_checkpoint.pt found in {resume_dir}. "
-                "Cannot resume — did the first epoch complete?"
+            if not (resume_dir / "best_model.pt").exists():
+                raise FileNotFoundError(
+                    f"Neither last_checkpoint.pt nor best_model.pt found in {resume_dir}. "
+                    "Cannot resume — did the first epoch complete?"
+                )
+            print(
+                f"  No last_checkpoint.pt found in {resume_dir}; "
+                "will fall back to best_model.pt (scheduler will be reconstructed)."
             )
 
         print(f"Resuming run from: {resume_dir}")
