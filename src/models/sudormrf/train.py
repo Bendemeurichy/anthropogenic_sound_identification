@@ -1135,6 +1135,13 @@ def validate_epoch(
                 pbar.set_postfix(loss=f"{batch_loss:.4f}")
 
             del outputs, loss, mixture, clean_wavs
+            # Explicitly free intermediate metric tensors so GPU memory is
+            # released promptly rather than waiting for the next iteration to
+            # rebind the variables.
+            try:
+                del coi_per_sample, coi_target_energy, coi_present_mask, bg_sisnr
+            except NameError:
+                pass  # metrics block was skipped via exception
 
     if all_bg_sisnr:
         coi_present_str = (
@@ -1201,6 +1208,16 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         getattr(config.training, "pin_memory", False) and torch.cuda.is_available()
     )
 
+    # prefetch_factor controls how many batches each worker pre-loads into the
+    # shared-memory queue ahead of time.  The PyTorch default is 2, which means
+    # up to 2 * num_workers batches sit in Windows shared file mappings at once.
+    # Capping it at 2 (or allowing the user to lower it) keeps the number of
+    # simultaneous shared-memory handles small and reduces the risk of
+    # exhausting the Windows paging file (error 1455).
+    prefetch_factor = (
+        int(getattr(config.training, "prefetch_factor", 2)) if num_workers > 0 else None
+    )
+
     loader = DataLoader(
         dataset,
         batch_size=config.training.batch_size,
@@ -1209,6 +1226,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=(num_workers > 0 and split == "train"),
+        prefetch_factor=prefetch_factor,
     )
 
     del df
