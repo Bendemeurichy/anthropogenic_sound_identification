@@ -1385,7 +1385,9 @@ def train(config: Config, timestamp: str | None = None):
     best_ckpt_path = checkpoint_dir / "best_model.pt"
     if last_ckpt_path.exists():
         print(f"\nResuming from checkpoint: {last_ckpt_path}")
-        ckpt = torch.load(last_ckpt_path, map_location=config.training.device)
+        ckpt = torch.load(
+            last_ckpt_path, map_location=config.training.device, weights_only=False
+        )
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
@@ -1404,7 +1406,9 @@ def train(config: Config, timestamp: str | None = None):
         print(
             f"\nNo last_checkpoint.pt found. Resuming from best_model.pt: {best_ckpt_path}"
         )
-        ckpt = torch.load(best_ckpt_path, map_location=config.training.device)
+        ckpt = torch.load(
+            best_ckpt_path, map_location=config.training.device, weights_only=False
+        )
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_epoch = ckpt["epoch"] + 1
