@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -28,12 +28,44 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent / "plane_clasifier"))
 
+from src.validation_functions.plane_clasifier.config import TrainingConfig
+from src.validation_functions.plane_clasifier.inference import PlaneClassifierInference
+
 from src.models.clapsep.inference import COI_HEAD_INDEX as CLAPSEP_COI_HEAD
 from src.models.clapsep.inference import CLAPSepInference
 from src.models.sudormrf.inference import COI_HEAD_INDEX as SUDORMRF_COI_HEAD
 from src.models.sudormrf.inference import SeparationInference
-from src.validation_functions.plane_clasifier.config import TrainingConfig
-from src.validation_functions.plane_clasifier.inference import PlaneClassifierInference
+
+
+# ---------------------------------------------------------------------------
+# Optional auxiliary classifiers — probed lazily; actual imports happen inside
+# load_models / _classify_pann / _classify_ast to avoid hard top-level deps.
+# ---------------------------------------------------------------------------
+def _probe_pann() -> bool:
+    """Return True if the panns_inference package is importable."""
+    try:
+        import panns_inference  # noqa: F401
+
+        return True
+    except Exception as _err:
+        print(f"[Warning] PANN classifier unavailable: {_err}", file=sys.stderr)
+        return False
+
+
+def _probe_ast() -> bool:
+    """Return True if the transformers package (for AST) is importable."""
+    try:
+        import transformers  # noqa: F401
+
+        return True
+    except Exception as _err:
+        print(f"[Warning] AST classifier unavailable: {_err}", file=sys.stderr)
+        return False
+
+
+_pann_available: bool = _probe_pann()
+_ast_available: bool = _probe_ast()
+
 
 try:
     import src.models.base.sudo_rm_rf
@@ -51,6 +83,36 @@ except Exception as e:
 
 # Project root (code directory)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+
+# ============================================================================
+# CLASSIFIER LABEL CONFIGURATION
+# ============================================================================
+# Edit these lists to control which AudioSet / model labels are treated as the
+# positive class (i.e. "plane present") for each classifier.
+
+# The string that PlaneClassifierInference returns for a positive (plane) sample.
+CNN_POSITIVE_CLASS: str = "plane"
+
+# AudioSet label names that PANN should treat as the positive class.
+# Unrecognised names are silently ignored at inference time.
+PANN_POSITIVE_LABELS: List[str] = [
+    "Fixed-wing aircraft, airplane",
+    "Aircraft",
+    "Jet aircraft",
+    "Propeller, airscrew",
+    "Turboprop, small aircraft",
+]
+
+# AudioSet label names that AST should treat as the positive class.
+# Unrecognised names are silently ignored at inference time.
+AST_POSITIVE_LABELS: List[str] = [
+    "Fixed-wing aircraft, airplane",
+    "Aircraft",
+    "Jet aircraft",
+    "Propeller, airscrew",
+    "Turboprop, small aircraft",
+]
 
 
 # ============================================================================
@@ -351,6 +413,11 @@ class ValidationPipeline:
         self.classifier = None
         self._resamplers = {}
 
+        # Optional auxiliary AudioSet classifiers
+        self.pann_model = None
+        self.ast_extractor = None
+        self.ast_model = None
+
         # Store checkpoint paths for logging
         self.sep_checkpoint_path = None
         self.cls_checkpoint_path = None
@@ -367,8 +434,22 @@ class ValidationPipeline:
         use_clapsep: bool = False,
         clapsep_text_pos: str = "train passing",
         clapsep_text_neg: str = "",
+        use_pann: bool = True,
+        use_ast: bool = True,
     ):
-        """Load separation and classification models."""
+        """Load separation and classification models.
+
+        Args:
+            sep_checkpoint: Path to the separation model checkpoint.
+            cls_weights: Path to the CNN classifier weights.
+            use_clapsep: If True, load the CLAPSep separator instead of SudoRM-RF.
+            clapsep_text_pos: Positive text prompt for CLAPSep.
+            clapsep_text_neg: Negative text prompt for CLAPSep.
+            use_pann: If True (default), load the PANN AudioTagging model as an
+                additional classifier.  Requires the ``panns_inference`` package.
+            use_ast: If True (default), load the AST model from HuggingFace as an
+                additional classifier.  Requires the ``transformers`` package.
+        """
         sep_path = sep_checkpoint or self.SEP_CHECKPOINT
         cls_path = cls_weights or self.CLS_WEIGHTS
 
@@ -432,6 +513,53 @@ class ValidationPipeline:
         self.classifier_segment_samples = int(
             self.classifier_sample_rate * self.segment_length
         )
+
+        # ------------------------------------------------------------------
+        # Optional: PANN AudioTagging classifier
+        # ------------------------------------------------------------------
+        if use_pann:
+            if _pann_available:
+                try:
+                    from src.validation_functions.classification_models.pann_inference import (
+                        load_pann_model as _load_pann,
+                    )
+
+                    self.pann_model = _load_pann(device=self.device)
+                except Exception as e:
+                    print(
+                        f"[Warning] Failed to load PANN model: {e}",
+                        file=sys.stderr,
+                    )
+                    self.pann_model = None
+            else:
+                print(
+                    "[Warning] PANN classifier requested but panns_inference is not installed – skipping.",
+                    file=sys.stderr,
+                )
+
+        # ------------------------------------------------------------------
+        # Optional: AST (Audio Spectrogram Transformer) classifier
+        # ------------------------------------------------------------------
+        if use_ast:
+            if _ast_available:
+                try:
+                    from src.validation_functions.classification_models.ast_inference import (
+                        load_ast_model as _load_ast,
+                    )
+
+                    self.ast_extractor, self.ast_model = _load_ast(device=self.device)
+                except Exception as e:
+                    print(
+                        f"[Warning] Failed to load AST model: {e}",
+                        file=sys.stderr,
+                    )
+                    self.ast_extractor = None
+                    self.ast_model = None
+            else:
+                print(
+                    "[Warning] AST classifier requested but transformers is not installed – skipping.",
+                    file=sys.stderr,
+                )
 
     def _convert_path(self, filepath: str) -> str:
         """Convert Windows paths to Linux paths."""
@@ -692,7 +820,7 @@ class ValidationPipeline:
             wav = wav[: self.classifier_segment_samples]
 
         result = self.classifier.predict_waveform(wav.numpy())
-        pred = 1 if result["prediction"] == "plane" else 0
+        pred = 1 if result["prediction"] == CNN_POSITIVE_CLASS else 0
         return pred, result["confidence"]
 
     def _create_mixture(
@@ -736,17 +864,82 @@ class ValidationPipeline:
             return CLAPSEP_COI_HEAD
         return SUDORMRF_COI_HEAD
 
-    def _classify_separated(self, separated: torch.Tensor) -> Tuple[int, float]:
+    def _classify_pann(self, waveform: torch.Tensor) -> Tuple[int, float]:
+        """Classify using the PANN AudioTagging model.
+
+        Resamples *waveform* from ``self.sample_rate`` to the 32 kHz required
+        by PANN internally via :func:`run_pann_inference`.
+
+        Returns:
+            ``(prediction, confidence)`` – 1/0 and the max sigmoid score across
+            all :data:`PANN_POSITIVE_LABELS`.
+        """
+        if self.pann_model is None:
+            raise RuntimeError(
+                "PANN model is not loaded. Call load_models(use_pann=True)."
+            )
+        from src.validation_functions.classification_models.pann_inference import (
+            run_pann_inference as _run_pann,
+        )
+
+        return _run_pann(
+            self.pann_model,
+            waveform,
+            self.sample_rate,
+            PANN_POSITIVE_LABELS,
+        )
+
+    def _classify_ast(self, waveform: torch.Tensor) -> Tuple[int, float]:
+        """Classify using the AST (Audio Spectrogram Transformer) model.
+
+        Resamples *waveform* from ``self.sample_rate`` to the 16 kHz required
+        by AST internally via :func:`run_ast_inference`.
+
+        Returns:
+            ``(prediction, confidence)`` – 1/0 and the max sigmoid score across
+            all :data:`AST_POSITIVE_LABELS`.
+        """
+        if self.ast_model is None:
+            raise RuntimeError(
+                "AST model is not loaded. Call load_models(use_ast=True)."
+            )
+        assert self.ast_extractor is not None, (
+            "ast_extractor should be set whenever ast_model is set"
+        )
+        from src.validation_functions.classification_models.ast_inference import (
+            run_ast_inference as _run_ast,
+        )
+
+        return _run_ast(
+            self.ast_extractor,
+            self.ast_model,
+            waveform,
+            self.sample_rate,
+            AST_POSITIVE_LABELS,
+            device=self.device,
+        )
+
+    def _classify_separated(
+        self,
+        separated: torch.Tensor,
+        classify_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
+    ) -> Tuple[int, float]:
         """Classify the COI output from a separated signal.
 
         Uses the designated COI head index rather than cherry-picking
         the source with the highest confidence, so the evaluation
         matches real-world deployment behaviour.
+
+        Args:
+            separated: Either a 1-D waveform or a (n_sources, T) tensor.
+            classify_fn: Classification function to use.  Defaults to
+                ``self._classify`` (the custom CNN) when *None*.
         """
+        fn = classify_fn if classify_fn is not None else self._classify
         if separated.dim() == 1:
-            return self._classify(separated)
+            return fn(separated)
         coi_source = separated[self._get_coi_head_index()]
-        return self._classify(coi_source)
+        return fn(coi_source)
 
     def _compute_signal_metrics(
         self, reference: torch.Tensor, estimate: torch.Tensor
@@ -779,6 +972,7 @@ class ValidationPipeline:
         use_separation: bool,
         save_examples_dir: str = None,
         save_n_examples: int = 1,
+        classify_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
     ) -> ClassificationMetrics:
         """Validate on clean (unmixed) audio - both COI and background.
 
@@ -787,7 +981,15 @@ class ValidationPipeline:
           - the original clean COI input(s)
           - the separated outputs (either single COI head or all sources)
         This helps inspect a small number of separation examples for the clean condition.
+
+        Args:
+            classify_fn: Classification callable ``(waveform) -> (pred, conf)``.
+                Defaults to ``self._classify`` (the custom CNN) when *None*.
         """
+        # Default to the CNN classifier when no override is supplied.
+        if classify_fn is None:
+            classify_fn = self._classify
+
         y_true, y_pred, y_scores = [], [], []
         raw_labels = []
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
@@ -845,7 +1047,9 @@ class ValidationPipeline:
 
                     for seg_idx, seg in enumerate(segments):
                         separated = self._separate(seg)
-                        seg_pred, seg_conf = self._classify_separated(separated)
+                        seg_pred, seg_conf = self._classify_separated(
+                            separated, classify_fn
+                        )
                         seg_preds.append(seg_pred)
                         seg_confs.append(seg_conf)
 
@@ -903,7 +1107,7 @@ class ValidationPipeline:
                     seg_preds = []
                     seg_confs = []
                     for seg in segments:
-                        seg_pred, seg_conf = self._classify(seg)
+                        seg_pred, seg_conf = classify_fn(seg)
                         seg_preds.append(seg_pred)
                         seg_confs.append(seg_conf)
                     pred = 1 if any(p == 1 for p in seg_preds) else 0
@@ -934,9 +1138,11 @@ class ValidationPipeline:
                 for seg in segments:
                     if use_separation:
                         separated = self._separate(seg)
-                        seg_pred, seg_conf = self._classify_separated(separated)
+                        seg_pred, seg_conf = self._classify_separated(
+                            separated, classify_fn
+                        )
                     else:
-                        seg_pred, seg_conf = self._classify(seg)
+                        seg_pred, seg_conf = classify_fn(seg)
                     seg_preds.append(seg_pred)
                     seg_confs.append(seg_conf)
 
@@ -972,6 +1178,7 @@ class ValidationPipeline:
         use_separation: bool,
         save_examples_dir: str = None,
         save_n_examples: int = 1,
+        classify_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
     ) -> ClassificationMetrics:
         """Validate on mixtures at random SNR (COI+BG) and clean background (BG only).
 
@@ -980,7 +1187,15 @@ class ValidationPipeline:
           - the original clean COI and BG inputs used to create those mixtures
           - the created mixture file(s)
           - the separated outputs (either single COI head or all sources)
+
+        Args:
+            classify_fn: Classification callable ``(waveform) -> (pred, conf)``.
+                Defaults to ``self._classify`` (the custom CNN) when *None*.
         """
+        # Default to the CNN classifier when no override is supplied.
+        if classify_fn is None:
+            classify_fn = self._classify
+
         y_true, y_pred, y_scores = [], [], []
         raw_labels = []
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
@@ -1068,7 +1283,9 @@ class ValidationPipeline:
 
                     if use_separation:
                         separated = self._separate(mixture)
-                        seg_pred, seg_conf = self._classify_separated(separated)
+                        seg_pred, seg_conf = self._classify_separated(
+                            separated, classify_fn
+                        )
                         seg_preds.append(seg_pred)
                         seg_confs.append(seg_conf)
 
@@ -1126,7 +1343,7 @@ class ValidationPipeline:
                                     file=sys.stderr,
                                 )
                     else:
-                        seg_pred, seg_conf = self._classify(mixture)
+                        seg_pred, seg_conf = classify_fn(mixture)
                         seg_preds.append(seg_pred)
                         seg_confs.append(seg_conf)
 
@@ -1164,9 +1381,11 @@ class ValidationPipeline:
                 for seg in segments:
                     if use_separation:
                         separated = self._separate(seg)
-                        seg_pred, seg_conf = self._classify_separated(separated)
+                        seg_pred, seg_conf = self._classify_separated(
+                            separated, classify_fn
+                        )
                     else:
-                        seg_pred, seg_conf = self._classify(seg)
+                        seg_pred, seg_conf = classify_fn(seg)
                     seg_preds.append(seg_pred)
                     seg_confs.append(seg_conf)
 
@@ -1209,8 +1428,23 @@ class ValidationPipeline:
         save_n_examples: int = 1,
         only_dataset: Optional[str] = None,
         exclude_datasets: Optional[List[str]] = None,
-    ) -> Dict[str, ClassificationMetrics]:
-        """Run full validation suite.
+        skip_clean_tests: bool = False,
+    ) -> Dict[str, Dict[str, ClassificationMetrics]]:
+        """Run full validation suite for every loaded classifier.
+
+        Up to four standard tests are executed **once per classifier**:
+
+        1. Clean audio — classification only       (skipped when *skip_clean_tests*)
+        2. Clean audio — separation + classification (skipped when *skip_clean_tests*)
+        3. Mixtures   — classification only
+        4. Mixtures   — separation + classification
+
+        Results and saved audio examples are placed in per-classifier
+        subdirectories so they never overwrite each other:
+
+        - ``<output_dir>/cnn/``       — custom PlaneClassifier CNN
+        - ``<output_dir>/pann/``      — PANN AudioTagging (if loaded)
+        - ``<output_dir>/ast/``       — AST from HuggingFace (if loaded)
 
         Args:
             split: Dataset split to evaluate on (e.g. ``"test"``).  When
@@ -1218,17 +1452,15 @@ class ValidationPipeline:
                 rows belonging to that dataset are used directly.
             snr_range: (min, max) SNR in dB for mixture creation.
             data_csv: Path to dataset CSV. Falls back to self.DATA_CSV.
-            output_dir: Directory to save JSON results.  The saved filename
-                includes a label derived from ``only_dataset`` or ``split`` so
-                results from different runs never overwrite each other.
+            output_dir: Root directory for JSON results.  Each classifier writes
+                into its own subdirectory so runs never overwrite each other.
             seed: Random seed for reproducibility of mixture creation.
-            save_examples_dir: If provided, save example audio for up to `save_n_examples`
-                random separations in the clean separation run and up to `save_n_examples`
-                random mixtures in the mixture separation run. Separate subdirectories will be created:
-                - <save_examples_dir>/clean_sep
-                - <save_examples_dir>/mixture_sep
-            save_n_examples: Number of random examples to save for each of clean and
-                mixture tests (1..N). Defaults to 1.
+            save_examples_dir: Root directory for saved audio examples.  Each
+                classifier writes into its own subdirectory:
+                ``<save_examples_dir>/<cls>/clean_sep`` and
+                ``<save_examples_dir>/<cls>/mixture_sep``.
+            save_n_examples: Number of random examples to save per test stage.
+                Defaults to 1.
             only_dataset: If provided, ignore the ``split`` filter and instead
                 keep only rows whose ``dataset`` column equals this value.
                 Use this to evaluate an independent test set (e.g.
@@ -1238,6 +1470,15 @@ class ValidationPipeline:
                 applying the split filter.  Use this to remove an independent
                 test set (e.g. ``exclude_datasets=["risoux_test"]``) from a
                 normal ``split="test"`` run so the two are never conflated.
+            skip_clean_tests: When ``True``, steps 1 and 2 (clean audio
+                classification and clean audio separation+classification) are
+                omitted.  Set this to ``True`` for weakly-labelled datasets such
+                as ``risoux_test`` where individual recordings are not cleanly
+                isolated COI or background events and a clean-audio baseline is
+                therefore not meaningful.
+
+        Returns:
+            Nested dict ``{classifier_name: {test_name: ClassificationMetrics}}``.
         """
         # Set seeds for reproducibility
         np.random.seed(seed)
@@ -1285,9 +1526,7 @@ class ValidationPipeline:
         )
         print(f"SNR range: {snr_range} dB")
         print(f"{'=' * 60}\n")
-        # if the pipeline has recovered a list of target classes from the
-        # separation checkpoint, surface it here so the user can verify what
-        # semantic labels the model was trained to treat as COI.
+
         if getattr(self, "target_classes", None):
             print(f"Target classes: {self.target_classes}")
         if only_dataset:
@@ -1295,71 +1534,156 @@ class ValidationPipeline:
         if exclude_datasets:
             print(f"[Excluded from this run] exclude_datasets={exclude_datasets!r}")
 
-        results = {}
+        # ------------------------------------------------------------------
+        # Build the list of (name, classify_fn) pairs to iterate over.
+        # ------------------------------------------------------------------
+        classifiers = []
+        if self.classifier is not None:
+            classifiers.append(("cnn", self._classify))
+        if self.pann_model is not None:
+            classifiers.append(("pann", self._classify_pann))
+        if self.ast_model is not None:
+            classifiers.append(("ast", self._classify_ast))
 
-        # 1. Clean - classification only
-        print("\n[1/4] Clean audio - classification only")
-        results["clean_cls"] = self.validate_clean(df_coi, df_bg, use_separation=False)
-        print(results["clean_cls"])
-
-        # 2. Clean - separation + classification
-        print("\n[2/4] Clean audio - separation + classification")
-        clean_save_dir = (
-            str(Path(save_examples_dir) / "clean_sep") if save_examples_dir else None
-        )
-        results["clean_sep_cls"] = self.validate_clean(
-            df_coi,
-            df_bg,
-            use_separation=True,
-            save_examples_dir=clean_save_dir,
-            save_n_examples=save_n_examples,
-        )
-        print(results["clean_sep_cls"])
-
-        # 3. Mixtures - classification only
-        if len(df_bg) > 0:
-            print(f"\n[3/4] Mixtures ({snr_range}dB) - classification only")
-            results["mix_cls"] = self.validate_mixtures(
-                df_coi, df_bg, snr_range, use_separation=False
+        if not classifiers:
+            print(
+                "[Warning] No classifiers are loaded — nothing to evaluate.",
+                file=sys.stderr,
             )
-            print(results["mix_cls"])
+            return {}
 
-            # 4. Mixtures - separation + classification
-            print(f"\n[4/4] Mixtures ({snr_range}dB) - separation + classification")
-            mix_save_dir = (
-                str(Path(save_examples_dir) / "mixture_sep")
-                if save_examples_dir
-                else None
+        # ------------------------------------------------------------------
+        # Run the standard tests for every classifier.
+        # When skip_clean_tests=True only the mixture steps are executed
+        # (appropriate for weakly-labelled datasets such as risoux_test).
+        # ------------------------------------------------------------------
+        total_steps = 2 if skip_clean_tests else 4
+        # Step numbers for the mixture tests depend on whether clean tests run.
+        mix_cls_step = 1 if skip_clean_tests else 3
+        mix_sep_step = 2 if skip_clean_tests else 4
+
+        if skip_clean_tests:
+            print(
+                "[Info] skip_clean_tests=True: steps 1 (clean cls) and 2 "
+                "(clean sep+cls) will be skipped for this dataset."
             )
-            results["mix_sep_cls"] = self.validate_mixtures(
-                df_coi,
-                df_bg,
-                snr_range,
-                use_separation=True,
-                save_examples_dir=mix_save_dir,
-                save_n_examples=save_n_examples,
+
+        all_results: Dict[str, Dict[str, ClassificationMetrics]] = {}
+
+        for cls_name, classify_fn in classifiers:
+            print(f"\n{'#' * 60}")
+            print(f"#  Classifier: {cls_name.upper()}")
+            print(f"{'#' * 60}")
+
+            # Per-classifier output and example directories.
+            cls_output_dir = str(Path(output_dir) / cls_name) if output_dir else None
+            cls_examples_dir = (
+                str(Path(save_examples_dir) / cls_name) if save_examples_dir else None
             )
-            print(results["mix_sep_cls"])
 
-        # Save results
-        if output_dir:
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            results_dict = {k: v.to_dict() for k, v in results.items()}
-            results_dict["split"] = split
-            if only_dataset:
-                results_dict["only_dataset"] = only_dataset
-            results_dict["checkpoint_paths"] = {
-                "separator": str(self.sep_checkpoint_path),
-                "classifier": str(self.cls_checkpoint_path),
-            }
-            tag = f"{split}_{only_dataset}" if only_dataset else split
-            out_file = Path(output_dir) / f"results_{tag}_{ts}.json"
-            with open(out_file, "w") as f:
-                json.dump(results_dict, f, indent=2)
-            print(f"\nResults saved to {out_file}")
+            results: Dict[str, ClassificationMetrics] = {}
 
-        return results
+            if not skip_clean_tests:
+                # 1. Clean - classification only
+                print(
+                    f"\n[{cls_name}][1/{total_steps}] Clean audio - classification only"
+                )
+                results["clean_cls"] = self.validate_clean(
+                    df_coi,
+                    df_bg,
+                    use_separation=False,
+                    classify_fn=classify_fn,
+                )
+                print(results["clean_cls"])
+
+                # 2. Clean - separation + classification
+                print(
+                    f"\n[{cls_name}][2/{total_steps}] Clean audio - separation + classification"
+                )
+                clean_save_dir = (
+                    str(Path(cls_examples_dir) / "clean_sep")
+                    if cls_examples_dir
+                    else None
+                )
+                results["clean_sep_cls"] = self.validate_clean(
+                    df_coi,
+                    df_bg,
+                    use_separation=True,
+                    save_examples_dir=clean_save_dir,
+                    save_n_examples=save_n_examples,
+                    classify_fn=classify_fn,
+                )
+                print(results["clean_sep_cls"])
+
+            # 3. Mixtures - classification only
+            if len(df_bg) > 0:
+                print(
+                    f"\n[{cls_name}][{mix_cls_step}/{total_steps}] Mixtures ({snr_range}dB) - classification only"
+                )
+                results["mix_cls"] = self.validate_mixtures(
+                    df_coi,
+                    df_bg,
+                    snr_range,
+                    use_separation=False,
+                    classify_fn=classify_fn,
+                )
+                print(results["mix_cls"])
+
+                # 4. Mixtures - separation + classification
+                print(
+                    f"\n[{cls_name}][{mix_sep_step}/{total_steps}] Mixtures ({snr_range}dB) - separation + classification"
+                )
+                mix_save_dir = (
+                    str(Path(cls_examples_dir) / "mixture_sep")
+                    if cls_examples_dir
+                    else None
+                )
+                results["mix_sep_cls"] = self.validate_mixtures(
+                    df_coi,
+                    df_bg,
+                    snr_range,
+                    use_separation=True,
+                    save_examples_dir=mix_save_dir,
+                    save_n_examples=save_n_examples,
+                    classify_fn=classify_fn,
+                )
+                print(results["mix_sep_cls"])
+            else:
+                print(
+                    f"\n[{cls_name}] No background samples found — mixture tests skipped.",
+                    file=sys.stderr,
+                )
+
+            # Save per-classifier JSON results.
+            if cls_output_dir:
+                Path(cls_output_dir).mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                results_dict = {k: v.to_dict() for k, v in results.items()}
+                results_dict["split"] = split
+                results_dict["skip_clean_tests"] = skip_clean_tests
+                results_dict["classifier"] = cls_name
+                if only_dataset:
+                    results_dict["only_dataset"] = only_dataset
+                results_dict["checkpoint_paths"] = {
+                    "separator": str(self.sep_checkpoint_path),
+                    "classifier": str(self.cls_checkpoint_path),
+                }
+                # Include positive-label config for AudioSet classifiers.
+                if cls_name == "pann":
+                    results_dict["positive_labels"] = PANN_POSITIVE_LABELS
+                elif cls_name == "ast":
+                    results_dict["positive_labels"] = AST_POSITIVE_LABELS
+                elif cls_name == "cnn":
+                    results_dict["positive_class"] = CNN_POSITIVE_CLASS
+                tag = f"{split}_{only_dataset}" if only_dataset else split
+                out_file = Path(cls_output_dir) / f"results_{tag}_{ts}.json"
+                with open(out_file, "w") as f:
+                    json.dump(results_dict, f, indent=2)
+                print(f"\n[{cls_name}] Results saved to {out_file}")
+
+            all_results[cls_name] = results
+
+        return all_results
 
 
 def demo_two_wav_separation(
@@ -1529,6 +1853,9 @@ def main():
     # Pass 2: independent Risoux test set — kept separate because
     # load_risoux_test() assigns split="test" to all its rows, so it
     # must be filtered by dataset name rather than split name.
+    # Clean-audio tests (steps 1 & 2) are skipped because risoux_test is
+    # weakly labelled: recordings are not tightly trimmed to isolated events,
+    # so a clean-audio baseline is not meaningful for this set.
     pipeline.run(
         split="test",
         only_dataset="risoux_test",
@@ -1537,6 +1864,7 @@ def main():
         output_dir="./validation_results",
         save_examples_dir="./validation_examples_risoux_test",
         save_n_examples=2,
+        skip_clean_tests=True,
     )
 
 
