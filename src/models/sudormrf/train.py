@@ -30,6 +30,9 @@ if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
         sys.stderr.buffer, encoding="utf-8", line_buffering=True
     )
 
+# Pin to single GPU before importing torch (prevents multi-GPU OOM issues)
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 import numpy as np
 import pandas as pd
 import torch
