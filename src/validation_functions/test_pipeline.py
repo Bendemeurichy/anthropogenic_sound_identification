@@ -99,9 +99,8 @@ CNN_POSITIVE_CLASS: str = "plane"
 PANN_POSITIVE_LABELS: List[str] = [
     "Fixed-wing aircraft, airplane",
     "Aircraft",
-    "Jet aircraft",
+    "Jet engine",
     "Propeller, airscrew",
-    "Turboprop, small aircraft",
 ]
 
 # AudioSet label names that AST should treat as the positive class.
@@ -109,9 +108,8 @@ PANN_POSITIVE_LABELS: List[str] = [
 AST_POSITIVE_LABELS: List[str] = [
     "Fixed-wing aircraft, airplane",
     "Aircraft",
-    "Jet aircraft",
+    "Jet engine",
     "Propeller, airscrew",
-    "Turboprop, small aircraft",
 ]
 
 
