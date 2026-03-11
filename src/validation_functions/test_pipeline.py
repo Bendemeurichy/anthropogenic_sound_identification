@@ -404,6 +404,8 @@ class ValidationPipeline:
             self.device = "cuda:1"
         else:
             self.device = "cpu"
+            print(f"Cuda available: {torch.cuda.is_available()}")
+            print(f"Gpus available: {torch.cuda.device_count()}")
         # report the choice so users can immediately see which hardware will be used
         print(f"ValidationPipeline using device: {self.device}")
         # will be populated when a separation checkpoint is loaded
