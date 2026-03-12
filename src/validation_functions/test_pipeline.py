@@ -28,13 +28,16 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent / "plane_clasifier"))
 
-from src.validation_functions.plane_clasifier.config import TrainingConfig
-from src.validation_functions.plane_clasifier.inference import PlaneClassifierInference
-
 from src.models.clapsep.inference import COI_HEAD_INDEX as CLAPSEP_COI_HEAD
 from src.models.clapsep.inference import CLAPSepInference
 from src.models.sudormrf.inference import COI_HEAD_INDEX as SUDORMRF_COI_HEAD
 from src.models.sudormrf.inference import SeparationInference
+from src.validation_functions.classification_models.plane_clasifier.config import (
+    TrainingConfig,
+)
+from src.validation_functions.classification_models.plane_clasifier.inference import (
+    PlaneClassifierInference,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +102,7 @@ CNN_POSITIVE_CLASS: str = "plane"
 PANN_POSITIVE_LABELS: List[str] = [
     "Fixed-wing aircraft, airplane",
     "Aircraft",
+    "Aircraft engine",
     "Jet engine",
     "Propeller, airscrew",
 ]
@@ -108,6 +112,7 @@ PANN_POSITIVE_LABELS: List[str] = [
 AST_POSITIVE_LABELS: List[str] = [
     "Fixed-wing aircraft, airplane",
     "Aircraft",
+    "Aircraft engine",
     "Jet engine",
     "Propeller, airscrew",
 ]
@@ -856,7 +861,18 @@ class ValidationPipeline:
         return source + noise * scale, actual_snr_db
 
     def _normalize(self, waveform: torch.Tensor) -> torch.Tensor:
-        return (waveform - waveform.mean()) / (waveform.std() + 1e-8)
+        """Peak-normalize a waveform to [-1, 1].
+
+        Peak normalization (dividing by the maximum absolute value) keeps the
+        signal within the valid PCM range, which is required both for correct
+        SNR mixing math and for artifact-free saved WAV files.  The previous
+        z-score normalization had unit variance but an unbounded peak, which
+        caused hard clipping when the mixed signal was written to disk.
+        """
+        peak = waveform.abs().max()
+        if peak < 1e-8:
+            return waveform
+        return waveform / peak
 
     def _get_coi_head_index(self) -> int:
         """Return the COI head index for the current separator model."""
@@ -1260,19 +1276,25 @@ class ValidationPipeline:
                     if save_dir is not None and idx in sample_choices and seg_idx == 0:
                         try:
                             k = list(sample_choices).index(idx)
+                            # Peak-normalize each signal before saving so the
+                            # PCM values stay within [-1, 1] and the files
+                            # play back without clipping artefacts.
                             torchaudio.save(
                                 str(save_dir / f"mixture_coi_clean_{k}.wav"),
-                                coi_n.unsqueeze(0).cpu(),
+                                self._normalize(coi_n).unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
                             torchaudio.save(
                                 str(save_dir / f"mixture_bg_clean_{k}.wav"),
-                                bg_n.unsqueeze(0).cpu(),
+                                self._normalize(bg_n).unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
+                            # Peak-normalize the mixture independently so its
+                            # loudest sample sits at ±1 (the mix may sum above
+                            # the individual peaks).
                             torchaudio.save(
                                 str(save_dir / f"mixture_created_{k}.wav"),
-                                mixture.unsqueeze(0).cpu(),
+                                self._normalize(mixture).unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
                         except Exception:
@@ -1514,6 +1536,9 @@ class ValidationPipeline:
                 )
             df_split = df[df["split"] == split]
 
+        # Rows with a missing/NaN label are treated as background (label=0).
+        df_split = df_split.copy()
+        df_split["label"] = df_split["label"].fillna(0)
         df_coi = df_split[df_split["label"] == 1].reset_index(drop=True)
         df_bg = df_split[df_split["label"] == 0].reset_index(drop=True)
 

@@ -216,6 +216,25 @@ def plot_spectrogram(
     n_mels = spec.shape[0]
 
     # We display the matrix with vertical axis as Mel bands (0..n_mels)
+    # Map a few Mel-band positions back to Hz for readable tick labels.
+    # Uses the standard mel <-> hz conversion:
+    #   mel = 2595 * log10(1 + f/700)
+    #   f   = 700 * (10^(mel/2595) - 1)
+    def mel_to_hz(mel_val: float) -> float:
+        return 700.0 * (10.0 ** (mel_val / 2595.0) - 1.0)
+
+    # Cap the displayed frequency range at 10 kHz (or Nyquist if lower)
+    MAX_DISPLAY_HZ = 10_000.0
+    nyquist = sr / 2.0
+    display_max_hz = min(MAX_DISPLAY_HZ, nyquist)
+
+    # mel values for 0 Hz and the display ceiling
+    mel_max = 2595.0 * np.log10(1.0 + nyquist / 700.0)
+    mel_display_max = 2595.0 * np.log10(1.0 + display_max_hz / 700.0)
+
+    # Fractional bin index corresponding to the display ceiling
+    display_max_bin = (mel_display_max / mel_max) * (n_mels - 1)
+
     im = ax.imshow(
         spec,
         aspect="auto",
@@ -227,20 +246,12 @@ def plot_spectrogram(
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (Hz)")
     ax.set_title(title)
+    # Clip y-axis to the display ceiling
+    ax.set_ylim(0, display_max_bin)
 
-    # Map a few Mel-band positions back to Hz for readable tick labels.
-    # Uses the standard mel <-> hz conversion:
-    #   mel = 2595 * log10(1 + f/700)
-    #   f   = 700 * (10^(mel/2595) - 1)
-    def mel_to_hz(mel_val: float) -> float:
-        return 700.0 * (10.0 ** (mel_val / 2595.0) - 1.0)
-
-    # mel_max corresponding to Nyquist (sr/2)
-    mel_max = 2595.0 * np.log10(1.0 + (sr / 2.0) / 700.0)
-
-    # Choose a small set of ticks evenly spaced on the mel axis
+    # Choose a small set of ticks evenly spaced on the mel axis up to the ceiling
     num_ticks = 6
-    mel_ticks = np.linspace(0.0, mel_max, num_ticks)
+    mel_ticks = np.linspace(0.0, mel_display_max, num_ticks)
     # Convert mel values to corresponding bin indices in [0, n_mels-1]
     mel_bin_indices = (mel_ticks / mel_max) * (n_mels - 1)
     # Positions for imshow (extent uses 0..n_mels), so use those indices directly
@@ -322,6 +333,20 @@ def plot_combined_spectrograms(
     for ax, spec, title in zip(axes, specs, titles):
         time_sec = spec.shape[1] * HOP_LENGTH / sr
         n_mels = spec.shape[0]
+
+        # Create mel->Hz ticks as in single plot function
+        def mel_to_hz(mel_val: float) -> float:
+            return 700.0 * (10.0 ** (mel_val / 2595.0) - 1.0)
+
+        # Cap the displayed frequency range at 10 kHz (or Nyquist if lower)
+        MAX_DISPLAY_HZ = 10_000.0
+        nyquist = sr / 2.0
+        display_max_hz = min(MAX_DISPLAY_HZ, nyquist)
+
+        mel_max = 2595.0 * np.log10(1.0 + nyquist / 700.0)
+        mel_display_max = 2595.0 * np.log10(1.0 + display_max_hz / 700.0)
+        display_max_bin = (mel_display_max / mel_max) * (n_mels - 1)
+
         im = ax.imshow(
             spec,
             aspect="auto",
@@ -331,14 +356,10 @@ def plot_combined_spectrograms(
         )
         ax.set_ylabel("Freq (Hz)")
         ax.set_title(title)
+        ax.set_ylim(0, display_max_bin)
 
-        # Create mel->Hz ticks as in single plot function
-        def mel_to_hz(mel_val: float) -> float:
-            return 700.0 * (10.0 ** (mel_val / 2595.0) - 1.0)
-
-        mel_max = 2595.0 * np.log10(1.0 + (sr / 2.0) / 700.0)
         num_ticks = 6
-        mel_ticks = np.linspace(0.0, mel_max, num_ticks)
+        mel_ticks = np.linspace(0.0, mel_display_max, num_ticks)
         mel_bin_indices = (mel_ticks / mel_max) * (n_mels - 1)
         y_positions = mel_bin_indices
 
@@ -636,23 +657,23 @@ if __name__ == "__main__":
     # main()
     wav_files = [
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/clean_sep/clean_coi_1.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/clean_sep/clean_coi_1.wav"
         ),
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/clean_sep/separated_coi_head_1.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/clean_sep/separated_src0_1.wav"
         ),
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/clean_sep/separated_src1_1.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/clean_sep/separated_src1_1.wav"
         ),
         # Path(
-        #     "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/mixture_sep/mixture_separated_coi_head_1.wav"
+        #     "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/mixture_sep/mixture_separated_coi_head_1.wav"
         # ),
         # Path(
-        #     "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_planes/mixture_sep/mixture_separated_src1_1.wav"
+        #     "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/mixture_sep/mixture_separated_src1_1.wav"
         # ),
     ]
     plot_combined_spectrograms_from_wavs(
         wav_files,
-        Path("separation_output_demo/combined_clean_plane.png"),
-        titles=["Train", "Separated", "Background"],
+        Path("validation_examples_test/pann/combined_clean_plane.png"),
+        titles=["Plane", "Separated", "Background"],
     )

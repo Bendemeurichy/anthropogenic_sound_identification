@@ -192,7 +192,7 @@ def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
         # listing misclassification counts.  Those annotations have been removed
         # so the heatmap alone is shown.
 
-    title_text = "Confusion Matrices - Classifying Trains"
+    title_text = "Confusion Matrices - Classifying Planes"
     if model_info:
         separator = model_info.get("separator", "")
         classifier = model_info.get("classifier", "")
@@ -564,7 +564,7 @@ def extract_model_info(results: dict) -> dict:
             "plane_classifier" in clf_path.lower()
             or "plane_clasifier" in clf_path.lower()
         ):
-            model_info["classifier"] = "PlaneClassifier"
+            model_info["classifier"] = "Pann"
         else:
             # Fallback: extract from directory name before checkpoints
             normalized_path = clf_path.replace("\\", "/")
@@ -580,8 +580,8 @@ def extract_model_info(results: dict) -> dict:
 
 def main():
     # Path to results file
-    results_dir = Path(__file__).parent / "validation_examples_planes"
-    results_file = results_dir / "results_20260222_231459.json"
+    results_dir = Path(__file__).parent / "pann"
+    results_file = results_dir / "results_test_20260312_022504.json"
 
     #  SudoRMRF
     # "results_20260211_003754.json"
