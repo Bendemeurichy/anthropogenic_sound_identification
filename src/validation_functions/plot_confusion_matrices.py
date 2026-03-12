@@ -215,10 +215,19 @@ def create_top_misclassified_figure(
     results: dict, model_info: dict = None
 ) -> go.Figure:
     """
-    Create a combined bar chart showing the top 10 misclassified raw labels
-    for each test. Each subplot corresponds to one run/test and displays the
-    ten labels with the highest misclassification counts (from
-    `misclassified_raw_counts`).
+    Create a bidirectional (diverging) horizontal bar chart showing the top
+    misclassified raw labels for each test.
+
+    For each label the chart shows:
+      - False Positives (FP) extending to the RIGHT  — background clip
+        incorrectly predicted as COI.
+      - False Negatives (FN) extending to the LEFT   — COI clip missed by
+        the model.
+
+    Labels are ranked by their total error count (FP + FN) and the top 10
+    are shown per subplot.  Falls back to the legacy ``misclassified_raw_counts``
+    field (single-sided) when the new ``fp_raw_counts`` / ``fn_raw_counts``
+    keys are absent.
 
     Args:
         results: Dictionary containing all test results
@@ -243,39 +252,105 @@ def create_top_misclassified_figure(
         rows=n_rows,
         cols=n_cols,
         subplot_titles=[name.replace("_", " ").title() for name in test_names],
-        horizontal_spacing=0.25,
-        vertical_spacing=0.15,
+        horizontal_spacing=0.30,
+        vertical_spacing=0.18,
     )
+
+    # Track whether any subplot has a legend entry so we add it only once.
+    fp_legend_added = False
+    fn_legend_added = False
 
     for idx, name in enumerate(test_names):
         row = idx // n_cols + 1
         col = idx % n_cols + 1
 
         data = results[name]
-        mis_raw = data.get("misclassified_raw_counts", {})
-        if mis_raw:
-            items = sorted(mis_raw.items(), key=lambda kv: kv[1], reverse=True)[:10]
-            labels = [str(k) for k, _ in items]
-            counts = [v for _, v in items]
+        fp_raw = data.get("fp_raw_counts", {})
+        fn_raw = data.get("fn_raw_counts", {})
+
+        if fp_raw or fn_raw:
+            # Bidirectional mode — use the new split counts.
+            all_keys = set(fp_raw) | set(fn_raw)
+            # Rank by total error, take top 10.
+            ranked = sorted(
+                all_keys,
+                key=lambda k: fp_raw.get(k, 0) + fn_raw.get(k, 0),
+                reverse=True,
+            )[:10]
+            # Reverse so the highest-error label sits at the top of the chart.
+            ranked = ranked[::-1]
+
+            fp_vals = [fp_raw.get(k, 0) for k in ranked]
+            fn_vals = [-fn_raw.get(k, 0) for k in ranked]  # negative → left side
+
+            fig.add_trace(
+                go.Bar(
+                    x=fp_vals,
+                    y=ranked,
+                    orientation="h",
+                    name="False Positive (BG → COI)",
+                    marker_color="crimson",
+                    text=[str(v) for v in fp_vals],
+                    textposition="outside",
+                    showlegend=not fp_legend_added,
+                    legendgroup="fp",
+                    hovertemplate="<b>%{y}</b><br>FP: %{x}<extra></extra>",
+                ),
+                row=row,
+                col=col,
+            )
+            fp_legend_added = True
+
+            fig.add_trace(
+                go.Bar(
+                    x=fn_vals,
+                    y=ranked,
+                    orientation="h",
+                    name="False Negative (COI → BG)",
+                    marker_color="steelblue",
+                    text=[str(abs(v)) for v in fn_vals],
+                    textposition="outside",
+                    showlegend=not fn_legend_added,
+                    legendgroup="fn",
+                    hovertemplate="<b>%{y}</b><br>FN: %{customdata}<extra></extra>",
+                    customdata=[abs(v) for v in fn_vals],
+                ),
+                row=row,
+                col=col,
+            )
+            fn_legend_added = True
+
+            # Zero-line for visual reference.
+            fig.add_vline(x=0, line_width=1, line_color="black", row=row, col=col)
+            fig.update_xaxes(title_text="← FN  |  FP →", row=row, col=col)
+
         else:
-            labels = []
-            counts = []
+            # Legacy fallback: single-sided chart using misclassified_raw_counts.
+            mis_raw = data.get("misclassified_raw_counts", {})
+            if mis_raw:
+                items = sorted(mis_raw.items(), key=lambda kv: kv[1], reverse=True)[:10]
+                labels = [str(k) for k, _ in reversed(items)]
+                counts = [v for _, v in reversed(items)]
+            else:
+                labels = []
+                counts = []
 
-        bar = go.Bar(
-            x=counts,
-            y=labels,
-            orientation="h",
-            marker_color="darkorange",
-            text=counts,
-            textposition="auto",
-            showlegend=False,
-        )
-        fig.add_trace(bar, row=row, col=col)
-        fig.update_xaxes(title_text="Count", row=row, col=col)
-        # reverse y‑axis so highest values appear at the top
-        fig.update_yaxes(autorange="reversed", row=row, col=col)
+            fig.add_trace(
+                go.Bar(
+                    x=counts,
+                    y=labels,
+                    orientation="h",
+                    marker_color="darkorange",
+                    text=counts,
+                    textposition="auto",
+                    showlegend=False,
+                ),
+                row=row,
+                col=col,
+            )
+            fig.update_xaxes(title_text="Count", row=row, col=col)
 
-    title_text = "Top misclassified labels"
+    title_text = "Top misclassified labels (FP / FN)"
     if model_info:
         separator = model_info.get("separator", "")
         classifier = model_info.get("classifier", "")
@@ -284,8 +359,16 @@ def create_top_misclassified_figure(
 
     fig.update_layout(
         title=dict(text=title_text, font=dict(size=20)),
-        width=1100,
-        height=800,
+        barmode="relative",
+        width=1200,
+        height=max(400 * n_rows, 600),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.12,
+            xanchor="center",
+            x=0.5,
+        ),
     )
 
     return fig

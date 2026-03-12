@@ -151,6 +151,12 @@ class ClassificationMetrics:
     # the incorrect target; useful for seeing which classes the model struggles
     # with overall.
     misclassified_per_label: Dict[int, int] = field(default_factory=dict)
+    # Per-raw-label false positive counts: ground truth = background (0), predicted
+    # positive (1).  Keyed by the original string label from the CSV.
+    fp_raw_counts: Dict[str, int] = field(default_factory=dict)
+    # Per-raw-label false negative counts: ground truth = COI (1), predicted
+    # negative (0).  Keyed by the original string label from the CSV.
+    fn_raw_counts: Dict[str, int] = field(default_factory=dict)
 
     # Signal-level separation quality metrics (populated when reference is available)
     si_snr_scores: List[float] = field(default_factory=list)
@@ -185,6 +191,8 @@ class ClassificationMetrics:
         self.misclassified_transitions = {}
         self.misclassified_per_label = {}
         self.misclassified_raw_counts = {}
+        self.fp_raw_counts = {}
+        self.fn_raw_counts = {}
         if y_scores is not None:
             self.confidences = y_scores.tolist()
 
@@ -231,6 +239,15 @@ class ClassificationMetrics:
                     self.misclassified_raw_counts[raw_key] = (
                         self.misclassified_raw_counts.get(raw_key, 0) + 1
                     )
+                    # Split into FP (bg predicted as COI) and FN (COI missed).
+                    if true_val == 0 and pred_val == 1:
+                        self.fp_raw_counts[raw_key] = (
+                            self.fp_raw_counts.get(raw_key, 0) + 1
+                        )
+                    elif true_val == 1 and pred_val == 0:
+                        self.fn_raw_counts[raw_key] = (
+                            self.fn_raw_counts.get(raw_key, 0) + 1
+                        )
 
         # Aggregate signal metrics if populated
         if self.si_snr_scores:
@@ -262,12 +279,15 @@ MCC: {self.matthews_corrcoef:.4f}"""
             s += "\n\nMisclassified by binary true label:\n"
             for cls, cnt in sorted(self.misclassified_per_label.items()):
                 s += f"  Class {cls}: {cnt}\n"
-        if self.misclassified_raw_counts:
+        if self.fp_raw_counts or self.fn_raw_counts:
             s += "\nMisclassified by original label:\n"
-            for raw, cnt in sorted(
-                self.misclassified_raw_counts.items(), key=lambda x: str(x[0])
-            ):
-                s += f"  {raw}: {cnt}\n"
+            all_raw_keys = sorted(
+                set(self.fp_raw_counts) | set(self.fn_raw_counts), key=str
+            )
+            for raw in all_raw_keys:
+                fp = self.fp_raw_counts.get(raw, 0)
+                fn = self.fn_raw_counts.get(raw, 0)
+                s += f"  {raw}: FP={fp}  FN={fn}\n"
 
         if self.mean_si_snr is not None:
             s += f"""
@@ -363,6 +383,10 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
             d["misclassified_raw_counts"] = {
                 str(k): int(v) for k, v in self.misclassified_raw_counts.items()
             }
+        if self.fp_raw_counts:
+            d["fp_raw_counts"] = {str(k): int(v) for k, v in self.fp_raw_counts.items()}
+        if self.fn_raw_counts:
+            d["fn_raw_counts"] = {str(k): int(v) for k, v in self.fn_raw_counts.items()}
         if getattr(self, "raw_labels", None):
             # preserve the sequence of original labels for downstream inspection
             d["raw_labels"] = [(_sanitize(x)) for x in list(self.raw_labels)]
