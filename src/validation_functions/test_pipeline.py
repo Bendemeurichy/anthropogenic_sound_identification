@@ -2,6 +2,12 @@
 Validation module for separation + classification pipeline.
 Computes confusion matrix, precision, recall, F1-score, and other metrics.
 Includes signal-level separation quality metrics (SI-SNR, SDR).
+
+Also computes simple absolute-energy metrics before/after separation:
+- MSR: mean-square-root (i.e. RMS) of the waveform
+- SEL: Sound Exposure Level proxy computed from total energy over the segment
+       (reported as 10*log10(sum(x^2) + eps)). Note: this is a relative SEL-like
+       value unless you calibrate to physical units (Pa).
 """
 
 import importlib
@@ -97,6 +103,41 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 # The string that PlaneClassifierInference returns for a positive (plane) sample.
 CNN_POSITIVE_CLASS: str = "plane"
 
+# ---------------------------------------------------------------------------
+# COI (class-of-interest) label normalization
+# ---------------------------------------------------------------------------
+# Different datasets may use different surface forms for the same concept.
+# We normalize them here so evaluation doesn't silently treat "airplane" vs "plane"
+# as different classes across datasets (e.g. Aerosonic vs risoux_test).
+COI_SYNONYMS: set[str] = {
+    "plane",
+    "airplane",
+    "aeroplane",
+    "aircraft",
+    "fixed-wing aircraft, airplane",
+    "fixed wing aircraft, airplane",
+    "fixed-wing aircraft",
+    "fixed wing aircraft",
+    "aircraft engine",
+    "jet engine",
+    "propeller, airscrew",
+}
+
+
+def _norm_label(x: Any) -> str:
+    """Normalize raw labels to a comparable lowercase string."""
+    if x is None:
+        return ""
+    s = str(x).strip().lower()
+    return " ".join(s.split())
+
+
+def _is_coi_label(x: Any) -> bool:
+    """Return True iff *x* denotes the COI (plane/airplane/aircraft variants)."""
+    s = _norm_label(x)
+    return s in COI_SYNONYMS
+
+
 # AudioSet label names that PANN should treat as the positive class.
 # Unrecognised names are silently ignored at inference time.
 PANN_POSITIVE_LABELS: List[str] = [
@@ -157,6 +198,8 @@ class ClassificationMetrics:
     # Per-raw-label false negative counts: ground truth = COI (1), predicted
     # negative (0).  Keyed by the original string label from the CSV.
     fn_raw_counts: Dict[str, int] = field(default_factory=dict)
+    # Total misclassification count keyed by the original (multi-class) raw label.
+    misclassified_raw_counts: Dict[str, int] = field(default_factory=dict)
 
     # Signal-level separation quality metrics (populated when reference is available)
     si_snr_scores: List[float] = field(default_factory=list)
@@ -1098,6 +1141,8 @@ class ValidationPipeline:
                             if separated.dim() == 1
                             else separated[self._get_coi_head_index()]
                         )
+
+                        # Signal metrics (note: here reference is the input segment)
                         si_snr, sdr, si_sdr = self._compute_signal_metrics(seg, coi_est)
                         seg_si_snr.append(si_snr)
                         seg_sdr.append(sdr)
@@ -1478,12 +1523,17 @@ class ValidationPipeline:
     ) -> Dict[str, Dict[str, ClassificationMetrics]]:
         """Run full validation suite for every loaded classifier.
 
-        Up to four standard tests are executed **once per classifier**:
+        Default behaviour (training-domain test sets):
+          1. Clean audio — classification only
+          2. Clean audio — separation + classification
+          3. Synthetic mixtures — classification only
+          4. Synthetic mixtures — separation + classification
 
-        1. Clean audio — classification only       (skipped when *skip_clean_tests*)
-        2. Clean audio — separation + classification (skipped when *skip_clean_tests*)
-        3. Mixtures   — classification only
-        4. Mixtures   — separation + classification
+        Independent datasets (``only_dataset=...``, e.g. risoux_test):
+        To avoid extra compute and to prevent "mixture-of-mixtures" evaluation,
+        we run ONLY TWO steps on the recordings **as-is**:
+          1. As-is audio — classification only
+          2. As-is audio — separation + classification
 
         Results and saved audio examples are placed in per-classifier
         subdirectories so they never overwrite each other:
@@ -1496,32 +1546,20 @@ class ValidationPipeline:
             split: Dataset split to evaluate on (e.g. ``"test"``).  When
                 ``only_dataset`` is set the split filter is skipped and all
                 rows belonging to that dataset are used directly.
-            snr_range: (min, max) SNR in dB for mixture creation.
+            snr_range: (min, max) SNR in dB for mixture creation (synthetic-mixture tests only).
             data_csv: Path to dataset CSV. Falls back to self.DATA_CSV.
             output_dir: Root directory for JSON results.  Each classifier writes
                 into its own subdirectory so runs never overwrite each other.
             seed: Random seed for reproducibility of mixture creation.
             save_examples_dir: Root directory for saved audio examples.  Each
-                classifier writes into its own subdirectory:
-                ``<save_examples_dir>/<cls>/clean_sep`` and
-                ``<save_examples_dir>/<cls>/mixture_sep``.
+                classifier writes into its own subdirectory.
             save_n_examples: Number of random examples to save per test stage.
                 Defaults to 1.
-            only_dataset: If provided, ignore the ``split`` filter and instead
-                keep only rows whose ``dataset`` column equals this value.
-                Use this to evaluate an independent test set (e.g.
-                ``only_dataset="risoux_test"``) in complete isolation from the
-                normal training-domain test splits.
+            only_dataset: If provided, evaluate this dataset in isolation. When set,
+                the pipeline runs only two "as-is" evaluation steps (cls only, sep+cls).
             exclude_datasets: Optional list of dataset names to drop before
-                applying the split filter.  Use this to remove an independent
-                test set (e.g. ``exclude_datasets=["risoux_test"]``) from a
-                normal ``split="test"`` run so the two are never conflated.
-            skip_clean_tests: When ``True``, steps 1 and 2 (clean audio
-                classification and clean audio separation+classification) are
-                omitted.  Set this to ``True`` for weakly-labelled datasets such
-                as ``risoux_test`` where individual recordings are not cleanly
-                isolated COI or background events and a clean-audio baseline is
-                therefore not meaningful.
+                applying the split filter.
+            skip_clean_tests: When ``True`` on normal test sets, steps 1 and 2 are skipped.
 
         Returns:
             Nested dict ``{classifier_name: {test_name: ClassificationMetrics}}``.
@@ -1560,9 +1598,30 @@ class ValidationPipeline:
                 )
             df_split = df[df["split"] == split]
 
-        # Rows with a missing/NaN label are treated as background (label=0).
+        # ------------------------------------------------------------------
+        # Label normalization / binarization for evaluation
+        # ------------------------------------------------------------------
+        # We prefer to use `orig_label` (preserved raw label) when available,
+        # because some pipelines overwrite `label` with a numeric/binary value.
+        #
+        # Policy:
+        # - If `label` is already numeric 0/1, keep it.
+        # - Otherwise, derive a binary `label` from (`orig_label` if present else `label`)
+        #   using COI_SYNONYMS so "plane" and "airplane" map consistently.
+        #
+        # Note: rows with missing labels are still treated as background (0) as before.
         df_split = df_split.copy()
         df_split["label"] = df_split["label"].fillna(0)
+
+        # If label column isn't already binary numeric, binarize from raw strings.
+        if not pd.api.types.is_numeric_dtype(df_split["label"]):
+            raw_series = (
+                df_split["orig_label"]
+                if "orig_label" in df_split.columns
+                else df_split["label"]
+            )
+            df_split["label"] = raw_series.apply(lambda x: 1 if _is_coi_label(x) else 0)
+
         df_coi = df_split[df_split["label"] == 1].reset_index(drop=True)
         df_bg = df_split[df_split["label"] == 0].reset_index(drop=True)
 
@@ -1602,20 +1661,42 @@ class ValidationPipeline:
             return {}
 
         # ------------------------------------------------------------------
-        # Run the standard tests for every classifier.
-        # When skip_clean_tests=True only the mixture steps are executed
-        # (appropriate for weakly-labelled datasets such as risoux_test).
+        # Decide which evaluation regime to use.
+        #
+        # - Normal regime (training-domain test split):
+        #     up to 4 steps (clean cls, clean sep+cls, synthetic mix cls, synthetic mix sep+cls)
+        #
+        # - Independent dataset regime (only_dataset is set, e.g. risoux_test):
+        #     run ONLY 2 steps on recordings AS-IS to avoid extra compute and
+        #     to prevent "mixture-of-mixtures" evaluation.
         # ------------------------------------------------------------------
-        total_steps = 2 if skip_clean_tests else 4
-        # Step numbers for the mixture tests depend on whether clean tests run.
-        mix_cls_step = 1 if skip_clean_tests else 3
-        mix_sep_step = 2 if skip_clean_tests else 4
+        independent_as_is = only_dataset is not None
 
-        if skip_clean_tests:
+        # Independent dataset evaluation always skips the clean-audio steps:
+        # recordings are evaluated as-is rather than creating new mixtures, so
+        # synthesising separate clean tests would just duplicate the as-is run.
+        if independent_as_is and not skip_clean_tests:
             print(
-                "[Info] skip_clean_tests=True: steps 1 (clean cls) and 2 "
-                "(clean sep+cls) will be skipped for this dataset."
+                "[Info] independent dataset mode: skip_clean_tests forced to True "
+                "(recordings are evaluated as-is — 2 steps only)."
             )
+            skip_clean_tests = True
+
+        if independent_as_is:
+            total_steps = 2
+            mix_cls_step = 1
+            mix_sep_step = 2
+        else:
+            total_steps = 2 if skip_clean_tests else 4
+            # Step numbers for the mixture tests depend on whether clean tests run.
+            mix_cls_step = 1 if skip_clean_tests else 3
+            mix_sep_step = 2 if skip_clean_tests else 4
+
+            if skip_clean_tests:
+                print(
+                    "[Info] skip_clean_tests=True: steps 1 (clean cls) and 2 "
+                    "(clean sep+cls) will be skipped for this dataset."
+                )
 
         all_results: Dict[str, Dict[str, ClassificationMetrics]] = {}
 
@@ -1664,44 +1745,78 @@ class ValidationPipeline:
                 )
                 print(results["clean_sep_cls"])
 
-            # 3. Mixtures - classification only
-            if len(df_bg) > 0:
+            # 3/4. Mixture or as-is tests (depending on whether this is an
+            # independent dataset or the normal training-domain test split).
+            if only_dataset is not None:
+                # Independent dataset: evaluate recordings as-is (no synthetic
+                # mixing) to avoid a mixture-of-mixtures situation.
                 print(
-                    f"\n[{cls_name}][{mix_cls_step}/{total_steps}] Mixtures ({snr_range}dB) - classification only"
+                    f"\n[{cls_name}][{mix_cls_step}/{total_steps}] Independent dataset - as-is audio (cls only)"
                 )
-                results["mix_cls"] = self.validate_mixtures(
+                results["as_is_cls"] = self.validate_clean(
                     df_coi,
                     df_bg,
-                    snr_range,
                     use_separation=False,
                     classify_fn=classify_fn,
                 )
-                print(results["mix_cls"])
+                print(results["as_is_cls"])
 
-                # 4. Mixtures - separation + classification
                 print(
-                    f"\n[{cls_name}][{mix_sep_step}/{total_steps}] Mixtures ({snr_range}dB) - separation + classification"
+                    f"\n[{cls_name}][{mix_sep_step}/{total_steps}] Independent dataset - as-is audio (sep+cls)"
                 )
-                mix_save_dir = (
-                    str(Path(cls_examples_dir) / "mixture_sep")
+                as_is_save_dir = (
+                    str(Path(cls_examples_dir) / "as_is_sep")
                     if cls_examples_dir
                     else None
                 )
-                results["mix_sep_cls"] = self.validate_mixtures(
+                results["as_is_sep_cls"] = self.validate_clean(
                     df_coi,
                     df_bg,
-                    snr_range,
                     use_separation=True,
-                    save_examples_dir=mix_save_dir,
+                    save_examples_dir=as_is_save_dir,
                     save_n_examples=save_n_examples,
                     classify_fn=classify_fn,
                 )
-                print(results["mix_sep_cls"])
+                print(results["as_is_sep_cls"])
             else:
-                print(
-                    f"\n[{cls_name}] No background samples found — mixture tests skipped.",
-                    file=sys.stderr,
-                )
+                # Normal synthetic mixture tests (COI+BG @ random SNR).
+                if len(df_bg) > 0:
+                    print(
+                        f"\n[{cls_name}][{mix_cls_step}/{total_steps}] Mixtures ({snr_range}dB) - classification only"
+                    )
+                    results["mix_cls"] = self.validate_mixtures(
+                        df_coi,
+                        df_bg,
+                        snr_range,
+                        use_separation=False,
+                        classify_fn=classify_fn,
+                    )
+                    print(results["mix_cls"])
+
+                    # Synthetic mixtures - separation + classification
+                    print(
+                        f"\n[{cls_name}][{mix_sep_step}/{total_steps}] Mixtures ({snr_range}dB) - separation + classification"
+                    )
+                    mix_save_dir = (
+                        str(Path(cls_examples_dir) / "mixture_sep")
+                        if cls_examples_dir
+                        else None
+                    )
+                    results["mix_sep_cls"] = self.validate_mixtures(
+                        df_coi,
+                        df_bg,
+                        snr_range,
+                        use_separation=True,
+                        save_examples_dir=mix_save_dir,
+                        save_n_examples=save_n_examples,
+                        classify_fn=classify_fn,
+                    )
+                    print(results["mix_sep_cls"])
+                else:
+                    print(
+                        f"\n[{cls_name}] No background samples found — mixture tests skipped.",
+                        file=sys.stderr,
+                    )
 
             # Save per-classifier JSON results.
             if cls_output_dir:

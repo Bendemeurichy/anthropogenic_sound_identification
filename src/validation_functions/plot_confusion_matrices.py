@@ -647,7 +647,7 @@ def extract_model_info(results: dict) -> dict:
             "plane_classifier" in clf_path.lower()
             or "plane_clasifier" in clf_path.lower()
         ):
-            model_info["classifier"] = "Pann"
+            model_info["classifier"] = "Ast"
         else:
             # Fallback: extract from directory name before checkpoints
             normalized_path = clf_path.replace("\\", "/")
@@ -663,8 +663,8 @@ def extract_model_info(results: dict) -> dict:
 
 def main():
     # Path to results file
-    results_dir = Path(__file__).parent / "pann"
-    results_file = results_dir / "results_test_20260312_022504.json"
+    results_dir = Path(__file__).parent / "ast"
+    results_file = results_dir / "results_test_20260312_100850.json"
 
     #  SudoRMRF
     # "results_20260211_003754.json"

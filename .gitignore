@@ -225,3 +225,6 @@ src/models/sudormrf/checkpoints
 *.mp3
 __pycache__/
 validation_examples*
+*ast/
+*cnn/
+*pann/
