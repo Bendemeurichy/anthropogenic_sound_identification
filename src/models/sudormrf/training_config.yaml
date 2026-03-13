@@ -12,9 +12,10 @@ data:
     - "airplane"
     - "Airplane"
     - "plane"
-  background_only_prob: 0.15
+  # low for backgrounds without labels, change to 0.3 when labels retrieved
+  background_only_prob: 0.05
   # How many non-COI files to sum for background-only examples
-  background_mix_n: 2
+  background_mix_n: 1
   # Augmentation multiplier: each COI sample seen 3x with random augmentations
   augment_multiplier: 2
 
@@ -47,13 +48,13 @@ training:
   use_amp: true
   num_epochs: 400
   lr: 3e-4
-  weight_decay: 1e-2
+  weight_decay: 5e-2
   num_workers: 1
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 1
   clip_grad_norm: 5.0
-  patience: 35
+  patience: 15
   checkpoint_dir: "checkpoints"
   device: "cuda:0"
   compile_model: false
