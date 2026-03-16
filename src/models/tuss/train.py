@@ -1268,11 +1268,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
 
     num_workers = config.training.num_workers
     pin_memory = config.training.pin_memory and torch.cuda.is_available()
-    # Scope pinned memory to the training device so the DMA path goes directly
-    # to the target GPU.  Without this PyTorch pins to cuda:0 by default,
-    # causing a cross-device hop on every batch transfer and holding a resident
-    # allocation on cuda:0 for the lifetime of the DataLoader workers.
-    pin_memory_device = str(config.training.device) if pin_memory else ""
+    
     loader = DataLoader(
         dataset,
         batch_size=config.training.batch_size,
@@ -1280,7 +1276,6 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         drop_last=(split == "train"),
         num_workers=num_workers,
         pin_memory=pin_memory,
-        pin_memory_device=pin_memory_device,
         persistent_workers=(num_workers > 0 and split == "train"),
     )
     del df
