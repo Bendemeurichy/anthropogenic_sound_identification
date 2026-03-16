@@ -354,7 +354,14 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
 
 
 class COIWeightedLoss(torch.nn.Module):
-    """Fixed-order, class-of-interest weighted SI-SNR loss."""
+    """Fixed-order, class-of-interest weighted SI-SNR loss.
+
+    Works for any number of sources N >= 2:
+        - Channels 0 .. N-2  are COI classes (all weighted equally by class_weight)
+        - Channel  N-1        is background
+
+    For N=2 (single-class) this is identical to the previous behaviour.
+    """
 
     def __init__(self, class_weight: float = 1.5, eps: float = 1e-8):
         super().__init__()
@@ -367,17 +374,60 @@ class COIWeightedLoss(torch.nn.Module):
         if est_sources.ndim != 3 or target_sources.ndim != 3:
             raise ValueError("est_sources and target_sources must be (B, n_src, T)")
 
-        # COI SI-SNR (using head index constants)
-        coi_sisnr = sisnr(
-            est_sources[:, COI_HEAD_INDEX, :],
-            target_sources[:, COI_HEAD_INDEX, :],
-            eps=self.eps,
-        )
+        n_src = est_sources.shape[1]
+        if n_src < 2:
+            raise ValueError(f"Expected at least 2 sources, got {n_src}")
 
-        # Background SI-SNR (using head index constants)
+        n_coi = n_src - 1
+
+        if n_coi == 1:
+            # Single-class: identical to previous behaviour — always head 0.
+            coi_sisnr = sisnr(
+                est_sources[:, 0, :], target_sources[:, 0, :], eps=self.eps
+            )
+        else:
+            # Multi-class: route each sample to its active COI head only.
+            #
+            # Each batch item carries real audio in exactly one COI slot
+            # (the slot matching its coi_class) and zeros everywhere else.
+            # Averaging SI-SNR over all heads would dilute the meaningful
+            # training signal with ill-defined zero-target terms; instead we
+            # compute SI-SNR only for the head that actually holds real audio.
+            #
+            # For background-only samples (all COI targets are zero) there is
+            # no active head, so the COI term contributes 0 to the loss —
+            # those samples train only the background head.
+
+            # Energy of each COI target channel: (B, n_coi)
+            coi_target_energy = torch.stack(
+                [
+                    target_sources[:, i, :].pow(2).mean(dim=-1)
+                    for i in range(n_coi)
+                ],
+                dim=1,
+            )
+            active_mask = coi_target_energy > SILENCE_ENERGY_EPS  # (B, n_coi)
+
+            # SI-SNR for every COI head: (B, n_coi)
+            all_coi_sisnr = torch.stack(
+                [
+                    sisnr(est_sources[:, i, :], target_sources[:, i, :], eps=self.eps)
+                    for i in range(n_coi)
+                ],
+                dim=1,
+            )
+
+            # Weighted average: sum over active heads, divide by active count.
+            # clamp(min=1) avoids div-by-zero for background-only samples
+            # while keeping their numerator = 0 → coi_sisnr = 0.
+            active_float = active_mask.float()
+            active_count = active_float.sum(dim=1).clamp(min=1.0)  # (B,)
+            coi_sisnr = (all_coi_sisnr * active_float).sum(dim=1) / active_count
+
+        # --- Background head: always the last index ---
         bg_sisnr = sisnr(
-            est_sources[:, BACKGROUND_HEAD_INDEX, :],
-            target_sources[:, BACKGROUND_HEAD_INDEX, :],
+            est_sources[:, -1, :],
+            target_sources[:, -1, :],
             eps=self.eps,
         )
 
@@ -1238,20 +1288,33 @@ def validate_epoch(
             # SI-SNR metrics - separate COI-present from COI-absent samples
             try:
                 n_src = outputs.shape[1]
+                n_coi = n_src - 1
 
-                # Aggregate SI-SNR across all COI heads (index 0 .. n_src-2)
-                # Shape: (n_coi_heads, B)
-                coi_per_sample = torch.stack(
-                    [sisnr(outputs[:, i], clean_wavs[:, i]) for i in range(n_src - 1)],
-                    dim=0,
-                ).mean(dim=0)  # (B,)
+                if n_coi == 1:
+                    # Single-class: unchanged.
+                    coi_per_sample = sisnr(outputs[:, 0], clean_wavs[:, 0])  # (B,)
+                    coi_target_energy = clean_wavs[:, 0].pow(2).mean(dim=-1)  # (B,)
+                else:
+                    # Multi-class: route each sample to its active COI head.
+                    # (B, n_coi)
+                    coi_energies = torch.stack(
+                        [clean_wavs[:, i].pow(2).mean(dim=-1) for i in range(n_coi)],
+                        dim=1,
+                    )
+                    active_mask = coi_energies > SILENCE_ENERGY_EPS  # (B, n_coi)
+                    all_coi_sisnr = torch.stack(
+                        [sisnr(outputs[:, i], clean_wavs[:, i]) for i in range(n_coi)],
+                        dim=1,
+                    )  # (B, n_coi)
+                    active_float = active_mask.float()
+                    active_count = active_float.sum(dim=1).clamp(min=1.0)
+                    coi_per_sample = (
+                        (all_coi_sisnr * active_float).sum(dim=1) / active_count
+                    )  # (B,)
+                    # Use max energy over COI heads so that any active class
+                    # correctly trips the coi_present_mask.
+                    coi_target_energy = coi_energies.max(dim=1).values  # (B,)
 
-                # Determine which samples have a real COI target
-                # Use the mean energy across all COI heads for the check
-                coi_target_energy = torch.stack(
-                    [clean_wavs[:, i].pow(2).mean(dim=-1) for i in range(n_src - 1)],
-                    dim=0,
-                ).mean(dim=0)  # (B,)
                 coi_present_mask = coi_target_energy > SILENCE_ENERGY_EPS  # (B,)
 
                 if coi_present_mask.any():
@@ -1403,10 +1466,16 @@ def create_model(config: Config):
     # Wrap model
     if config.data.n_coi_classes > 1:
         print(
-            f"Wrapping model for Multi-class separation with {config.data.n_coi_classes} classes."
+            f"Wrapping model for Multi-class separation with {config.data.n_coi_classes} classes "
+            f"({config.model.num_head_conv_blocks} head blocks)"
         )
+        expanded_channels = getattr(config.model, "expanded_channels", None)
         model = wrap_model_for_multiclass(
-            base_model, n_coi_classes=config.data.n_coi_classes
+            base_model,
+            n_coi_classes=config.data.n_coi_classes,
+            num_conv_blocks=config.model.num_head_conv_blocks,
+            upsampling_depth=config.model.upsampling_depth,
+            expanded_channels=expanded_channels,
         )
     else:
         print(
@@ -1767,30 +1836,90 @@ def main():
     print(f"Loaded {len(all_metadata)} total samples")
     print(f"Using {len(separation_metadata)} for separation training (80%)")
 
-    # Target classes are now specified in the configuration YAML.  Read them
-    # from the loaded config object rather than hard-coding them here.
-    target_classes = getattr(config.data, "target_classes", None)
-    if not target_classes:
-        raise ValueError(
-            "No target_classes specified in config.data – please add a list of "
-            "labels to the YAML configuration"
+    # ------------------------------------------------------------------
+    # Build the training dataset
+    #
+    # Multi-class (n_coi_classes > 1):
+    #   Each COIClassConfig entry defines one output head with its own label
+    #   set and an optional dataset identifier.  We call get_coi() per class,
+    #   optionally filter by dataset, tag each row with its class index, then
+    #   concatenate and call sample_non_coi() once with the full label union.
+    #   The coi_class column is assigned BEFORE sample_non_coi so it flows
+    #   through naturally; non-COI rows get coi_class=-1 via fillna().
+    #
+    # Single-class (n_coi_classes == 1):
+    #   Unchanged from the original single-class path.
+    # ------------------------------------------------------------------
+    if config.data.n_coi_classes > 1:
+        coi_class_cfgs = config.data.coi_classes
+        if not coi_class_cfgs:
+            raise ValueError(
+                "n_coi_classes > 1 but coi_classes is empty in the config. "
+                "Add one entry per COI class (labels + dataset) to coi_classes."
+            )
+        if len(coi_class_cfgs) != config.data.n_coi_classes:
+            raise ValueError(
+                f"n_coi_classes={config.data.n_coi_classes} but "
+                f"coi_classes has {len(coi_class_cfgs)} entries. "
+                "Provide exactly one entry per COI class."
+            )
+
+        # Flat union of all labels — used for non-COI exclusion in sample_non_coi
+        all_labels = [lbl for cc in coi_class_cfgs for lbl in cc.labels]
+        config.data.target_classes = all_labels  # sync so checkpoint config is self-consistent
+        target_classes = all_labels
+        print(f"\nTarget classes (union): {target_classes}")
+
+        # Per-class COI sampling with optional dataset filter
+        print("\nSampling COI data per class...")
+        class_coi_dfs = []
+        for class_idx, cc in enumerate(coi_class_cfgs):
+            name = cc.name or (cc.labels[0] if cc.labels else f"class_{class_idx}")
+            class_coi_df = get_coi(separation_metadata, cc.labels)
+            if cc.dataset:
+                mask = class_coi_df["dataset"].str.contains(
+                    cc.dataset, case=False, na=False
+                )
+                n_dropped = int((~mask).sum())
+                if n_dropped:
+                    print(
+                        f"  [{name}] Dropped {n_dropped} samples not matching "
+                        f"dataset filter '{cc.dataset}'"
+                    )
+                class_coi_df = class_coi_df[mask].copy()
+            else:
+                class_coi_df = class_coi_df.copy()
+            class_coi_df["coi_class"] = class_idx
+            print(f"  COI class {class_idx} ({name!r}): {len(class_coi_df)} samples")
+            class_coi_dfs.append(class_coi_df)
+
+        all_coi_df = pd.concat(class_coi_dfs, ignore_index=True)
+
+        print("\nSampling non-COI data...")
+        sampled_df = sample_non_coi(
+            separation_metadata, all_coi_df, target_class=target_classes, coi_ratio=0.25
         )
-    print(f"\nTarget classes: {target_classes}")
+        # sample_non_coi preserves coi_class for COI rows; fill -1 for non-COI
+        sampled_df["coi_class"] = sampled_df["coi_class"].fillna(-1).astype(int)
 
-    # Sample data
-    print("\nSampling data...")
-    coi_df = get_coi(separation_metadata, target_classes)
-    sampled_df = sample_non_coi(
-        separation_metadata, coi_df, target_class=target_classes, coi_ratio=0.25
-    )
+    else:
+        # Single-class mode: use target_classes directly.
+        target_classes = getattr(config.data, "target_classes", None)
+        if not target_classes:
+            raise ValueError(
+                "No target_classes specified in config.data – please add a list of "
+                "labels to the YAML configuration"
+            )
+        print(f"\nTarget classes: {target_classes}")
 
-    # keep a copy of the original multi‑class labels; the subsequent step
-    # overwrites `label` with a binary indicator but we want to retain the
-    # real taxonomy for later inspection
-    sampled_df["orig_label"] = sampled_df["label"]
+        print("\nSampling data...")
+        coi_df = get_coi(separation_metadata, target_classes)
+        sampled_df = sample_non_coi(
+            separation_metadata, coi_df, target_class=target_classes, coi_ratio=0.25
+        )
 
-    # Binary labels
-    sampled_df["label"] = sampled_df["label"].apply(
+    # Binary labels (orig_label was already set by sample_non_coi)
+    sampled_df["label"] = sampled_df["orig_label"].apply(
         lambda x: (
             1
             if (isinstance(x, list) and any(lbl in target_classes for lbl in x))
@@ -1841,7 +1970,7 @@ def main():
     config.data.df_path = str(df_path)
 
     # Cleanup and train
-    del all_metadata, separation_metadata, coi_df, sampled_df
+    del all_metadata, separation_metadata, sampled_df
     gc.collect()
 
     train(config, timestamp=timestamp)

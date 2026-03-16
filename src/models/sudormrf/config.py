@@ -8,6 +8,39 @@ import yaml
 
 
 @dataclass
+class COIClassConfig:
+    """Configuration for one Class-of-Interest (COI) output head.
+
+    Each entry in DataConfig.coi_classes defines exactly one COI branch in the
+    separation model.
+
+    Attributes:
+        labels:  Semantic label strings used to match rows in the metadata
+                 DataFrame (matched against the 'label' column).  Pure-COI
+                 matching is applied: only recordings whose every label belongs
+                 to this list are included.
+        dataset: Optional dataset-name filter (matched against the 'dataset'
+                 column with a case-insensitive substring match).  Leave empty
+                 ("") to accept matching labels from any loaded dataset.
+        name:    Human-readable name used in log output.  Defaults to the
+                 first entry in `labels` when empty.
+
+    Example (aircraft from aerosonicdb, birds from a custom loader):
+        coi_classes:
+          - labels: ["airplane", "Airplane", "plane"]
+            dataset: "aerosonicdb"
+            name: "aircraft"
+          - labels: ["bird", "Bird", "birdsong"]
+            dataset: "birds_dataset"
+            name: "birds"
+    """
+
+    labels: List[str] = field(default_factory=list)
+    dataset: str = ""  # "" = any dataset
+    name: str = ""     # "" = use labels[0]
+
+
+@dataclass
 class DataConfig:
     df_path: str = "data/aircraft_data.csv"
     sample_rate: int = 16000
@@ -20,7 +53,20 @@ class DataConfig:
     # the dataframe is filtered based on these labels and saved alongside the
     # checkpoint; during inference the same list can be recovered from the
     # checkpoint config.
+    #
+    # Single-class mode (n_coi_classes=1): set target_classes only.
+    # Multi-class mode  (n_coi_classes>1): set coi_classes instead;
+    #   target_classes is derived automatically as the union of all label lists.
     target_classes: List[str] = field(default_factory=list)
+    # Per-class configuration for multi-class separation (n_coi_classes > 1).
+    # Each entry maps to one output head (index 0, 1, ..., n_coi_classes-1).
+    # Each entry specifies the semantic labels for that class AND the dataset
+    # identifier to pull samples from, so different COI classes can come from
+    # completely different datasets.  Background is always the last head and
+    # needs no entry here.
+    #
+    # Leave empty ([]) for single-class mode (n_coi_classes=1).
+    coi_classes: List[COIClassConfig] = field(default_factory=list)
     # Probability (0..1) of returning a background-only example during training
     background_only_prob: float = 0.0
     # How many non-COI files to mix together when creating a background-only example
@@ -91,7 +137,14 @@ class Config:
 
     @classmethod
     def from_dict(cls, cfg_dict: dict) -> "Config":
-        data_cfg = DataConfig(**cfg_dict.get("data", {}))
+        data_dict = dict(cfg_dict.get("data", {}))
+        # Deserialise nested COIClassConfig entries (YAML loads them as plain dicts)
+        raw_coi_classes = data_dict.pop("coi_classes", []) or []
+        data_cfg = DataConfig(**data_dict)
+        data_cfg.coi_classes = [
+            COIClassConfig(**c) if isinstance(c, dict) else c
+            for c in raw_coi_classes
+        ]
         model_cfg = ModelConfig(**cfg_dict.get("model", {}))
         training_cfg = TrainingConfig(**cfg_dict.get("training", {}))
         return cls(data=data_cfg, model=model_cfg, training=training_cfg)

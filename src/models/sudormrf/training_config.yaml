@@ -8,10 +8,32 @@ data:
   # this list is read by train.py and saved with the checkpoint so that
   # downstream inference/validation pipelines can report which categories
   # were targeted.
+  #
+  # Single-class mode (n_coi_classes=1): set target_classes only.
+  # Multi-class mode  (n_coi_classes>1): set coi_classes instead;
+  #   target_classes is derived automatically as the union of all label lists.
   target_classes:
     - "airplane"
     - "Airplane"
     - "plane"
+  # Per-class config for multi-class separation (n_coi_classes > 1).
+  # Each entry = one output head (index 0, 1, ..., n_coi_classes-1).
+  #   labels:  semantic labels to match in the metadata 'label' column
+  #   dataset: optional case-insensitive substring filter on the 'dataset' column
+  #            (leave empty "" to accept that class's labels from any dataset)
+  #   name:    human-readable label used in log output
+  # Background is always the last head — no entry needed.
+  # Leave empty ([]) for single-class mode.
+  #
+  # Example — 2 COI classes (aircraft + birds from separate datasets):
+  #   coi_classes:
+  #     - labels: ["airplane", "Airplane", "plane"]
+  #       dataset: "aerosonicdb"
+  #       name: "aircraft"
+  #     - labels: ["bird", "Bird", "birdsong"]
+  #       dataset: "birds_dataset"
+  #       name: "birds"
+  coi_classes: []
   # low for backgrounds without labels, change to 0.3 when labels retrieved
   background_only_prob: 0.05
   # How many non-COI files to sum for background-only examples

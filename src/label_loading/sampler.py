@@ -150,9 +150,11 @@ def sample_non_coi(
     """
     metadata_df = add_durations(metadata_df)
 
-    # Evaluate estimated segments for COI files to calculate the target non-COI segments
-    coi_df = coi_df.copy()
-    coi_df["duration"] = metadata_df.loc[coi_df.index, "duration"]
+    # Evaluate estimated segments for COI files to calculate the target non-COI segments.
+    # We call add_durations directly on coi_df rather than using index-based lookup from
+    # metadata_df, because the caller may have reset the index (e.g. after pd.concat with
+    # ignore_index=True for multi-class assembly), making .loc lookups return wrong rows.
+    coi_df = add_durations(coi_df.copy())
 
     def est_segments(dur):
         if pd.isna(dur):
