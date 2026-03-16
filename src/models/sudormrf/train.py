@@ -545,6 +545,8 @@ class AudioDataset(Dataset):
         background_only_prob: float = 0.0,
         background_mix_n: int = 2,
         augment_multiplier: int = 1,
+        seed: int = 42,
+        multi_coi_prob: float = 0.0,
     ):
         self.split = split
         self.sample_rate = sample_rate
@@ -555,11 +557,14 @@ class AudioDataset(Dataset):
         self.augment_multiplier = int(augment_multiplier) if self.augment else 1
         self.background_only_prob = max(0.0, float(background_only_prob))
         self.background_mix_n = int(background_mix_n)
+        self.multi_coi_prob = float(multi_coi_prob)
         self.segment_stride_samples = int(
             (segment_stride or segment_length) * sample_rate
         )
 
-        self._rng = np.random.default_rng(42)
+        self._seed = seed
+        self._epoch: int = 0
+        self._rng = np.random.default_rng(seed)
         self._resamplers: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
         self._resampler_cache_max = int(RESAMPLER_CACHE_MAX)
         self._file_native_info: dict[
@@ -603,6 +608,17 @@ class AudioDataset(Dataset):
         if n_coi_classes > 1 and "coi_class" in split_df.columns:
             self.file_to_class = dict(zip(split_df["filename"], split_df["coi_class"]))
 
+        # Per-class file lists (needed for COI dropout and val pre-generation)
+        self.class_files: dict[int, list[str]] = {}
+        if n_coi_classes > 1 and "coi_class" in split_df.columns:
+            for _ci in range(n_coi_classes):
+                _files = split_df.loc[
+                    (split_df["label"] == 1) & (split_df["coi_class"] == _ci),
+                    "filename",
+                ].tolist()
+                if _files:
+                    self.class_files[_ci] = _files
+
         # Precompute segments for validation/test, or for long files in train
         self.coi_segments = self._compute_segments(split_df)
 
@@ -611,6 +627,49 @@ class AudioDataset(Dataset):
         # diversity) instead of picking a fully random crop.
         if self.split == "train":
             self.coi_segments_train = list(self.coi_segments)
+
+        # Pre-generate val multi-class extras (deterministic, seeded at init).
+        # For each val COI segment, independently decide (per other class)
+        # whether to add a sample of that class to the mixture.
+        self.val_multi_class: list[list[tuple[int, str, int, int]]] = []
+        if (
+            split == "val"
+            and n_coi_classes > 1
+            and self.multi_coi_prob > 0.0
+            and self.class_files
+        ):
+            _val_rng = np.random.default_rng(seed)
+            for _, _, _seg_frames, _primary_cls in self.coi_segments:
+                _extras: list[tuple[int, str, int, int]] = []
+                for _j in range(n_coi_classes):
+                    if _j == _primary_cls or not self.class_files.get(_j):
+                        continue
+                    if _val_rng.random() < self.multi_coi_prob:
+                        _j_files = self.class_files[_j]
+                        _f = _j_files[int(_val_rng.integers(len(_j_files)))]
+                        _orig_sr, _total_frames = self._file_native_info.get(
+                            _f, (self.sample_rate, self.segment_samples)
+                        )
+                        _bounds = self.file_to_bounds.get(_f, (0.0, None))
+                        _start_f = int(_bounds[0] * _orig_sr)
+                        _end_f = (
+                            int(_bounds[1] * _orig_sr)
+                            if _bounds[1] is not None
+                            else _total_frames
+                        )
+                        _end_f = min(_end_f, _total_frames)
+                        _extra_seg = max(
+                            1,
+                            int(self.segment_samples * _orig_sr / self.sample_rate),
+                        )
+                        _max_off = max(_start_f, _end_f - _extra_seg)
+                        _off = (
+                            int(_val_rng.integers(_start_f, _max_off + 1))
+                            if _max_off > _start_f
+                            else _start_f
+                        )
+                        _extras.append((_j, _f, _off, _extra_seg))
+                self.val_multi_class.append(_extras)
 
         # Background-only sample count
         self._extra_background_count = 0
@@ -651,7 +710,8 @@ class AudioDataset(Dataset):
 
     def set_epoch(self, epoch: int):
         """Re-seed the internal RNG for a new epoch to ensure augmentation diversity."""
-        self._rng = np.random.default_rng(42 + epoch)
+        self._epoch = epoch
+        self._rng = np.random.default_rng(self._seed + epoch)
 
     def _compute_segments(
         self, split_df: pd.DataFrame
@@ -911,6 +971,19 @@ class AudioDataset(Dataset):
                     sources[class_idx] = coi_audio
                 else:
                     sources = [coi_audio]
+
+                # COI dropout: independently add each other class to the mixture
+                if self.multi_coi_prob > 0.0 and self.n_coi_classes > 1:
+                    for _j in range(self.n_coi_classes):
+                        if _j == class_idx:
+                            continue
+                        if not self.class_files.get(_j):
+                            continue
+                        if self._rng.random() < self.multi_coi_prob:
+                            _f = self.class_files[_j][
+                                int(self._rng.integers(len(self.class_files[_j])))
+                            ]
+                            sources[_j] = self._load_audio(_f, frame_offset=None)
             else:
                 # Background-only sample - create mixture of multiple background sources
                 idxs = self._rng.choice(
@@ -939,6 +1012,11 @@ class AudioDataset(Dataset):
                 )
                 if self.n_coi_classes > 1:
                     sources[class_idx] = coi_audio
+
+                # Inject pre-generated extra COI classes for val multi-class mixtures
+                if self.val_multi_class and idx < len(self.val_multi_class):
+                    for _e_cls, _e_file, _e_off, _e_nf in self.val_multi_class[idx]:
+                        sources[_e_cls] = self._load_audio(_e_file, _e_off, _e_nf)
             else:
                 # Background-only validation sample
                 idxs = self._rng.choice(
@@ -1104,14 +1182,12 @@ def train_epoch(
                         outputs = model(mixture.unsqueeze(1).float())
                     if not check_finite(outputs):
                         del outputs, mixture, clean_wavs
-                        optimizer.zero_grad(set_to_none=True)
                         grad_norms.append(float("nan"))
                         torch.cuda.empty_cache()
                         continue
                 else:
                     # No retry available without AMP; skip this batch
                     del mixture, clean_wavs
-                    optimizer.zero_grad(set_to_none=True)
                     grad_norms.append(float("nan"))
                     continue
 
@@ -1122,7 +1198,6 @@ def train_epoch(
 
         if not check_finite(loss):
             del loss
-            optimizer.zero_grad(set_to_none=True)
             grad_norms.append(float("nan"))
             continue
 
@@ -1411,6 +1486,8 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         ),
         background_mix_n=getattr(config.data, "background_mix_n", 2),
         augment_multiplier=getattr(config.data, "augment_multiplier", 1),
+        seed=getattr(config.training, "seed", 42),
+        multi_coi_prob=getattr(config.data, "multi_coi_prob", 0.0),
     )
 
     num_workers = int(getattr(config.training, "num_workers", 0))
@@ -1435,8 +1512,9 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         drop_last=(split == "train"),
         num_workers=num_workers,
         pin_memory=pin_memory,
-        persistent_workers=(num_workers > 0 and split == "train"),
+        persistent_workers=False,
         prefetch_factor=prefetch_factor,
+        worker_init_fn=_worker_init_fn if (num_workers > 0 and split == "train") else None,
     )
 
     del df
@@ -1520,6 +1598,22 @@ def set_seed(seed: int = 42):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
+
+
+def _worker_init_fn(worker_id: int) -> None:
+    """Seed each DataLoader worker's dataset RNG deterministically per epoch and worker.
+
+    Called by PyTorch at worker spawn time.  Because persistent_workers=False the
+    worker is re-spawned every epoch, so set_epoch() has already updated
+    ds._epoch before these workers are created, and each worker gets a unique
+    but reproducible seed: seed + epoch * 31337 + worker_id.
+    """
+    info = torch.utils.data.get_worker_info()
+    if info is not None:
+        ds = info.dataset
+        if hasattr(ds, "_seed"):
+            epoch = getattr(ds, "_epoch", 0)
+            ds._rng = np.random.default_rng(ds._seed + epoch * 31337 + info.id)
 
 
 # =============================================================================

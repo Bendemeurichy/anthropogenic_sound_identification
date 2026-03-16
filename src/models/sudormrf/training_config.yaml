@@ -40,6 +40,10 @@ data:
   background_mix_n: 1
   # Augmentation multiplier: each COI sample seen 3x with random augmentations
   augment_multiplier: 2
+  # Probability (0..1) that each *other* COI class is independently added to a
+  # training mixture.  0.0 = disabled (single COI class per sample, default).
+  # Only meaningful when n_coi_classes > 1.
+  multi_coi_prob: 0.0
 
 # Model settings - using proven SuDoRM-RF defaults
 model:

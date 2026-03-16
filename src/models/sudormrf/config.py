@@ -74,6 +74,10 @@ class DataConfig:
     # Augmentation multiplier: each COI sample is seen this many times per epoch
     # with different random augmentations (e.g., 3 = 3x more COI samples)
     augment_multiplier: int = 1
+    # Probability (0..1) that each *other* COI class is added to a training mixture
+    # (independently per class).  0.0 = disabled (single-class per sample).
+    # Only meaningful when n_coi_classes > 1.
+    multi_coi_prob: float = 0.0
 
 
 @dataclass
