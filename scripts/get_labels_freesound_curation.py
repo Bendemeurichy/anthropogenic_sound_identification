@@ -143,7 +143,11 @@ def main():
     print("putting labels in freesound dataset")
     get_freesound_labels(csv_path)
     # remove_empty_labels(csv_path.replace(".csv", "_with_labels.csv"))
-    #  find_missing_indices(csv_path, csv_path.replace(".csv", "_with_labels.csv"))\
+    # find_missing_indices(csv_path, csv_path.replace(".csv", "_with_labels.csv"))
+    # remove_duplicate_previews(csv_path.replace(".csv", "_with_labels.csv"))
+    # sync_indices_and_remove_no_filename(
+    #     csv_path, csv_path.replace(".csv", "_with_labels.csv")
+    # )
     # remove_padding(csv_path.replace(".csv", "_with_labels.csv"))
 
 
@@ -160,33 +164,200 @@ def remove_empty_labels(csv_path: str):
     )
 
 
-def find_missing_indices(csv_original: Path, csv_labels: Path) -> None:
-    """utility function to fill in missing indices from original csv that are not present in the labels csv, to ensure we have a complete set of indices for downstream processing."""
+def find_missing_indices(csv_original: str, csv_labels: str) -> None:
+    """Sync rows from original to labels using index/background filename root.
+
+    This function:
+    1. Reads both the original CSV and the labels CSV
+    2. Compares original 'index' against labels key column:
+       - prefers 'background filename root'
+       - falls back to 'index' if needed
+    3. Adds rows present in original but missing in labels
+    4. Ensures inserted rows set both 'background filename root' and 'index'
+       so they are preserved during later cleanup
+
+    Args:
+        csv_original: Path to the original CSV file
+        csv_labels: Path to the labels CSV file
+    """
     df_original = pd.read_csv(csv_original)
     df_labels = pd.read_csv(csv_labels)
 
-    existing_indices = (
-        set(df_labels["index"]) if "index" in df_labels.columns else set()
+    if "index" not in df_original.columns:
+        print("Original CSV has no 'index' column; skipping missing-row sync.")
+        return
+
+    # Decide which labels column to use as the key for presence checks
+    labels_key_col = (
+        "background filename root"
+        if "background filename root" in df_labels.columns
+        else "index"
     )
-    original_indices = (
-        set(df_original["index"])
-        if "index" in df_original.columns
-        else set(df_original.index)
+    if labels_key_col not in df_labels.columns:
+        print(
+            "Labels CSV has neither 'background filename root' nor 'index'; skipping."
+        )
+        return
+
+    print(
+        f"Comparing original 'index' against labels '{labels_key_col}' for missing rows."
     )
 
-    missing_indices = original_indices - existing_indices
-    if missing_indices:
-        print(
-            f"Found {len(missing_indices)} missing indices in labels csv. Adding them with empty labels."
-        )
-        new_rows = pd.DataFrame(
-            [{"index": idx, "labels": None} for idx in missing_indices]
-        )
-        df_labels = pd.concat([df_labels, new_rows], ignore_index=True)
-        df_labels.to_csv(csv_labels, index=False)
-        print(f"Missing indices added to {csv_labels}")
+    # Normalize numeric IDs so 123 and 123.0 compare equal
+    original_ids = set(pd.to_numeric(df_original["index"], errors="coerce").dropna())
+    labels_ids = set(pd.to_numeric(df_labels[labels_key_col], errors="coerce").dropna())
+
+    missing_ids = original_ids - labels_ids
+
+    if not missing_ids:
+        print("No missing rows found between original and labels CSV.")
+        return
+
+    print(f"Found {len(missing_ids)} missing IDs. Adding rows...")
+
+    # Build rows shaped like labels CSV to avoid NaN in key columns after concat
+    labels_cols = df_labels.columns.tolist()
+    missing_rows = []
+
+    for missing_id in sorted(missing_ids):
+        match = df_original[
+            pd.to_numeric(df_original["index"], errors="coerce") == missing_id
+        ]
+        if match.empty:
+            continue
+        src = match.iloc[0]
+
+        # start with all labels columns as None
+        row = {col: None for col in labels_cols}
+
+        # map original first 4 columns where names match
+        for col in df_original.columns[:4]:
+            if col in row:
+                row[col] = src[col]
+
+        # always set both index-style columns when present in labels file
+        if "background filename root" in row:
+            row["background filename root"] = src["index"]
+        if "index" in row:
+            row["index"] = src["index"]
+
+        # ensure preview/search fields are carried when present
+        if "preview" in row and "preview" in src:
+            row["preview"] = src["preview"]
+        if "search freesound" in row and "search freesound" in src:
+            row["search freesound"] = src["search freesound"]
+
+        missing_rows.append(row)
+
+    if not missing_rows:
+        print("No rows could be constructed for missing IDs.")
+        return
+
+    new_rows_df = pd.DataFrame(missing_rows, columns=labels_cols)
+    df_labels = pd.concat([df_labels, new_rows_df], ignore_index=True)
+
+    df_labels.to_csv(csv_labels, index=False)
+    print(f"Added {len(new_rows_df)} missing rows to {csv_labels}")
+
+
+def remove_duplicate_previews(csv_path: str) -> None:
+    """Remove duplicate preview URLs from the labels CSV.
+
+    When there are duplicate previews, keep the row with a non-NaN 'background filename root'
+    value and remove the ones without it.
+
+    Args:
+        csv_path: Path to the labels CSV file
+    """
+    df = pd.read_csv(csv_path)
+
+    print(f"Starting with {len(df)} rows")
+
+    # Check if there are duplicate previews
+    duplicates = df[df.duplicated(subset=["preview"], keep=False)]
+
+    if len(duplicates) == 0:
+        print("No duplicate previews found.")
+        return
+
+    print(f"Found {len(duplicates)} rows with duplicate previews")
+    print(f"Unique duplicate preview URLs: {duplicates['preview'].nunique()}")
+
+    # For each duplicate preview, keep the one with non-NaN 'background filename root'
+    # and remove the ones without it
+    rows_to_keep = []
+    seen_previews = set()
+
+    for _, row in df.iterrows():
+        preview = row["preview"]
+
+        if preview in seen_previews:
+            # This preview was already added, skip it
+            continue
+
+        seen_previews.add(preview)
+
+        # Get all rows with this preview
+        matching_rows = df[df["preview"] == preview]
+
+        if len(matching_rows) > 1:
+            # Multiple rows with same preview - keep the one with non-NaN background filename root
+            rows_with_filename = matching_rows[
+                matching_rows["background filename root"].notna()
+            ]
+
+            if len(rows_with_filename) > 0:
+                # Keep the first row that has a background filename root
+                rows_to_keep.append(rows_with_filename.iloc[0])
+            else:
+                # No rows with background filename root, keep the first one
+                rows_to_keep.append(matching_rows.iloc[0])
+        else:
+            # Only one row with this preview, keep it
+            rows_to_keep.append(row)
+
+    # Create new dataframe from rows to keep
+    df_cleaned = pd.DataFrame(rows_to_keep).reset_index(drop=True)
+
+    print(f"After removing duplicates: {len(df_cleaned)} rows")
+    print(f"Removed {len(df) - len(df_cleaned)} duplicate rows")
+
+    # Write the cleaned CSV back
+    df_cleaned.to_csv(csv_path, index=False)
+    print(f"Updated file saved to {csv_path}")
+
+
+def sync_indices_and_remove_no_filename(csv_original: str, csv_labels: str) -> None:
+    """Remove rows without background filename root after index-based sync.
+
+    Missing-row insertion is handled by `find_missing_indices`. This function only
+    performs cleanup by removing rows that have no 'background filename root'.
+
+    Args:
+        csv_original: Path to the original CSV file (unused, kept for call compatibility)
+        csv_labels: Path to the labels CSV file
+    """
+    _ = csv_original  # kept to preserve function signature
+    df_labels = pd.read_csv(csv_labels)
+
+    print(f"Starting cleanup with labels CSV: {len(df_labels)} rows")
+
+    if "background filename root" not in df_labels.columns:
+        print("No 'background filename root' column found; skipping cleanup.")
+        return
+
+    rows_before = len(df_labels)
+    df_labels = df_labels[df_labels["background filename root"].notna()]
+    rows_after = len(df_labels)
+    rows_removed = rows_before - rows_after
+
+    if rows_removed > 0:
+        print(f"Removed {rows_removed} rows with NaN 'background filename root'")
     else:
-        print("No missing indices found between original and labels csv.")
+        print("No rows with NaN 'background filename root' to remove")
+
+    df_labels.to_csv(csv_labels, index=False)
+    print(f"Updated file saved to {csv_labels}")
 
 
 def remove_padding(path: Path):
