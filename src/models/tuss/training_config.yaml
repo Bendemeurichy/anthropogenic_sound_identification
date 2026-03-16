@@ -39,7 +39,7 @@ data:
   segment_length: 4.0 # seconds per training crop
 
   # SNR range (dB) when mixing a COI source on top of background
-  snr_range: [-5, 5]
+  snr_range: [-10, 10]
 
   # -----------------------------------------------------------------------
   # TARGET CLASSES
@@ -51,7 +51,7 @@ data:
     - ["airplane", "Airplane", "plane"]
 
   # Probability that a training sample contains *only* background (no COI)
-  background_only_prob: 0.15
+  background_only_prob: 0.3
 
   # How many background clips to mix together per sample
   background_mix_n: 2
@@ -106,7 +106,7 @@ training:
   amp_dtype: "bf16" # "bf16" (recommended, matches pretrained model) or "fp16"
 
   num_epochs: 200
-  patience: 30 # early-stop after this many epochs without improvement
+  patience: 25 # early-stop after this many epochs without improvement
 
   lr: 5.0e-5
   weight_decay: 1.0e-2
@@ -115,7 +115,7 @@ training:
   clip_grad_norm: 5.0
 
   # Loss weights
-  coi_weight: 1.5 # up-weight COI streams relative to background
+  coi_weight: 2.0 # up-weight COI streams relative to background
   zero_ref_loss_weight: 0.1 # penalty for estimating energy when target is silent
   snr_max: 30 # clip SNR loss at this value (dB)
 

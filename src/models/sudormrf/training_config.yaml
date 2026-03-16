@@ -2,7 +2,7 @@ data:
   df_path: "data/aircraft_data.csv"
   sample_rate: 32000
   segment_length: 4.0 # seconds
-  snr_range: [-5, 5] # dB range for mixing
+  snr_range: [-10, 10] # dB range for mixing
   n_coi_classes: 1
   # semantic labels that define the "class of interest" for separation.
   # this list is read by train.py and saved with the checkpoint so that
@@ -35,7 +35,7 @@ data:
   #       name: "birds"
   coi_classes: []
   # low for backgrounds without labels, change to 0.3 when labels retrieved
-  background_only_prob: 0.05
+  background_only_prob: 0.3
   # How many non-COI files to sum for background-only examples
   background_mix_n: 1
   # Augmentation multiplier: each COI sample seen 3x with random augmentations
@@ -74,18 +74,18 @@ training:
   use_amp: true
   num_epochs: 400
   lr: 3e-4
-  weight_decay: 5e-2
+  weight_decay: 1e-2
   num_workers: 1
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 1
   clip_grad_norm: 5.0
-  patience: 15
+  patience: 25
   checkpoint_dir: "checkpoints"
   device: "cuda:0"
   compile_model: false
   compile_backend: "eager"
-  class_weight: 1.4
+  class_weight: 2.0
   aux_waveform_weight: 0.0
   warmup_steps: 600
   validate_every_n_epochs: 1

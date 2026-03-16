@@ -138,10 +138,107 @@ def request_labels_file(
         return []
 
 
+def get_freesound_labels_batched(csv_path: str):
+    """Refactored to use batch searching (100 IDs per request) to bypass daily limits."""
+    load_dotenv()
+    api_key = os.getenv("FREESOUND_KEY")
+    assert api_key is not None, "FREESOUND_KEY must be set in the .env file"
+
+    client = freesound.FreesoundClient()
+    client.set_token(api_key, "token")
+
+    out_path = csv_path.replace(".csv", "_with_labels.csv")
+
+    # Load or initialize DataFrame
+    if os.path.exists(out_path):
+        print(f"Found existing output {out_path}, resuming...")
+        df = pd.read_csv(out_path)
+    else:
+        df = pd.read_csv(csv_path)
+        if "labels" not in df.columns:
+            df["labels"] = ""
+        df.to_csv(out_path, index=False)
+
+    # 1. Identify rows that need labels
+    # We look for rows where 'labels' is NaN or empty string
+    to_process_mask = (df["labels"].isna()) | (
+        df["labels"].astype(str).str.strip() == ""
+    )
+
+    # Get unique IDs to fetch to avoid redundant API calls
+    ids_to_fetch = (
+        df.loc[to_process_mask, "search freesound"].dropna().unique().tolist()
+    )
+
+    if not ids_to_fetch:
+        print("No missing labels found. Everything is already processed.")
+        return
+
+    print(f"Total unique IDs to fetch: {len(ids_to_fetch)}")
+
+    batch_size = 100  # Safe limit for URL length and API constraints
+
+    for i in range(0, len(ids_to_fetch), batch_size):
+        batch = ids_to_fetch[i : i + batch_size]
+
+        # Format IDs for Solr filter: id:(123 456 789)
+        id_filter = (
+            "id:(" + " ".join(map(str, [int(float(fid)) for fid in batch])) + ")"
+        )
+
+        try:
+            # ONE API call for 100 sounds
+            results_pager = client.text_search(
+                filter=id_filter, fields="id,tags,category", page_size=batch_size
+            )
+
+            # Create a mapping of what we found
+            found_ids = []
+            for sound in results_pager:
+                label_str = json.dumps(sound.tags, ensure_ascii=False)
+                # Update all rows in the DF that match this ID
+                df.loc[
+                    df["search freesound"].astype(str) == str(sound.id), "labels"
+                ] = label_str
+                found_ids.append(str(sound.id))
+
+            # Handle IDs that weren't found (e.g., deleted or private sounds)
+            # If we requested it but it didn't come back in search, mark as empty
+            for requested_id in batch:
+                rid_str = str(int(float(requested_id)))
+                if rid_str not in found_ids:
+                    df.loc[df["search freesound"].astype(str) == rid_str, "labels"] = (
+                        "[]"
+                    )
+
+            # Save progress and report
+            df.to_csv(out_path, index=False)
+            print(
+                f"Processed batch {i // batch_size + 1}: Fetched {len(found_ids)}/{len(batch)} sounds."
+            )
+
+            # Small pause to be a good citizen
+            time.sleep(0.5)
+
+        except Exception as e:
+            msg = str(e).lower()
+            if "429" in msg or "rate limit" in msg:
+                print(
+                    f"Rate limit hit at batch starting with {batch[0]}. Saving and exiting."
+                )
+                df.to_csv(out_path, index=False)
+                sys.exit(2)
+            else:
+                print(f"Error in batch starting with {batch[0]}: {e}")
+                continue
+
+    print(f"Completed! Final output written to {out_path}")
+
+
 def main():
     csv_path = "/home/bendm/Thesis/project/code/data/metadata/freesound_curation/source_freesound_field_recordings_links.csv"
     print("putting labels in freesound dataset")
-    get_freesound_labels(csv_path)
+    get_freesound_labels_batched(csv_path)
     # remove_empty_labels(csv_path.replace(".csv", "_with_labels.csv"))
     # find_missing_indices(csv_path, csv_path.replace(".csv", "_with_labels.csv"))
     # remove_duplicate_previews(csv_path.replace(".csv", "_with_labels.csv"))

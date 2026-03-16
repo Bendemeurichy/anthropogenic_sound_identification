@@ -181,11 +181,24 @@ def sample_non_coi(
         if target_class is not None:
             # Exclude every recording that carries any COI label so that mixed
             # recordings (COI + other) cannot appear in the background pool.
+            # Also exclude recordings with no label (None/NaN/empty list) since
+            # their content is unknown and could contain COI signal, which would
+            # corrupt reconstruction losses.
             def _has_any_coi(labels):
+                if labels is None:
+                    return True
                 if isinstance(labels, list):
+                    if len(labels) == 0:
+                        return True
                     return any(t in labels for t in target_class)
                 elif isinstance(labels, str):
                     return labels in target_class
+                # Catches NaN / pd.NA / other non-label values
+                try:
+                    if pd.isna(labels):
+                        return True
+                except (TypeError, ValueError):
+                    pass
                 return False
 
             any_coi_mask = metadata_df["label"].apply(_has_any_coi)

@@ -22,7 +22,7 @@ DATASET_CONFIG = {
         "metadata": "risoux_test/annotations.csv",
     },
     "freesound": {
-        "metadata": "freesound_curation/source_freesound_field_recordings_links.csv",
+        "metadata": "freesound_curation/source_freesound_field_recordings_links_with_labels.csv",
     },
 }
 
