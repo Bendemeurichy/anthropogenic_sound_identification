@@ -1268,6 +1268,11 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
 
     num_workers = config.training.num_workers
     pin_memory = config.training.pin_memory and torch.cuda.is_available()
+    # Scope pinned memory to the training device so the DMA path goes directly
+    # to the target GPU.  Without this PyTorch pins to cuda:0 by default,
+    # causing a cross-device hop on every batch transfer and holding a resident
+    # allocation on cuda:0 for the lifetime of the DataLoader workers.
+    pin_memory_device = str(config.training.device) if pin_memory else ""
     loader = DataLoader(
         dataset,
         batch_size=config.training.batch_size,
@@ -1275,6 +1280,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         drop_last=(split == "train"),
         num_workers=num_workers,
         pin_memory=pin_memory,
+        pin_memory_device=pin_memory_device,
         persistent_workers=(num_workers > 0 and split == "train"),
     )
     del df
@@ -1679,6 +1685,14 @@ def main():
     else:
         # Validate / normalise whatever is in the YAML
         config.training.device = resolve_device(config.training.device)
+
+    # Claim the target GPU as the process-default CUDA device immediately,
+    # before any CUDA API call (including manual_seed_all and cudnn
+    # benchmarking).  Without this, PyTorch lazily initialises a CUDA context
+    # on cuda:0, leaving a resident allocation on that device for the entire
+    # process lifetime even when training on a different GPU.
+    if config.training.device.startswith("cuda:"):
+        torch.cuda.set_device(int(config.training.device.split(":")[1]))
 
     print(f"Device:      {config.training.device}")
     print(f"COI prompts: {config.model.coi_prompts}")
