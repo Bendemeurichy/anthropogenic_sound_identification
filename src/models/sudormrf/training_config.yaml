@@ -74,7 +74,7 @@ training:
   use_amp: true
   num_epochs: 400
   lr: 3e-4
-  weight_decay: 1e-2
+  weight_decay: 1e-3
   num_workers: 1
   pin_memory: true
   persistent_workers: true

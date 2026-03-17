@@ -311,8 +311,7 @@ Recall:    {self.recall:.4f}    F1-Score:  {self.f1_score:.4f}
 Specificity: {self.specificity:.4f}  Balanced Acc: {self.balanced_accuracy:.4f}
 MCC: {self.matthews_corrcoef:.4f}"""
 
-        # provide a quick summary of which class‑to‑class *transitions* were wrong
-        # provide a quick summary of which class transitions were mis‑predicted
+        # provide a quick summary of which class-to-class transitions were mis-predicted
         s += (
             f"\n\nMisclassified transition counts:\n"
             f"  Actual 0 → Pred 1: {self.misclassified_transitions.get('0->1', 0)}\n"
@@ -333,10 +332,12 @@ MCC: {self.matthews_corrcoef:.4f}"""
                 s += f"  {raw}: FP={fp}  FN={fn}\n"
 
         if self.mean_si_snr is not None:
+            sdr_str = f"{self.mean_sdr:+.2f} dB" if self.mean_sdr is not None else "n/a"
+            si_sdr_str = f"{self.mean_si_sdr:+.2f} dB" if self.mean_si_sdr is not None else "n/a"
             s += f"""
 
 Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
-  SI-SNR: {self.mean_si_snr:+.2f} dB    SDR: {self.mean_sdr:+.2f} dB    SI-SDR: {self.mean_si_sdr:+.2f} dB"""
+  SI-SNR: {self.mean_si_snr:+.2f} dB    SDR: {sdr_str}    SI-SDR: {si_sdr_str}"""
 
         if self.actual_snrs:
             s += f"""
@@ -466,12 +467,12 @@ class ValidationPipeline:
             self.classifier_sample_rate * self.segment_length
         )
         self.segment_samples = int(self.sample_rate * self.segment_length)
-        # Prefer the second CUDA device (index 1) when more than one GPU is present.
-        # If a second GPU isn't available we fall back to the CPU rather than using
-        # the first GPU; this matches the requirement to "use the second cuda gpu
-        # if available and else the cpu".
+        # Prefer cuda:1 when multiple GPUs are present; fall back to cuda:0 on
+        # a single-GPU machine; use CPU if no CUDA is available.
         if torch.cuda.is_available() and torch.cuda.device_count() > 1:
             self.device = "cuda:1"
+        elif torch.cuda.is_available():
+            self.device = "cuda:0"
         else:
             self.device = "cpu"
             print(f"Cuda available: {torch.cuda.is_available()}")

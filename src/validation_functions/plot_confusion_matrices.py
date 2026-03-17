@@ -203,8 +203,6 @@ def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
         title=dict(text=title_text, font=dict(size=20)),
         width=900,
         height=800,
-        # give extra room at the bottom so our mis‑classification annotations
-        # added below each subplot aren’t cut off
         margin=dict(b=100),
     )
 
@@ -320,8 +318,16 @@ def create_top_misclassified_figure(
             )
             fn_legend_added = True
 
-            # Zero-line for visual reference.
-            fig.add_vline(x=0, line_width=1, line_color="black", row=row, col=col)
+            # Zero-line for visual reference.  add_vline does not accept
+            # row/col; use add_shape instead, which does.
+            fig.add_shape(
+                type="line",
+                x0=0, x1=0,
+                y0=0, y1=1,
+                yref="y domain",
+                line=dict(width=1, color="black"),
+                row=row, col=col,
+            )
             fig.update_xaxes(title_text="← FN  |  FP →", row=row, col=col)
 
         else:
@@ -647,7 +653,7 @@ def extract_model_info(results: dict) -> dict:
             "plane_classifier" in clf_path.lower()
             or "plane_clasifier" in clf_path.lower()
         ):
-            model_info["classifier"] = "Ast"
+            model_info["classifier"] = "CNN"
         else:
             # Fallback: extract from directory name before checkpoints
             normalized_path = clf_path.replace("\\", "/")
