@@ -38,6 +38,8 @@ from src.models.clapsep.inference import COI_HEAD_INDEX as CLAPSEP_COI_HEAD
 from src.models.clapsep.inference import CLAPSepInference
 from src.models.sudormrf.inference import COI_HEAD_INDEX as SUDORMRF_COI_HEAD
 from src.models.sudormrf.inference import SeparationInference
+from src.models.tuss.inference import COI_HEAD_INDEX as TUSS_COI_HEAD
+from src.models.tuss.inference import TUSSInference
 from src.validation_functions.classification_models.plane_clasifier.config import (
     TrainingConfig,
 )
@@ -72,8 +74,11 @@ def _probe_ast() -> bool:
         return False
 
 
-_pann_available: bool = _probe_pann()
-_ast_available: bool = _probe_ast()
+# Temporarily turn of pann and ast for testing
+# _pann_available: bool = _probe_pann()
+# _ast_available: bool = _probe_ast()
+_pann_available: bool = False
+_ast_available: bool = False
 
 
 try:
@@ -333,7 +338,9 @@ MCC: {self.matthews_corrcoef:.4f}"""
 
         if self.mean_si_snr is not None:
             sdr_str = f"{self.mean_sdr:+.2f} dB" if self.mean_sdr is not None else "n/a"
-            si_sdr_str = f"{self.mean_si_sdr:+.2f} dB" if self.mean_si_sdr is not None else "n/a"
+            si_sdr_str = (
+                f"{self.mean_si_sdr:+.2f} dB" if self.mean_si_sdr is not None else "n/a"
+            )
             s += f"""
 
 Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
@@ -505,6 +512,9 @@ class ValidationPipeline:
         sep_checkpoint: str = None,
         cls_weights: str = None,
         use_clapsep: bool = False,
+        use_tuss: bool = False,
+        tuss_coi_prompt: str = "airplane",
+        tuss_bg_prompt: str = "background",
         clapsep_text_pos: str = "train passing",
         clapsep_text_neg: str = "",
         use_pann: bool = True,
@@ -516,6 +526,9 @@ class ValidationPipeline:
             sep_checkpoint: Path to the separation model checkpoint.
             cls_weights: Path to the CNN classifier weights.
             use_clapsep: If True, load the CLAPSep separator instead of SudoRM-RF.
+            use_tuss: If True, load the TUSS separator instead of SudoRM-RF.
+            tuss_coi_prompt: Prompt name for TUSS Class of Interest (default: "airplane").
+            tuss_bg_prompt: Prompt name for TUSS background (default: "background").
             clapsep_text_pos: Positive text prompt for CLAPSep.
             clapsep_text_neg: Negative text prompt for CLAPSep.
             use_pann: If True (default), load the PANN AudioTagging model as an
@@ -530,7 +543,32 @@ class ValidationPipeline:
         self.sep_checkpoint_path = sep_path
         self.cls_checkpoint_path = cls_path
 
-        if use_clapsep:
+        if use_tuss:
+            print(f"Loading TUSS model from {sep_path}")
+            print(
+                f"  COI prompt: '{tuss_coi_prompt}', Background prompt: '{tuss_bg_prompt}'"
+            )
+            self.separator = TUSSInference.from_checkpoint(
+                sep_path,
+                device=self.device,
+                coi_prompt=tuss_coi_prompt,
+                bg_prompt=tuss_bg_prompt,
+            )
+            # Propagate sample_rate and segment_samples from TUSS model
+            self.sample_rate = self.separator.sample_rate
+            self.segment_samples = self.separator.segment_samples
+            self.segment_length = self.segment_samples / self.sample_rate
+            print(
+                f"TUSS config: sample_rate={self.sample_rate} Hz, "
+                f"segment_length={self.segment_length:.2f} s "
+                f"({self.segment_samples} samples)"
+            )
+            # Re-derive classifier segment size using the (now updated) segment_length
+            # so the classifier window stays consistent with the separator window.
+            self.classifier_segment_samples = int(
+                self.classifier_sample_rate * self.segment_length
+            )
+        elif use_clapsep:
             ckpt_label = sep_path if sep_checkpoint else "default CLAPSep checkpoint"
             print(
                 f"Loading CLAPSep model from {ckpt_label} "
@@ -570,7 +608,16 @@ class ValidationPipeline:
         # recover and log the target class list if the checkpoint included a
         # config (it should, since the training routine saves the YAML)
         if hasattr(self.separator, "config") and self.separator.config:
-            tc = getattr(self.separator.config.data, "target_classes", None)
+            # Try multiple paths depending on model type
+            tc = None
+            if hasattr(self.separator.config, "data"):
+                # SudoRM-RF / CLAPSep format
+                tc = getattr(self.separator.config.data, "target_classes", None)
+            elif isinstance(self.separator.config, dict):
+                # TUSS format (config is a dict from hparams.yaml)
+                data_section = self.separator.config.get("data", {})
+                tc = data_section.get("target_classes", None)
+
             if tc:
                 self.target_classes = tc
                 print(f"Target classes from separation checkpoint: {tc}")
@@ -804,7 +851,9 @@ class ValidationPipeline:
         """
         orig_len = waveform.shape[0]
 
-        if isinstance(self.separator, CLAPSepInference):
+        # TUSS and CLAPSep use their own separate_waveform() method which handles
+        # all normalization, windowing, and model-specific logic (e.g., prompts for TUSS)
+        if isinstance(self.separator, (TUSSInference, CLAPSepInference)):
             return self.separator.separate_waveform(waveform)
 
         # If waveform is the expected segment length, run as before
@@ -944,6 +993,8 @@ class ValidationPipeline:
 
     def _get_coi_head_index(self) -> int:
         """Return the COI head index for the current separator model."""
+        if isinstance(self.separator, TUSSInference):
+            return TUSS_COI_HEAD
         if isinstance(self.separator, CLAPSepInference):
             return CLAPSEP_COI_HEAD
         return SUDORMRF_COI_HEAD
@@ -2001,7 +2052,7 @@ def main():
 
     pipeline = ValidationPipeline(base_path=BASE_PATH)
     pipeline.load_models(
-        sep_checkpoint=SEP_CHECKPOINT, cls_weights=CLS_WEIGHTS, use_clapsep=True
+        sep_checkpoint=SEP_CHECKPOINT, cls_weights=CLS_WEIGHTS, use_clapsep=False
     )
 
     # Pass 1: standard held-out test split (esc50, aerosonicdb, freesound)

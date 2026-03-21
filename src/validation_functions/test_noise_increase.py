@@ -196,13 +196,33 @@ def run_noise_increase_experiment(
 def main() -> None:
     # ================== HARD-CODED CONFIG ==================
     BASE_PATH = str(PROJECT_ROOT.parent / "datasets")
-    DATA_CSV = str(
-        PROJECT_ROOT
-        / "src/models/sudormrf/checkpoints/20260219_124144/separation_dataset.csv"
-    )
+    
+    # ---- Model selection ----
+    # Set USE_TUSS = True to test TUSS model instead of SudoRM-RF
+    USE_TUSS = False
+    
+    if USE_TUSS:
+        # TUSS model configuration
+        # Update these paths to point to your trained TUSS checkpoint
+        DATA_CSV = str(
+            PROJECT_ROOT
+            / "src/models/tuss/checkpoints/YOUR_CHECKPOINT_DIR/separation_dataset.csv"
+        )
+        SEP_CHECKPOINT = str(
+            PROJECT_ROOT / "src/models/tuss/checkpoints/YOUR_CHECKPOINT_DIR"
+        )
+        # TUSS prompts (should match training config)
+        TUSS_COI_PROMPT = "airplane"
+        TUSS_BG_PROMPT = "background"
+    else:
+        # SudoRM-RF model configuration (default)
+        DATA_CSV = str(
+            PROJECT_ROOT
+            / "src/models/sudormrf/checkpoints/20260219_124144/separation_dataset.csv"
+        )
+        SEP_CHECKPOINT = str(PROJECT_ROOT / "src/models/sudormrf/checkpoints/best_model.pt")
 
-    # Separation + classifier checkpoints
-    SEP_CHECKPOINT = str(PROJECT_ROOT / "src/models/sudormrf/checkpoints/best_model.pt")
+    # Classifier checkpoint (shared across all separation models)
     CLS_WEIGHTS = str(
         PROJECT_ROOT
         / "src/validation_functions/plane_clasifier/checkpoints/final_model.weights.h5"
@@ -229,13 +249,29 @@ def main() -> None:
 
     print("Initializing pipeline...")
     pipeline = ValidationPipeline(base_path=BASE_PATH)
-    pipeline.load_models(
-        sep_checkpoint=SEP_CHECKPOINT,
-        cls_weights=CLS_WEIGHTS,
-        use_clapsep=False,
-        use_pann=False,
-        use_ast=False,
-    )
+    
+    # Load models with appropriate configuration
+    if USE_TUSS:
+        print(f"Using TUSS model with prompts: COI='{TUSS_COI_PROMPT}', BG='{TUSS_BG_PROMPT}'")
+        pipeline.load_models(
+            sep_checkpoint=SEP_CHECKPOINT,
+            cls_weights=CLS_WEIGHTS,
+            use_tuss=True,
+            tuss_coi_prompt=TUSS_COI_PROMPT,
+            tuss_bg_prompt=TUSS_BG_PROMPT,
+            use_pann=False,
+            use_ast=False,
+        )
+    else:
+        print("Using SudoRM-RF model")
+        pipeline.load_models(
+            sep_checkpoint=SEP_CHECKPOINT,
+            cls_weights=CLS_WEIGHTS,
+            use_clapsep=False,
+            use_tuss=False,
+            use_pann=False,
+            use_ast=False,
+        )
 
     print("Loading metadata CSV...")
     df = pd.read_csv(DATA_CSV)
@@ -258,8 +294,9 @@ def main() -> None:
     )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_json = OUTPUT_DIR / f"noise_increase_results_artificial_{ts}.json"
-    out_csv = OUTPUT_DIR / f"noise_increase_results_artificial_{ts}.csv"
+    model_name = "tuss" if USE_TUSS else "sudormrf"
+    out_json = OUTPUT_DIR / f"noise_increase_results_artificial_{model_name}_{ts}.json"
+    out_csv = OUTPUT_DIR / f"noise_increase_results_artificial_{model_name}_{ts}.csv"
 
     payload = {
         "config": {
@@ -267,6 +304,7 @@ def main() -> None:
             "data_csv": DATA_CSV,
             "sep_checkpoint": SEP_CHECKPOINT,
             "cls_weights": CLS_WEIGHTS,
+            "model_type": "TUSS" if USE_TUSS else "SudoRM-RF",
             "split": SPLIT,
             "exclude_datasets": EXCLUDE_DATASETS,
             "snr_levels_db": SNR_LEVELS_DB,
@@ -276,6 +314,11 @@ def main() -> None:
         },
         **results,
     }
+    
+    # Add TUSS-specific config if applicable
+    if USE_TUSS:
+        payload["config"]["tuss_coi_prompt"] = TUSS_COI_PROMPT
+        payload["config"]["tuss_bg_prompt"] = TUSS_BG_PROMPT
 
     with out_json.open("w") as f:
         json.dump(payload, f, indent=2)
