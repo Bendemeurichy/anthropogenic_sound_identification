@@ -263,8 +263,8 @@ def create_top_misclassified_figure(
         col = idx % n_cols + 1
 
         data = results[name]
-        fp_raw = data.get("fp_raw_counts", {})
-        fn_raw = data.get("fn_raw_counts", {})
+        fp_raw = data.get("fp_raw_atomic_counts", data.get("fp_raw_counts", {}))
+        fn_raw = data.get("fn_raw_atomic_counts", data.get("fn_raw_counts", {}))
 
         if fp_raw or fn_raw:
             # Bidirectional mode — use the new split counts.
@@ -331,8 +331,11 @@ def create_top_misclassified_figure(
             fig.update_xaxes(title_text="← FN  |  FP →", row=row, col=col)
 
         else:
-            # Legacy fallback: single-sided chart using misclassified_raw_counts.
-            mis_raw = data.get("misclassified_raw_counts", {})
+            # Legacy fallback: single-sided chart using atomic counts when present.
+            mis_raw = data.get(
+                "misclassified_raw_atomic_counts",
+                data.get("misclassified_raw_counts", {}),
+            )
             if mis_raw:
                 items = sorted(mis_raw.items(), key=lambda kv: kv[1], reverse=True)[:10]
                 labels = [str(k) for k, _ in reversed(items)]

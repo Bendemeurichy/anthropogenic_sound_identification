@@ -6,6 +6,7 @@ import struct
 import numpy as np
 import pandas as pd
 
+from .coi_labels import is_coi_label, label_contains_coi
 from .metadata_loader import load_metadata_datasets, split_seperation_classification
 
 

@@ -34,6 +34,12 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent / "classification_models" / "plane_clasifier"))
 
+from src.label_loading.coi_labels import (
+    COI_SYNONYMS,
+    _extract_label_atoms as _extract_label_atoms,
+    is_coi_label as _is_coi_label,
+    normalize_label as _norm_label,
+)
 from src.models.clapsep.inference import COI_HEAD_INDEX as CLAPSEP_COI_HEAD
 from src.models.clapsep.inference import CLAPSepInference
 from src.models.sudormrf.inference import COI_HEAD_INDEX as SUDORMRF_COI_HEAD
@@ -111,67 +117,11 @@ CNN_POSITIVE_CLASS: str = "plane"
 # ---------------------------------------------------------------------------
 # COI (class-of-interest) label normalization
 # ---------------------------------------------------------------------------
-# Different datasets may use different surface forms for the same concept.
-# We normalize them here so evaluation doesn't silently treat "airplane" vs "plane"
-# as different classes across datasets (e.g. Aerosonic vs risoux_test).
-COI_SYNONYMS: set[str] = {
-    "plane",
-    "planes",
-    "airplane",
-    "airplanes",
-    "aeroplane",
-    "aeroplanes",
-    "aircraft",
-    "fixed-wing aircraft, airplane",
-    "fixed wing aircraft, airplane",
-    "fixed-wing aircraft",
-    "fixed wing aircraft",
-    "aircraft engine",
-    "jet engine",
-    "propeller, airscrew",
-}
-
-
-def _norm_label(x: Any) -> str:
-    """Normalize raw labels to a comparable lowercase string."""
-    if x is None:
-        return ""
-    s = str(x).strip().lower()
-    return " ".join(s.split())
-
-
-def _is_coi_label(x: Any) -> bool:
-    """Return True iff *x* denotes the COI (plane/airplane/aircraft variants).
-    
-    Handles multiple label formats:
-    - Simple strings: "plane", "airplane"
-    - Lists: ["airplane", "other_label"]
-    - Complex nested structures from CSVs: '[array(["airplane", ...])]'
-    """
-    if x is None:
-        return False
-    
-    # For list inputs, check if any element is a COI label
-    if isinstance(x, list):
-        return any(_is_coi_label(item) for item in x)
-    
-    # Convert to string and normalize
-    s = _norm_label(x)
-    
-    # Direct match against COI_SYNONYMS
-    if s in COI_SYNONYMS:
-        return True
-    
-    # For complex nested structures (like those from freesound metadata),
-    # check if any COI synonym appears within the string
-    s_lower = s.lower()
-    for synonym in COI_SYNONYMS:
-        # Use word boundary matching to avoid false positives
-        # e.g., "airplane" should match but "airplanes" also matches via synonyms
-        if synonym in s_lower:
-            return True
-    
-    return False
+# COI_SYNONYMS, normalize_label, and is_coi_label are now imported from
+# src.label_loading.coi_labels to ensure consistency between dataset creation
+# (sampler.py) and evaluation (test_pipeline.py).
+#
+# See src/label_loading/coi_labels.py for the canonical definitions.
 
 
 def _filter_contaminated_backgrounds(
@@ -296,6 +246,13 @@ class ClassificationMetrics:
     fn_raw_counts: Dict[str, int] = field(default_factory=dict)
     # Total misclassification count keyed by the original (multi-class) raw label.
     misclassified_raw_counts: Dict[str, int] = field(default_factory=dict)
+    # Misclassification counts keyed by atomic raw labels split out from any
+    # multi-label background/sample annotations.
+    misclassified_raw_atomic_counts: Dict[str, int] = field(default_factory=dict)
+    # Atomic false positive counts, split from any multi-label raw annotations.
+    fp_raw_atomic_counts: Dict[str, int] = field(default_factory=dict)
+    # Atomic false negative counts, split from any multi-label raw annotations.
+    fn_raw_atomic_counts: Dict[str, int] = field(default_factory=dict)
 
     # Signal-level separation quality metrics (populated when reference is available)
     si_snr_scores: List[float] = field(default_factory=list)
@@ -335,8 +292,11 @@ class ClassificationMetrics:
         self.misclassified_transitions = {}
         self.misclassified_per_label = {}
         self.misclassified_raw_counts = {}
+        self.misclassified_raw_atomic_counts = {}
         self.fp_raw_counts = {}
+        self.fp_raw_atomic_counts = {}
         self.fn_raw_counts = {}
+        self.fn_raw_atomic_counts = {}
         if y_scores is not None:
             self.confidences = y_scores.tolist()
 
@@ -383,15 +343,30 @@ class ClassificationMetrics:
                     self.misclassified_raw_counts[raw_key] = (
                         self.misclassified_raw_counts.get(raw_key, 0) + 1
                     )
+                    atomic_labels = [
+                        _norm_label(x) for x in _extract_label_atoms(raw_labels[idx])
+                    ]
+                    for atomic in atomic_labels:
+                        self.misclassified_raw_atomic_counts[atomic] = (
+                            self.misclassified_raw_atomic_counts.get(atomic, 0) + 1
+                        )
                     # Split into FP (bg predicted as COI) and FN (COI missed).
                     if true_val == 0 and pred_val == 1:
                         self.fp_raw_counts[raw_key] = (
                             self.fp_raw_counts.get(raw_key, 0) + 1
                         )
+                        for atomic in atomic_labels:
+                            self.fp_raw_atomic_counts[atomic] = (
+                                self.fp_raw_atomic_counts.get(atomic, 0) + 1
+                            )
                     elif true_val == 1 and pred_val == 0:
                         self.fn_raw_counts[raw_key] = (
                             self.fn_raw_counts.get(raw_key, 0) + 1
                         )
+                        for atomic in atomic_labels:
+                            self.fn_raw_atomic_counts[atomic] = (
+                                self.fn_raw_atomic_counts.get(atomic, 0) + 1
+                            )
 
         # Aggregate signal metrics if populated
         if self.si_snr_scores:
@@ -430,6 +405,16 @@ MCC: {self.matthews_corrcoef:.4f}"""
             for raw in all_raw_keys:
                 fp = self.fp_raw_counts.get(raw, 0)
                 fn = self.fn_raw_counts.get(raw, 0)
+                s += f"  {raw}: FP={fp}  FN={fn}\n"
+
+        if self.fp_raw_atomic_counts or self.fn_raw_atomic_counts:
+            s += "\nMisclassified by atomic raw label:\n"
+            all_atomic_keys = sorted(
+                set(self.fp_raw_atomic_counts) | set(self.fn_raw_atomic_counts), key=str
+            )
+            for raw in all_atomic_keys:
+                fp = self.fp_raw_atomic_counts.get(raw, 0)
+                fn = self.fn_raw_atomic_counts.get(raw, 0)
                 s += f"  {raw}: FP={fp}  FN={fn}\n"
 
         if self.mean_si_snr is not None:
@@ -530,10 +515,23 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
             d["misclassified_raw_counts"] = {
                 str(k): int(v) for k, v in self.misclassified_raw_counts.items()
             }
+        if self.misclassified_raw_atomic_counts:
+            d["misclassified_raw_atomic_counts"] = {
+                str(k): int(v)
+                for k, v in self.misclassified_raw_atomic_counts.items()
+            }
         if self.fp_raw_counts:
             d["fp_raw_counts"] = {str(k): int(v) for k, v in self.fp_raw_counts.items()}
+        if self.fp_raw_atomic_counts:
+            d["fp_raw_atomic_counts"] = {
+                str(k): int(v) for k, v in self.fp_raw_atomic_counts.items()
+            }
         if self.fn_raw_counts:
             d["fn_raw_counts"] = {str(k): int(v) for k, v in self.fn_raw_counts.items()}
+        if self.fn_raw_atomic_counts:
+            d["fn_raw_atomic_counts"] = {
+                str(k): int(v) for k, v in self.fn_raw_atomic_counts.items()
+            }
         if getattr(self, "raw_labels", None):
             # preserve the sequence of original labels for downstream inspection
             d["raw_labels"] = [(_sanitize(x)) for x in list(self.raw_labels)]

@@ -13,6 +13,7 @@ from src.validation_functions.test_pipeline import (
     COI_SYNONYMS,
     _is_coi_label,
     _filter_contaminated_backgrounds,
+    _extract_label_atoms,
     _norm_label,
 )
 
@@ -133,6 +134,26 @@ def test_contamination_filter():
     print(f"✓ {len(filtered_df)} clean samples retained")
 
 
+def test_raw_label_expansion():
+    """Test that raw label expansion splits composite labels."""
+    print("\nTesting raw label expansion...")
+
+    cases = [
+        (["wind", "rain"], ["wind", "rain"]),
+        ("['wind', 'rain']", ["wind", "rain"]),
+        ("[array(['wind', 'rain'])]", ["wind", "rain"]),
+        ("background", ["background"]),
+        (None, []),
+    ]
+
+    for raw, expected in cases:
+        assert _extract_label_atoms(raw) == expected, (
+            f"Expected {_extract_label_atoms(raw)} to equal {expected}"
+        )
+
+    print(f"✓ Raw label expansion working correctly ({len(cases)} test cases)")
+
+
 def test_filter_without_orig_label():
     """Test that filter gracefully handles missing orig_label column."""
     print("\nTesting filter without orig_label column...")
@@ -166,6 +187,7 @@ def main():
         test_label_normalization()
         test_coi_detection()
         test_contamination_filter()
+        test_raw_label_expansion()
         test_filter_without_orig_label()
 
         print("\n" + "=" * 60)
