@@ -32,7 +32,7 @@ from tqdm import tqdm
 
 # Add paths for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-sys.path.insert(0, str(Path(__file__).parent / "plane_clasifier"))
+sys.path.insert(0, str(Path(__file__).parent / "classification_models" / "plane_clasifier"))
 
 from src.models.clapsep.inference import COI_HEAD_INDEX as CLAPSEP_COI_HEAD
 from src.models.clapsep.inference import CLAPSepInference
@@ -2033,16 +2033,16 @@ def demo_two_wav_separation(
 def main():
     # ============ CONFIGURE PATHS HERE ============
     SEP_CHECKPOINT = (
-        PROJECT_ROOT / "src/models/clapsep/checkpoint/CLAPSep/model/best_model.ckpt"
+        PROJECT_ROOT / "src/models/sudormrf/checkpoints/20260316_191707/best_model.pt"
     )
     CLS_WEIGHTS = (
         PROJECT_ROOT
-        / "src/validation_functions/plane_clasifier/checkpoints/final_model.weights.h5"
+        / "src/validation_functions/classification_models/plane_clasifier/results/checkpoints/final_model.weights.h5"
     )
     # Trains
     DATA_CSV = (
         PROJECT_ROOT
-        / "src/models/sudormrf/checkpoints/20260219_124144/separation_dataset.csv"
+        / "src/models/sudormrf/checkpoints/20260316_191707/separation_dataset.csv"
     )
 
     # planes/ "src/models/sudormrf/checkpoints/20260129_113352/separation_dataset.csv"
@@ -2052,7 +2052,10 @@ def main():
 
     pipeline = ValidationPipeline(base_path=BASE_PATH)
     pipeline.load_models(
-        sep_checkpoint=SEP_CHECKPOINT, cls_weights=CLS_WEIGHTS, use_clapsep=False
+        sep_checkpoint=SEP_CHECKPOINT,
+        cls_weights=CLS_WEIGHTS,
+        use_clapsep=False,
+        use_tuss=False,
     )
 
     # Pass 1: standard held-out test split (esc50, aerosonicdb, freesound)
