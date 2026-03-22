@@ -116,8 +116,11 @@ CNN_POSITIVE_CLASS: str = "plane"
 # as different classes across datasets (e.g. Aerosonic vs risoux_test).
 COI_SYNONYMS: set[str] = {
     "plane",
+    "planes",
     "airplane",
+    "airplanes",
     "aeroplane",
+    "aeroplanes",
     "aircraft",
     "fixed-wing aircraft, airplane",
     "fixed wing aircraft, airplane",
@@ -138,9 +141,97 @@ def _norm_label(x: Any) -> str:
 
 
 def _is_coi_label(x: Any) -> bool:
-    """Return True iff *x* denotes the COI (plane/airplane/aircraft variants)."""
+    """Return True iff *x* denotes the COI (plane/airplane/aircraft variants).
+    
+    Handles multiple label formats:
+    - Simple strings: "plane", "airplane"
+    - Lists: ["airplane", "other_label"]
+    - Complex nested structures from CSVs: '[array(["airplane", ...])]'
+    """
+    if x is None:
+        return False
+    
+    # For list inputs, check if any element is a COI label
+    if isinstance(x, list):
+        return any(_is_coi_label(item) for item in x)
+    
+    # Convert to string and normalize
     s = _norm_label(x)
-    return s in COI_SYNONYMS
+    
+    # Direct match against COI_SYNONYMS
+    if s in COI_SYNONYMS:
+        return True
+    
+    # For complex nested structures (like those from freesound metadata),
+    # check if any COI synonym appears within the string
+    s_lower = s.lower()
+    for synonym in COI_SYNONYMS:
+        # Use word boundary matching to avoid false positives
+        # e.g., "airplane" should match but "airplanes" also matches via synonyms
+        if synonym in s_lower:
+            return True
+    
+    return False
+
+
+def _filter_contaminated_backgrounds(
+    df_bg: pd.DataFrame, verbose: bool = True
+) -> Tuple[pd.DataFrame, int]:
+    """Filter out background samples that have COI synonyms in orig_label.
+
+    This prevents contamination from samples that were incorrectly included
+    in the background pool during dataset creation due to incomplete synonym
+    matching in the sampler.
+
+    Args:
+        df_bg: DataFrame of background samples (label=0)
+        verbose: If True, print detailed filtering report
+
+    Returns:
+        Tuple of (filtered DataFrame, number of contaminated samples removed)
+    """
+    if "orig_label" not in df_bg.columns:
+        if verbose:
+            print("[Info] No 'orig_label' column found - skipping contamination filter")
+        return df_bg, 0
+
+    # Check each background sample for COI synonyms in orig_label
+    contaminated_mask = df_bg["orig_label"].apply(_is_coi_label)
+
+    n_contaminated = int(contaminated_mask.sum())
+    if n_contaminated == 0:
+        if verbose:
+            print("✓ No contaminated background samples detected")
+        return df_bg, 0
+
+    # Report contamination
+    if verbose:
+        print(f"\n{'=' * 60}")
+        print(f"⚠️  CONTAMINATION DETECTED: {n_contaminated} background samples")
+        print(f"   contain COI synonyms in orig_label and will be EXCLUDED")
+        print(f"{'=' * 60}")
+
+        # Breakdown by split
+        for split in ["train", "val", "test"]:
+            split_mask = df_bg["split"] == split
+            split_contam = int((split_mask & contaminated_mask).sum())
+            split_total = int(split_mask.sum())
+            if split_total > 0:
+                pct = 100 * split_contam / split_total
+                print(
+                    f"  {split:5s}: {split_contam:3d}/{split_total:4d} ({pct:4.1f}%) contaminated"
+                )
+
+        # Show some examples
+        print(f"\n  Example contaminated orig_labels:")
+        contaminated_labels = df_bg[contaminated_mask]["orig_label"].unique()[:5]
+        for lbl in contaminated_labels:
+            lbl_str = str(lbl)[:80]
+            print(f"    - {lbl_str}")
+        print(f"{'=' * 60}\n")
+
+    # Return filtered dataframe
+    return df_bg[~contaminated_mask].reset_index(drop=True), n_contaminated
 
 
 # AudioSet label names that PANN should treat as the positive class.
@@ -216,6 +307,11 @@ class ClassificationMetrics:
 
     # Actual SNR values achieved after clamping (for mixture experiments)
     actual_snrs: List[float] = field(default_factory=list)
+
+    # Dataset filtering statistics
+    contaminated_backgrounds_removed: int = 0
+    final_background_count: int = 0
+    final_coi_count: int = 0
 
     def compute(
         self,
@@ -441,6 +537,15 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
         if getattr(self, "raw_labels", None):
             # preserve the sequence of original labels for downstream inspection
             d["raw_labels"] = [(_sanitize(x)) for x in list(self.raw_labels)]
+        # Add dataset filtering stats if any contamination was detected
+        if self.contaminated_backgrounds_removed > 0 or self.final_background_count > 0:
+            d["dataset_filtering"] = {
+                "contaminated_backgrounds_removed": int(
+                    self.contaminated_backgrounds_removed
+                ),
+                "final_background_count": int(self.final_background_count),
+                "final_coi_count": int(self.final_coi_count),
+            }
         # Sanitize any remaining numpy/torch types recursively before returning
         return _sanitize(d)
 
@@ -1299,6 +1404,8 @@ class ValidationPipeline:
         metrics.si_snr_scores = si_snr_scores
         metrics.sdr_scores = sdr_scores
         metrics.si_sdr_scores = si_sdr_scores
+        metrics.final_coi_count = len(df_coi)
+        metrics.final_background_count = len(df_bg)
         metrics.compute(
             np.array(y_true),
             np.array(y_pred),
@@ -1549,6 +1656,8 @@ class ValidationPipeline:
         metrics.sdr_scores = sdr_scores
         metrics.si_sdr_scores = si_sdr_scores
         metrics.actual_snrs = actual_snrs
+        metrics.final_coi_count = len(df_coi)
+        metrics.final_background_count = len(df_bg)
         # pass raw_labels so that misclassification counts by the original
         # multi‑class label (and the per‑label counter) work correctly for
         # mixture evaluations, matching the clean path above.
@@ -1676,6 +1785,9 @@ class ValidationPipeline:
 
         df_coi = df_split[df_split["label"] == 1].reset_index(drop=True)
         df_bg = df_split[df_split["label"] == 0].reset_index(drop=True)
+
+        # Filter contaminated backgrounds (only when orig_label exists)
+        df_bg, n_contaminated = _filter_contaminated_backgrounds(df_bg, verbose=True)
 
         # Human-readable label for logging and output filenames.
         run_label = only_dataset if only_dataset is not None else split
@@ -1869,6 +1981,10 @@ class ValidationPipeline:
                         f"\n[{cls_name}] No background samples found — mixture tests skipped.",
                         file=sys.stderr,
                     )
+
+            # Set contamination stats on all metrics objects
+            for metrics_obj in results.values():
+                metrics_obj.contaminated_backgrounds_removed = n_contaminated
 
             # Save per-classifier JSON results.
             if cls_output_dir:
