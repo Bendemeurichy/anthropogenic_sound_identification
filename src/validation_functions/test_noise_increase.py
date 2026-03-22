@@ -23,7 +23,11 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.validation_functions.test_pipeline import ValidationPipeline, _is_coi_label  # noqa: E402
+from src.validation_functions.test_pipeline import (  # noqa: E402
+    ValidationPipeline,
+    _filter_contaminated_backgrounds,
+    _is_coi_label,
+)
 
 
 @dataclass
@@ -65,6 +69,33 @@ def _extract_coi_df(df: pd.DataFrame) -> pd.DataFrame:
     out["label_bin"] = base_series.apply(lambda x: 1 if _is_coi_label(x) else 0)
     coi = out[out["label_bin"] == 1].copy()
     return coi.reset_index(drop=True)
+
+
+def _extract_bg_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep rows considered background (non-COI) in a robust way.
+    
+    This function mirrors _extract_coi_df but for background samples.
+    Useful when the experiment needs real background samples instead of
+    synthetic white noise.
+    """
+    if "label" not in df.columns:
+        raise ValueError("CSV must contain a 'label' column.")
+
+    out = df.copy()
+
+    # Prefer numeric label if available.
+    if pd.api.types.is_numeric_dtype(out["label"]):
+        out["label"] = out["label"].fillna(0)
+        bg = out[out["label"] == 0].copy()
+        return bg.reset_index(drop=True)
+
+    # String fallback: use the canonical COI synonym set from test_pipeline so
+    # both experiments operate on the same definition of "background sample".
+    base_series = out["orig_label"] if "orig_label" in out.columns else out["label"]
+    out["label_bin"] = base_series.apply(lambda x: 1 if _is_coi_label(x) else 0)
+    bg = out[out["label_bin"] == 0].copy()
+    return bg.reset_index(drop=True)
+
 
 
 def run_noise_increase_experiment(
@@ -280,10 +311,23 @@ def main() -> None:
     if "split" in df.columns:
         df = df[df["split"] == SPLIT].copy()
 
+    # Extract COI and background DataFrames
     df_coi = _extract_coi_df(df)
+    df_bg = _extract_bg_df(df)
+    
+    # Apply contamination filtering to background samples
+    # (This ensures consistency with test_pipeline.py, even though this experiment
+    # currently uses synthetic white noise instead of real background samples)
+    df_bg_clean, n_contaminated = _filter_contaminated_backgrounds(df_bg, verbose=True)
 
-    print(f"COI samples: {len(df_coi)}")
-    print(f"SNR sweep:   {SNR_LEVELS_DB}")
+    print(f"\n{'=' * 60}")
+    print(f"Dataset Statistics:")
+    print(f"  COI samples:        {len(df_coi)}")
+    print(f"  Background samples: {len(df_bg)} total, {len(df_bg_clean)} clean")
+    if n_contaminated > 0:
+        print(f"  Contaminated removed: {n_contaminated}")
+    print(f"  SNR sweep:          {SNR_LEVELS_DB}")
+    print(f"{'=' * 60}\n")
 
     results = run_noise_increase_experiment(
         pipeline=pipeline,
@@ -311,6 +355,12 @@ def main() -> None:
             "max_samples": MAX_SAMPLES,
             "seed": SEED,
             "noise_type": "artificial_white_noise",
+        },
+        "dataset_stats": {
+            "n_coi_samples": len(df_coi),
+            "n_background_total": len(df_bg),
+            "n_background_clean": len(df_bg_clean),
+            "n_contaminated_removed": n_contaminated,
         },
         **results,
     }
