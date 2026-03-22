@@ -3,8 +3,15 @@ Utility to load a trained PlaneClassifier model from saved weights.
 """
 
 from pathlib import Path
-from model import PlaneClassifier, load_yamnet
-from config import TrainingConfig, ModelConfig
+
+# Use absolute imports to avoid conflict with src.models.sudormrf.config
+import src.validation_functions.classification_models.plane_clasifier.model as model_module
+import src.validation_functions.classification_models.plane_clasifier.config as config_module
+
+PlaneClassifier = model_module.PlaneClassifier
+load_yamnet = model_module.load_yamnet
+TrainingConfig = config_module.TrainingConfig
+ModelConfig = config_module.ModelConfig
 
 
 def load_trained_model(weights_path: str, config: TrainingConfig = None):
