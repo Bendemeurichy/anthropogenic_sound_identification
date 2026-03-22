@@ -457,7 +457,7 @@ class ValidationPipeline:
     SEP_CHECKPOINT = PROJECT_ROOT / "src/models/sudormrf/checkpoints/best_model.pt"
     CLS_WEIGHTS = (
         PROJECT_ROOT
-        / "src/validation_functions/plane_clasifier/results/checkpoints/final_model.weights.h5"
+        / "src/validation_functions/classification_models/plane_clasifier/results/checkpoints/final_model.weights.h5"
     )
     DATA_CSV = PROJECT_ROOT / "src/models/sudormrf/checkpoints/separation_dataset.csv"
 

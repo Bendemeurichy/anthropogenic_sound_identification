@@ -3,8 +3,8 @@ Utility to load a trained PlaneClassifier model from saved weights.
 """
 
 from pathlib import Path
-from model import PlaneClassifier, load_yamnet, ModelConfig
-from config import TrainingConfig
+from model import PlaneClassifier, load_yamnet
+from config import TrainingConfig, ModelConfig
 
 
 def load_trained_model(weights_path: str, config: TrainingConfig = None):
