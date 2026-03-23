@@ -949,81 +949,10 @@ class ValidationPipeline:
     def _separate(self, waveform: torch.Tensor) -> torch.Tensor:
         """Run separation model. Returns all sources.
 
-        The model was trained with independently normalized sources.
-        Outputs are scaled by mixture std to restore reasonable amplitude.
+        All separator types (TUSS, CLAPSep, SudoRM-RF) implement separate_waveform()
+        which handles normalization, windowing, device placement, and model-specific logic.
         """
-        orig_len = waveform.shape[0]
-
-        # TUSS and CLAPSep use their own separate_waveform() method which handles
-        # all normalization, windowing, and model-specific logic (e.g., prompts for TUSS)
-        if isinstance(self.separator, (TUSSInference, CLAPSepInference)):
-            return self.separator.separate_waveform(waveform)
-
-        # If waveform is the expected segment length, run as before
-        if orig_len <= self.segment_samples:
-            mean = waveform.mean()
-            std = waveform.std() + 1e-8
-            x = ((waveform - mean) / std).unsqueeze(0).unsqueeze(0).to(self.device)
-
-            with torch.inference_mode():
-                estimates = self.separator.model(x)
-
-            # estimates shape: (1, n_sources, T) - normalized sources
-            # Scale by std only (model outputs zero-mean signals)
-            sources = estimates[0].cpu() * std
-            # Return all sources (n_sources, T) trimmed to original length
-            return sources[:, :orig_len]
-
-        # For longer waveforms: split into non-overlapping segment windows,
-        # run separation per-window, then concatenate and trim to original length.
-        n_chunks = int(np.ceil(orig_len / self.segment_samples))
-        # determine number of sources from model
-        with torch.inference_mode():
-            # try to get num_sources attribute, fallback to a dummy forward
-            n_sources = getattr(self.separator.model, "num_sources", None)
-            if n_sources is None:
-                # run a dummy pass to get shape
-                dummy = torch.zeros(1, 1, self.segment_samples).to(self.device)
-                est = self.separator.model(dummy)
-                n_sources = est.shape[1]
-
-        # Prepare lists to collect chunks per source
-        outputs_per_source: List[List[torch.Tensor]] = [[] for _ in range(n_sources)]
-
-        for i in range(n_chunks):
-            start = i * self.segment_samples
-            end = min((i + 1) * self.segment_samples, orig_len)
-            chunk = waveform[start:end]
-
-            # If last chunk is shorter, pad to segment size
-            if chunk.shape[0] < self.segment_samples:
-                chunk = torch.nn.functional.pad(
-                    chunk, (0, self.segment_samples - chunk.shape[0])
-                )
-
-            mean = chunk.mean()
-            std = chunk.std() + 1e-8
-            x = ((chunk - mean) / std).unsqueeze(0).unsqueeze(0).to(self.device)
-
-            with torch.inference_mode():
-                estimates = self.separator.model(x)
-
-            # Scale by std only (model outputs zero-mean signals)
-            src_chunk_all = estimates[0].cpu() * std
-
-            # Trim if last chunk shorter
-            length = end - start
-            if length < self.segment_samples:
-                src_chunk_all = src_chunk_all[:, :length]
-
-            for s in range(n_sources):
-                outputs_per_source[s].append(src_chunk_all[s])
-
-        # Concatenate per-source and stack
-        concatenated = [
-            torch.cat(chunks, dim=0)[:orig_len] for chunks in outputs_per_source
-        ]
-        return torch.stack(concatenated, dim=0)
+        return self.separator.separate_waveform(waveform)
 
     def _classify(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Run classification. Returns (prediction, confidence)."""
@@ -1502,17 +1431,16 @@ class ValidationPipeline:
                     if save_dir is not None and idx in sample_choices and seg_idx == 0:
                         try:
                             k = list(sample_choices).index(idx)
-                            # Peak-normalize each signal before saving so the
-                            # PCM values stay within [-1, 1] and the files
-                            # play back without clipping artefacts.
+                            # coi_n and bg_n are already normalized (lines 1495-1496)
+                            # so we don't need to normalize them again.
                             torchaudio.save(
                                 str(save_dir / f"mixture_coi_clean_{k}.wav"),
-                                self._normalize(coi_n).unsqueeze(0).cpu(),
+                                coi_n.unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
                             torchaudio.save(
                                 str(save_dir / f"mixture_bg_clean_{k}.wav"),
-                                self._normalize(bg_n).unsqueeze(0).cpu(),
+                                bg_n.unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
                             # Peak-normalize the mixture independently so its
