@@ -340,6 +340,24 @@ class TUSSInference:
                 for k, v in state_dict.items()
             }
 
+        # ------------------------------------------------------------------ #
+        # Inject new prompt parameters before loading state dict.            #
+        # The ParameterDict won't automatically create keys from state_dict, #
+        # so we must add them explicitly for any prompts saved in the ckpt.  #
+        # ------------------------------------------------------------------ #
+        prompts_dict = model.separator.prompts
+        prompt_prefix = "separator.prompts."
+        for key in state_dict.keys():
+            if key.startswith(prompt_prefix):
+                prompt_name = key[len(prompt_prefix):]
+                if prompt_name not in prompts_dict:
+                    # Infer embedding dimension from the saved tensor shape
+                    saved_tensor = state_dict[key]
+                    prompts_dict[prompt_name] = torch.nn.Parameter(
+                        torch.zeros_like(saved_tensor)
+                    )
+                    print(f"  Injected prompt '{prompt_name}' from checkpoint")
+
         # Load with strict=False since we may have extra/missing prompt vectors
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
