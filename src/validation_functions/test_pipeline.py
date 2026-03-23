@@ -946,13 +946,34 @@ class ValidationPipeline:
             segments.append(chunk)
         return segments
 
-    def _separate(self, waveform: torch.Tensor) -> torch.Tensor:
+    def _separate(self, waveform: torch.Tensor, debug: bool = False) -> torch.Tensor:
         """Run separation model. Returns all sources.
 
         All separator types (TUSS, CLAPSep, SudoRM-RF) implement separate_waveform()
         which handles normalization, windowing, device placement, and model-specific logic.
         """
-        return self.separator.separate_waveform(waveform)
+        if debug:
+            input_rms = torch.sqrt(torch.mean(waveform**2)).item()
+            print(
+                f"  [DEBUG _separate] Input: shape={waveform.shape}, device={waveform.device}, RMS={input_rms:.6f}",
+                file=sys.stderr,
+            )
+        
+        result = self.separator.separate_waveform(waveform)
+        
+        if debug:
+            output_rms = torch.sqrt(torch.mean(result**2)).item()
+            print(
+                f"  [DEBUG _separate] Output: shape={result.shape}, device={result.device}, RMS={output_rms:.6f}",
+                file=sys.stderr,
+            )
+            if output_rms < 1e-6:
+                print(
+                    f"  [WARNING _separate] Output is SILENT!",
+                    file=sys.stderr,
+                )
+        
+        return result
 
     def _classify(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Run classification. Returns (prediction, confidence)."""
@@ -1240,6 +1261,20 @@ class ValidationPipeline:
                         ):
                             try:
                                 k = list(sample_choices).index(idx)
+                                # Debug: print separation stats before saving
+                                sep_rms = torch.sqrt(torch.mean(separated**2)).item()
+                                sep_max = separated.abs().max().item()
+                                print(
+                                    f"  [DEBUG] Saving separated sample {k}: "
+                                    f"shape={separated.shape}, device={separated.device}, "
+                                    f"RMS={sep_rms:.6f}, max={sep_max:.6f}",
+                                    file=sys.stderr,
+                                )
+                                if sep_rms < 1e-6:
+                                    print(
+                                        f"  [WARNING] Separated output is SILENT!",
+                                        file=sys.stderr,
+                                    )
                                 if separated.dim() == 1:
                                     torchaudio.save(
                                         str(save_dir / f"separated_coi_est_{k}.wav"),
@@ -1248,6 +1283,11 @@ class ValidationPipeline:
                                     )
                                 else:
                                     for s in range(separated.shape[0]):
+                                        src_rms = torch.sqrt(torch.mean(separated[s]**2)).item()
+                                        print(
+                                            f"    [DEBUG] Source {s}: RMS={src_rms:.6f}",
+                                            file=sys.stderr,
+                                        )
                                         torchaudio.save(
                                             str(save_dir / f"separated_src{s}_{k}.wav"),
                                             separated[s].unsqueeze(0).cpu(),
@@ -1259,11 +1299,13 @@ class ValidationPipeline:
                                         coi_head.unsqueeze(0).cpu(),
                                         self.sample_rate,
                                     )
-                            except Exception:
+                            except Exception as e:
+                                import traceback
                                 print(
-                                    f"Warning: failed to save separated outputs for {row.filename}",
+                                    f"Warning: failed to save separated outputs for {row.filename}: {e}",
                                     file=sys.stderr,
                                 )
+                                traceback.print_exc()
 
                     # A recording is classified as COI if ANY segment triggers a
                     # positive prediction.  Confidence is the maximum over all segments.

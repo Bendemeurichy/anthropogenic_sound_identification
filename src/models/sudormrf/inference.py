@@ -23,7 +23,6 @@ import torchaudio
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from .config import Config
-from .train import create_model
 
 # Check for environment variable to use old separation head
 USE_OLD_SEPARATION_HEAD = os.environ.get("USE_OLD_SEPARATION_HEAD", "0") == "1"
@@ -44,11 +43,76 @@ else:
     from .seperation_head import (
         NUM_SOURCES as _NUM_SOURCES,
     )
+    from .seperation_head import wrap_model_for_coi
 
 # Export as module-level constants
 COI_HEAD_INDEX: int = _COI_HEAD_INDEX
 BACKGROUND_HEAD_INDEX: int = _BACKGROUND_HEAD_INDEX
 NUM_SOURCES: int = _NUM_SOURCES
+
+
+def _create_model_for_inference(config: "Config") -> torch.nn.Module:
+    """Create model for inference without moving to any device.
+    
+    This is a simplified version of train.create_model that:
+    1. Creates the base model on CPU (default)
+    2. Wraps it with the separation head
+    3. Does NOT move to config.training.device
+    
+    The caller is responsible for moving to the correct inference device.
+    """
+    from .base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
+    from .base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import GroupCommSudoRmRf
+    
+    ModelClass = SuDORMRF if config.model.type == "improved" else GroupCommSudoRmRf
+    base_model = ModelClass(
+        out_channels=config.model.out_channels,
+        in_channels=config.model.in_channels,
+        num_blocks=config.model.num_blocks,
+        upsampling_depth=config.model.upsampling_depth,
+        enc_kernel_size=config.model.enc_kernel_size,
+        enc_num_basis=config.model.enc_num_basis,
+        num_sources=2,
+    )
+
+    # Add compatibility attribute
+    if not hasattr(base_model, "n_least_samples_req"):
+        base_model.n_least_samples_req = (config.model.enc_kernel_size // 2) * (
+            2**config.model.upsampling_depth
+        )
+
+    # Wrap model with separation head
+    if config.data.n_coi_classes > 1:
+        from .multi_class_seperation import wrap_model_for_multiclass
+        print(
+            f"Wrapping model for Multi-class separation with {config.data.n_coi_classes} classes "
+            f"({config.model.num_head_conv_blocks} head blocks)"
+        )
+        expanded_channels = getattr(config.model, "expanded_channels", None)
+        model = wrap_model_for_multiclass(
+            base_model,
+            n_coi_classes=config.data.n_coi_classes,
+            num_conv_blocks=config.model.num_head_conv_blocks,
+            upsampling_depth=config.model.upsampling_depth,
+            expanded_channels=expanded_channels,
+        )
+    else:
+        print(
+            f"Wrapping model for Single COI separation ({config.model.num_head_conv_blocks} head blocks)"
+        )
+        expanded_channels = getattr(config.model, "expanded_channels", None)
+        model = wrap_model_for_coi(
+            base_model,
+            num_conv_blocks=config.model.num_head_conv_blocks,
+            upsampling_depth=config.model.upsampling_depth,
+            expanded_channels=expanded_channels,
+        )
+
+    if not hasattr(model, "n_least_samples_req"):
+        model.n_least_samples_req = base_model.n_least_samples_req
+
+    # Model stays on CPU - caller will move to inference device
+    return model
 
 
 def robust_load_audio(path: Union[str, Path]) -> Tuple[torch.Tensor, int]:
@@ -113,6 +177,28 @@ class SeparationInference:
         # so downstream code (e.g. validation pipelines) can inspect fields
         # such as the list of target_classes.
         self.config = config
+        
+        # Verify all model components are on the correct device
+        self._verify_device_placement()
+    
+    def _verify_device_placement(self):
+        """Verify all model parameters and buffers are on self.device."""
+        devices_found = set()
+        for name, param in self.model.named_parameters():
+            devices_found.add(str(param.device))
+        for name, buf in self.model.named_buffers():
+            devices_found.add(str(buf.device))
+        
+        if len(devices_found) > 1:
+            print(f"WARNING: Model has parameters/buffers on multiple devices: {devices_found}")
+            print(f"  Expected all on: {self.device}")
+            # Force move everything to the correct device
+            self.model = self.model.to(self.device)
+            print(f"  Forced model.to({self.device})")
+        elif devices_found and str(self.device) not in str(list(devices_found)[0]):
+            print(f"WARNING: Model on {devices_found} but expected {self.device}")
+            self.model = self.model.to(self.device)
+            print(f"  Forced model.to({self.device})")
 
     @classmethod
     def from_checkpoint(
@@ -214,8 +300,13 @@ class SeparationInference:
                 raise ValueError(
                     "No config found in checkpoint and no config.yaml in checkpoint folder."
                 )
-            model = create_model(config)
+            # Create model without moving to training device - we'll move to inference device later
+            model = _create_model_for_inference(config)
 
+        # Explicitly move model to inference device BEFORE loading state dict
+        # This ensures the model structure and state dict are on the same device
+        model = model.to(device)
+        
         # Load state dict with error handling (if we have one)
         if state_dict is not None:
             try:
@@ -401,6 +492,12 @@ class SeparationInference:
         # Scale by mixture std to restore reasonable amplitude.
         # Don't add mean since sources should be zero-mean signals.
         sources = estimates[0].cpu() * std
+        
+        if debug:
+            out_rms = torch.sqrt(torch.mean(sources**2)).item()
+            print(f"  [_separate_segment] Final output: shape={sources.shape}, RMS={out_rms:.6f}", 
+                  file=sys.stderr)
+
         return sources
 
     def _separate_long(
