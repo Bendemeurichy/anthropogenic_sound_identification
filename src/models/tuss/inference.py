@@ -131,6 +131,28 @@ class TUSSInference:
         self.config = config
         # Number of sources is always 2 for single-COI mode
         self.num_sources = NUM_SOURCES
+        
+        # Verify all model components are on the correct device
+        self._verify_device_placement()
+    
+    def _verify_device_placement(self):
+        """Verify all model parameters and buffers are on self.device."""
+        devices_found = set()
+        for name, param in self.model.named_parameters():
+            devices_found.add(str(param.device))
+        for name, buf in self.model.named_buffers():
+            devices_found.add(str(buf.device))
+        
+        if len(devices_found) > 1:
+            print(f"WARNING: Model has parameters/buffers on multiple devices: {devices_found}")
+            print(f"  Expected all on: {self.device}")
+            # Force move everything to the correct device
+            self.model = self.model.to(self.device)
+            print(f"  Forced model.to({self.device})")
+        elif devices_found and str(self.device) not in str(list(devices_found)[0]):
+            print(f"WARNING: Model on {devices_found} but expected {self.device}")
+            self.model = self.model.to(self.device)
+            print(f"  Forced model.to({self.device})")
 
     @classmethod
     def from_checkpoint(
@@ -285,6 +307,10 @@ class TUSSInference:
             css_conf=css_conf,
             variance_normalization=variance_normalization,
         )
+
+        # Move model to inference device BEFORE loading state dict
+        # This ensures model structure and state dict are on the same device
+        model = model.to(device)
 
         # Load state dict
         print(f"  Loading model weights...")
