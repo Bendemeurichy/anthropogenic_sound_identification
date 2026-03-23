@@ -493,10 +493,6 @@ class SeparationInference:
         # Don't add mean since sources should be zero-mean signals.
         sources = estimates[0].cpu() * std
         
-        if debug:
-            out_rms = torch.sqrt(torch.mean(sources**2)).item()
-            print(f"  [_separate_segment] Final output: shape={sources.shape}, RMS={out_rms:.6f}", 
-                  file=sys.stderr)
 
         return sources
 

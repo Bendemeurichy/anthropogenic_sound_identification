@@ -46,7 +46,9 @@ from tqdm import tqdm
 
 # Add paths for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-sys.path.insert(0, str(Path(__file__).parent / "classification_models" / "plane_clasifier"))
+sys.path.insert(
+    0, str(Path(__file__).parent / "classification_models" / "plane_clasifier")
+)
 
 from src.label_loading.coi_labels import (
     COI_SYNONYMS,
@@ -531,8 +533,7 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
             }
         if self.misclassified_raw_atomic_counts:
             d["misclassified_raw_atomic_counts"] = {
-                str(k): int(v)
-                for k, v in self.misclassified_raw_atomic_counts.items()
+                str(k): int(v) for k, v in self.misclassified_raw_atomic_counts.items()
             }
         if self.fp_raw_counts:
             d["fp_raw_counts"] = {str(k): int(v) for k, v in self.fp_raw_counts.items()}
@@ -972,9 +973,9 @@ class ValidationPipeline:
                 f"  [DEBUG _separate] Input: shape={waveform.shape}, device={waveform.device}, RMS={input_rms:.6f}",
                 file=sys.stderr,
             )
-        
+
         result = self.separator.separate_waveform(waveform)
-        
+
         if debug:
             output_rms = torch.sqrt(torch.mean(result**2)).item()
             print(
@@ -986,7 +987,7 @@ class ValidationPipeline:
                     f"  [WARNING _separate] Output is SILENT!",
                     file=sys.stderr,
                 )
-        
+
         return result
 
     def _classify(self, waveform: torch.Tensor) -> Tuple[int, float]:
@@ -1105,9 +1106,9 @@ class ValidationPipeline:
             raise RuntimeError(
                 "AST model is not loaded. Call load_models(use_ast=True)."
             )
-        assert self.ast_extractor is not None, (
-            "ast_extractor should be set whenever ast_model is set"
-        )
+        assert (
+            self.ast_extractor is not None
+        ), "ast_extractor should be set whenever ast_model is set"
         from src.validation_functions.classification_models.ast_inference import (
             run_ast_inference as _run_ast,
         )
@@ -1297,7 +1298,9 @@ class ValidationPipeline:
                                     )
                                 else:
                                     for s in range(separated.shape[0]):
-                                        src_rms = torch.sqrt(torch.mean(separated[s]**2)).item()
+                                        src_rms = torch.sqrt(
+                                            torch.mean(separated[s] ** 2)
+                                        ).item()
                                         print(
                                             f"    [DEBUG] Source {s}: RMS={src_rms:.6f}",
                                             file=sys.stderr,
@@ -1315,6 +1318,7 @@ class ValidationPipeline:
                                     )
                             except Exception as e:
                                 import traceback
+
                                 print(
                                     f"Warning: failed to save separated outputs for {row.filename}: {e}",
                                     file=sys.stderr,
