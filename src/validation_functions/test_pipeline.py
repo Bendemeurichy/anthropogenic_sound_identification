@@ -10,6 +10,20 @@ Also computes simple absolute-energy metrics before/after separation:
        value unless you calibrate to physical units (Pa).
 """
 
+import io
+import sys
+
+# Under pythonw there is no console and sys.stdout/stderr are None.
+# Wrap only when the underlying buffer actually exists.
+if sys.stdout is not None and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", line_buffering=True
+    )
+if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", line_buffering=True
+    )
+
 import importlib
 import json
 import os
