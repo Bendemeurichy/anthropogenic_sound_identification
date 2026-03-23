@@ -158,70 +158,132 @@ class TUSSInference:
 
         print(f"Loading TUSS checkpoint from: {checkpoint_path}")
 
-        # Determine checkpoint format: directory or .pth file
+        # Determine checkpoint format: directory or .pt/.pth file
         if checkpoint_path.is_dir():
-            # Directory format: checkpoint_dir/hparams.yaml + checkpoint_dir/checkpoints/model.pth
-            config_path = checkpoint_path / "hparams.yaml"
+            # Directory format: checkpoint_dir/config.yaml + checkpoint_dir/best_model.pt
+            config_path = checkpoint_path / "config.yaml"
             if not config_path.exists():
                 raise FileNotFoundError(
-                    f"hparams.yaml not found in checkpoint directory: {checkpoint_path}"
+                    f"config.yaml not found in checkpoint directory: {checkpoint_path}"
                 )
 
-            # Find model checkpoint file
-            ckpt_dir = checkpoint_path / "checkpoints"
-            if not ckpt_dir.exists():
-                raise FileNotFoundError(
-                    f"checkpoints subdirectory not found in: {checkpoint_path}"
-                )
+            # Find model checkpoint file directly in checkpoint directory
+            ckpt_path = checkpoint_path / "best_model.pt"
+            if not ckpt_path.exists():
+                # Fallback: look for any .pt or .pth file
+                allowed_suffix = [".pt", ".pth"]
+                ckpt_files = [
+                    p
+                    for p in checkpoint_path.iterdir()
+                    if p.suffix in allowed_suffix
+                ]
+                if not ckpt_files:
+                    raise FileNotFoundError(
+                        f"No checkpoint files found in {checkpoint_path}. "
+                        f"Expected best_model.pt or files with suffix {allowed_suffix}"
+                    )
+                ckpt_path = ckpt_files[0]
 
-            # Look for model.pth (or .ckpt files, excluding last.ckpt)
-            allowed_suffix = [".pth", ".ckpt"]
-            ckpt_files = [
-                p
-                for p in ckpt_dir.iterdir()
-                if p.suffix in allowed_suffix and p.name != "last.ckpt"
-            ]
-
-            if not ckpt_files:
-                raise FileNotFoundError(
-                    f"No checkpoint files found in {ckpt_dir}. "
-                    f"Expected files with suffix {allowed_suffix}"
-                )
-
-            # Use first checkpoint (typically model.pth)
-            ckpt_path = ckpt_files[0]
             print(f"  Loading weights from: {ckpt_path}")
 
         else:
-            # Single file format: path/to/model.pth
+            # Single file format: path/to/model.pt
             if not checkpoint_path.exists():
                 raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
             ckpt_path = checkpoint_path
-            # Config should be in parent.parent/hparams.yaml
-            config_path = checkpoint_path.parent.parent / "hparams.yaml"
+            # Config should be in same directory as the checkpoint file
+            config_path = checkpoint_path.parent / "config.yaml"
             if not config_path.exists():
                 raise FileNotFoundError(
-                    f"hparams.yaml not found at: {config_path}. "
-                    f"Expected structure: checkpoint_dir/hparams.yaml and "
-                    f"checkpoint_dir/checkpoints/model.pth"
+                    f"config.yaml not found at: {config_path}. "
+                    f"Expected structure: checkpoint_dir/config.yaml and "
+                    f"checkpoint_dir/best_model.pt"
                 )
 
-        # Load hparams
+        # Load config
         print(f"  Loading config from: {config_path}")
         with open(config_path) as f:
-            hparams = yaml.safe_load(f)
+            config = yaml.safe_load(f)
 
-        # Build model from hparams
+        # Extract nested config sections
+        model_conf = config.get("model", {})
+        data_conf = config.get("data", {})
+
+        # Extract sample rate and segment length from data config
+        sample_rate = data_conf.get("sample_rate", 48000)
+        segment_length = data_conf.get("segment_length", 4.0)
+        segment_samples = int(sample_rate * segment_length)
+
+        # The saved config.yaml only has training config, not full model architecture.
+        # We need to load the model architecture from the pretrained model's hparams.yaml
+        pretrained_path = model_conf.get("pretrained_path")
+        if pretrained_path:
+            # Resolve relative path from checkpoint directory or script directory
+            pretrained_resolved = config_path.parent / pretrained_path
+            if not pretrained_resolved.exists():
+                pretrained_resolved = _SCRIPT_DIR / pretrained_path
+            if not pretrained_resolved.exists():
+                raise FileNotFoundError(
+                    f"Pretrained model not found at {pretrained_path}. "
+                    f"Tried: {config_path.parent / pretrained_path} and {_SCRIPT_DIR / pretrained_path}"
+                )
+            
+            pretrained_hparams_path = pretrained_resolved / "hparams.yaml"
+            if not pretrained_hparams_path.exists():
+                raise FileNotFoundError(
+                    f"hparams.yaml not found in pretrained model: {pretrained_resolved}"
+                )
+            
+            print(f"  Loading model architecture from: {pretrained_hparams_path}")
+            with open(pretrained_hparams_path) as f:
+                hparams = yaml.safe_load(f)
+            
+            # Use architecture from pretrained hparams
+            encoder_name = hparams["encoder_name"]
+            encoder_conf = hparams["encoder_conf"]
+            decoder_name = hparams["decoder_name"]
+            decoder_conf = hparams["decoder_conf"]
+            separator_name = hparams["model_name"]
+            separator_conf = hparams["model_conf"]
+            css_conf = hparams["css_conf"]
+            variance_normalization = hparams.get("variance_normalization", True)
+        else:
+            # No pretrained path - use config directly (requires full separator_conf)
+            encoder_name = model_conf.get("encoder_name", "stft")
+            encoder_conf = model_conf.get("encoder_conf", {})
+            decoder_name = model_conf.get("decoder_name", "stft")
+            decoder_conf = model_conf.get("decoder_conf", {})
+            separator_name = model_conf.get("separator_name", "tuss")
+            separator_conf = model_conf.get("separator_conf", {})
+            css_conf_raw = model_conf.get("css_conf", {})
+            css_conf = {
+                "segment_size": css_conf_raw.get("segment_size", segment_length),
+                "shift_size": css_conf_raw.get("shift_size", segment_length / 2),
+                "normalize_segment_scale": css_conf_raw.get("normalize_segment_scale", True),
+                "solve_perm": css_conf_raw.get("solve_perm", False),
+                "sample_rate": css_conf_raw.get("sample_rate", sample_rate),
+            }
+            variance_normalization = model_conf.get("variance_normalization", True)
+
+        # Use config prompts as defaults if not provided by caller
+        config_coi_prompts = model_conf.get("coi_prompts", ["airplane"])
+        config_bg_prompt = model_conf.get("bg_prompt", "background")
+        if coi_prompt == "airplane" and config_coi_prompts:
+            coi_prompt = config_coi_prompts[0]
+        if bg_prompt == "background" and config_bg_prompt:
+            bg_prompt = config_bg_prompt
+
+        # Build model from architecture config
         model = SeparationModel(
-            encoder_name=hparams["encoder_name"],
-            encoder_conf=hparams["encoder_conf"],
-            decoder_name=hparams["decoder_name"],
-            decoder_conf=hparams["decoder_conf"],
-            separator_name=hparams["model_name"],
-            separator_conf=hparams["model_conf"],
-            css_conf=hparams["css_conf"],
-            variance_normalization=hparams.get("variance_normalization", True),
+            encoder_name=encoder_name,
+            encoder_conf=encoder_conf,
+            decoder_name=decoder_name,
+            decoder_conf=decoder_conf,
+            separator_name=separator_name,
+            separator_conf=separator_conf,
+            css_conf=css_conf,
+            variance_normalization=variance_normalization,
         )
 
         # Load state dict
@@ -259,23 +321,6 @@ class TUSSInference:
         if unexpected:
             print(f"  Unexpected keys: {unexpected}")
 
-        # Extract sample rate and segment length from hparams
-        # TUSS typically uses 48kHz sample rate
-        try:
-            sample_rate = hparams.get("sample_rate", 48000)
-            # Segment length may be in training config or top-level
-            if "training" in hparams and "segment_length" in hparams["training"]:
-                segment_length = hparams["training"]["segment_length"]
-            elif "segment_length" in hparams:
-                segment_length = hparams["segment_length"]
-            else:
-                segment_length = 4.0  # TUSS default from training_config.yaml
-            segment_samples = int(sample_rate * segment_length)
-        except Exception:
-            # Fallback defaults
-            sample_rate = 48000
-            segment_samples = 192000  # 4 seconds at 48kHz
-
         print(
             f"  Model config: sample_rate={sample_rate} Hz, "
             f"segment_length={segment_samples / sample_rate:.2f}s "
@@ -290,7 +335,7 @@ class TUSSInference:
             device=device,
             coi_prompt=coi_prompt,
             bg_prompt=bg_prompt,
-            config=hparams,
+            config=config,
         )
 
     @torch.inference_mode()

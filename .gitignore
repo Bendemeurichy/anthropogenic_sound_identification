@@ -215,6 +215,7 @@ src/tags/metadata/
 src/validation_functions/plane_clasifier/results
 src/validation_functions/validation_results/
 src/models/sudormrf/checkpoints
+src/models/tuss/checkpoints
 *.wav
 *.jpg
 *.npy

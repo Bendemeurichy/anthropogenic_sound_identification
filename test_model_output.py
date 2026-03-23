@@ -22,7 +22,7 @@ def test_model_output():
     # Load the checkpoint
     checkpoint_path = (
         Path(__file__).parent
-        / "src/models/sudormrf/checkpoints/20260316_191707/best_model.pt"
+        / "src/models/sudormrf/checkpoints/silent_checkpoint/best_model.pt"
     )
 
     if not checkpoint_path.exists():
@@ -42,7 +42,7 @@ def test_model_output():
     # Create a test waveform (white noise)
     test_duration = 4.0  # seconds
     num_samples = int(separator.sample_rate * test_duration)
-    test_waveform = torch.randn(num_samples) * 0.1  # White noise at 0.1 amplitude
+    test_waveform = 
 
     print(f"\n--- Test Input ---")
     print(f"  Duration: {test_duration} s")
