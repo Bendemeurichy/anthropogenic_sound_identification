@@ -490,11 +490,11 @@ class TUSSInference:
         prompts = [[self.coi_prompt, self.bg_prompt]]
 
         # Run model
-        estimates, *_ = self.model(x, prompts)  # (1, n_sources, T)
+        output = self.model(x, prompts)  # (1, n_sources, T)
 
         # Scale outputs by input std to restore reasonable amplitude
         # (model outputs normalized sources, we rescale to match input level)
-        sources = estimates[0].cpu() * std  # (n_sources, T)
+        sources = output[0].cpu() * std  # (n_sources, T)
 
         return sources
 
