@@ -312,10 +312,10 @@ class TUSSInference:
         # This ensures model structure and state dict are on the same device
         model = model.to(device)
 
-        # Load state dict
+        # Load checkpoint
         print(f"  Loading model weights...")
         try:
-            state_dict = torch.load(ckpt_path, map_location=device, weights_only=False)
+            checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
         except Exception as e:
             # Try with safe_globals for newer PyTorch versions
             msg = str(e)
@@ -325,13 +325,31 @@ class TUSSInference:
                     from torch.serialization import safe_globals
 
                     with safe_globals([_np._core.multiarray.scalar]):
-                        state_dict = torch.load(
+                        checkpoint = torch.load(
                             ckpt_path, map_location=device, weights_only=False
                         )
                 except Exception:
                     raise
             else:
                 raise
+
+        # Handle nested checkpoint format from train.py
+        # The checkpoint may contain: model_state_dict, optimizer_state_dict, etc.
+        # or it may be a raw state dict
+        if "model_state_dict" in checkpoint:
+            print(f"  Detected training checkpoint format")
+            state_dict = checkpoint["model_state_dict"]
+            # Extract prompt info if available
+            ckpt_coi_prompts = checkpoint.get("coi_prompts", [])
+            ckpt_bg_prompt = checkpoint.get("bg_prompt", "")
+            if ckpt_coi_prompts and coi_prompt == config_coi_prompts[0]:
+                # Use checkpoint's prompts if caller used defaults
+                coi_prompt = ckpt_coi_prompts[0] if ckpt_coi_prompts else coi_prompt
+            if ckpt_bg_prompt and bg_prompt == config_bg_prompt:
+                bg_prompt = ckpt_bg_prompt
+            print(f"  Checkpoint prompts: COI={ckpt_coi_prompts}, BG={ckpt_bg_prompt}")
+        else:
+            state_dict = checkpoint
 
         # Strip 'model.' prefix that Lightning checkpoints add
         if any(k.startswith("model.") for k in state_dict.keys()):
@@ -361,7 +379,7 @@ class TUSSInference:
         # Load with strict=False since we may have extra/missing prompt vectors
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
-            print(f"  Missing keys (may be expected for new prompts): {missing}")
+            print(f"  WARNING: Missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
         if unexpected:
             print(f"  Unexpected keys: {unexpected}")
 
