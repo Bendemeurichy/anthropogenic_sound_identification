@@ -34,6 +34,7 @@ from src.validation_functions.test_pipeline import (  # noqa: E402
 class SNRStats:
     snr_db: float
     n_samples: int
+    # Recording-level metrics (any() aggregation - appropriate for weak labels)
     cls_only_recall: float
     sep_cls_recall: float
     cls_only_mean_conf: float
@@ -41,6 +42,26 @@ class SNRStats:
     cls_only_std_conf: float
     sep_cls_std_conf: float
     mean_actual_snr_db: float
+    # Segment-level metrics (shows per-segment robustness to noise)
+    n_segments: int
+    cls_only_segment_recall: float
+    sep_cls_segment_recall: float
+    cls_only_segment_mean_conf: float
+    sep_cls_segment_mean_conf: float
+    # Separation gain (positive = separation helps)
+    segment_recall_gain: float  # sep_cls_segment_recall - cls_only_segment_recall
+    segment_conf_gain: float    # sep_cls_segment_mean_conf - cls_only_segment_mean_conf
+
+
+@dataclass
+class CleanBaseline:
+    """Baseline metrics on clean (noise-free) COI samples."""
+    n_samples: int
+    n_segments: int
+    cls_recall: float
+    cls_mean_conf: float
+    sep_recall: float
+    sep_mean_conf: float
 
 
 def _safe_float(x, default=0.0) -> float:
@@ -97,6 +118,64 @@ def _extract_bg_df(df: pd.DataFrame) -> pd.DataFrame:
     return bg.reset_index(drop=True)
 
 
+def _compute_clean_baseline(
+    pipeline: ValidationPipeline,
+    df_coi: pd.DataFrame,
+    max_samples: int | None = None,
+    seed: int = 42,
+) -> CleanBaseline:
+    """Compute baseline metrics on clean (noise-free) COI samples.
+    
+    This provides a reference point to see how much noise degrades performance.
+    """
+    coi_eval = df_coi.copy()
+    if max_samples is not None and max_samples > 0 and len(coi_eval) > max_samples:
+        coi_eval = coi_eval.sample(n=max_samples, random_state=seed).reset_index(drop=True)
+    
+    all_cls_preds: List[int] = []
+    all_cls_conf: List[float] = []
+    all_sep_preds: List[int] = []
+    all_sep_conf: List[float] = []
+    
+    print("Computing clean baseline (no noise)...")
+    for row in coi_eval.itertuples(index=False):
+        coi_full = pipeline._load_labeled_audio(
+            row.filename,
+            getattr(row, "start_time", None),
+            getattr(row, "end_time", None),
+        )
+        coi_segments = pipeline._split_into_segments(coi_full)
+        
+        for coi_seg in coi_segments:
+            coi_n = pipeline._normalize(coi_seg)
+            
+            # Classify clean signal directly
+            p_cls, c_cls = pipeline._classify(coi_n)
+            all_cls_preds.append(p_cls)
+            all_cls_conf.append(_safe_float(c_cls, 0.0))
+            
+            # Separate clean signal then classify (even though there's no noise to remove)
+            separated = pipeline._separate(coi_n)
+            p_sep, c_sep = pipeline._classify_separated(separated)
+            all_sep_preds.append(p_sep)
+            all_sep_conf.append(_safe_float(c_sep, 0.0))
+    
+    n_segs = len(all_cls_preds)
+    baseline = CleanBaseline(
+        n_samples=len(coi_eval),
+        n_segments=n_segs,
+        cls_recall=float(np.mean(np.array(all_cls_preds) == 1)) if n_segs else 0.0,
+        cls_mean_conf=float(np.mean(all_cls_conf)) if all_cls_conf else 0.0,
+        sep_recall=float(np.mean(np.array(all_sep_preds) == 1)) if n_segs else 0.0,
+        sep_mean_conf=float(np.mean(all_sep_conf)) if all_sep_conf else 0.0,
+    )
+    
+    print(f"  Clean baseline: cls_recall={baseline.cls_recall:.3f} (conf={baseline.cls_mean_conf:.3f}), "
+          f"sep_recall={baseline.sep_recall:.3f} (conf={baseline.sep_mean_conf:.3f})")
+    
+    return baseline
+
+
 
 def run_noise_increase_experiment(
     pipeline: ValidationPipeline,
@@ -129,11 +208,17 @@ def run_noise_increase_experiment(
 
     for idx, snr_db in enumerate(snr_levels_db, 1):
         print(f"\n[{idx}/{len(snr_levels_db)}] Processing SNR = {snr_db:.1f} dB...")
+        # Recording-level aggregates
         cls_preds: List[int] = []
         sep_preds: List[int] = []
         cls_conf: List[float] = []
         sep_conf: List[float] = []
         actual_snrs: List[float] = []
+        # Segment-level aggregates (all segments across all recordings for this SNR)
+        all_seg_cls_preds: List[int] = []
+        all_seg_sep_preds: List[int] = []
+        all_seg_cls_conf: List[float] = []
+        all_seg_sep_conf: List[float] = []
 
         for row in coi_eval.itertuples(index=False):
             coi_full = pipeline._load_labeled_audio(  # noqa: SLF001
@@ -172,7 +257,15 @@ def run_noise_increase_experiment(
                 seg_sep_pred.append(p_sep)
                 seg_sep_conf.append(_safe_float(c_sep, 0.0))
 
+            # Accumulate segment-level predictions for this SNR level
+            all_seg_cls_preds.extend(seg_cls_pred)
+            all_seg_sep_preds.extend(seg_sep_pred)
+            all_seg_cls_conf.extend(seg_cls_conf)
+            all_seg_sep_conf.extend(seg_sep_conf)
+
             # Recording-level aggregation: any() positive over segments.
+            # This is appropriate for weak recording-level labels where COI
+            # may only be present in a subset of segments.
             rec_cls_pred = 1 if any(p == 1 for p in seg_cls_pred) else 0
             rec_sep_pred = 1 if any(p == 1 for p in seg_sep_pred) else 0
             rec_cls_conf = float(max(seg_cls_conf)) if seg_cls_conf else 0.0
@@ -187,14 +280,28 @@ def run_noise_increase_experiment(
             sep_conf.append(rec_sep_conf)
             actual_snrs.append(rec_snr)
 
+        # Recording-level metrics
         n = len(coi_eval)
         cls_recall = float(np.mean(np.array(cls_preds) == 1)) if n else 0.0
         sep_recall = float(np.mean(np.array(sep_preds) == 1)) if n else 0.0
         
+        # Segment-level metrics (shows actual per-segment robustness to noise)
+        n_segs = len(all_seg_cls_preds)
+        cls_seg_recall = float(np.mean(np.array(all_seg_cls_preds) == 1)) if n_segs else 0.0
+        sep_seg_recall = float(np.mean(np.array(all_seg_sep_preds) == 1)) if n_segs else 0.0
+        cls_seg_mean_conf = float(np.mean(all_seg_cls_conf)) if all_seg_cls_conf else 0.0
+        sep_seg_mean_conf = float(np.mean(all_seg_sep_conf)) if all_seg_sep_conf else 0.0
+        
+        # Separation gains at this SNR level
+        seg_recall_gain = sep_seg_recall - cls_seg_recall
+        seg_conf_gain = sep_seg_mean_conf - cls_seg_mean_conf
+        
         # Log results for this SNR level
         mean_actual_snr = float(np.mean(actual_snrs)) if actual_snrs else float(snr_db)
-        print(f"  Results: cls_recall={cls_recall:.3f}, sep_recall={sep_recall:.3f}, "
-              f"mean_actual_snr={mean_actual_snr:.1f} dB")
+        print(f"  Recording-level: cls_recall={cls_recall:.3f}, sep_recall={sep_recall:.3f}")
+        print(f"  Segment-level ({n_segs} segs): cls_recall={cls_seg_recall:.3f}, sep_recall={sep_seg_recall:.3f}, "
+              f"gain={seg_recall_gain:+.3f}")
+        print(f"  Mean actual SNR: {mean_actual_snr:.1f} dB")
 
         per_snr.append(
             SNRStats(
@@ -207,11 +314,19 @@ def run_noise_increase_experiment(
                 cls_only_std_conf=float(np.std(cls_conf)) if cls_conf else 0.0,
                 sep_cls_std_conf=float(np.std(sep_conf)) if sep_conf else 0.0,
                 mean_actual_snr_db=mean_actual_snr,
+                n_segments=n_segs,
+                cls_only_segment_recall=cls_seg_recall,
+                sep_cls_segment_recall=sep_seg_recall,
+                cls_only_segment_mean_conf=cls_seg_mean_conf,
+                sep_cls_segment_mean_conf=sep_seg_mean_conf,
+                segment_recall_gain=seg_recall_gain,
+                segment_conf_gain=seg_conf_gain,
             )
         )
 
     # Compact summary
     summary = {
+        # Recording-level gains (any() aggregation - may stay at 1.0 due to weak labels)
         "best_sep_gain_recall": float(
             max((s.sep_cls_recall - s.cls_only_recall) for s in per_snr)
             if per_snr
@@ -219,6 +334,17 @@ def run_noise_increase_experiment(
         ),
         "mean_sep_gain_recall": float(
             np.mean([s.sep_cls_recall - s.cls_only_recall for s in per_snr])
+            if per_snr
+            else 0.0
+        ),
+        # Segment-level gains (shows actual per-segment robustness improvement)
+        "best_sep_gain_segment_recall": float(
+            max((s.sep_cls_segment_recall - s.cls_only_segment_recall) for s in per_snr)
+            if per_snr
+            else 0.0
+        ),
+        "mean_sep_gain_segment_recall": float(
+            np.mean([s.sep_cls_segment_recall - s.cls_only_segment_recall for s in per_snr])
             if per_snr
             else 0.0
         ),
@@ -336,6 +462,14 @@ def main() -> None:
     print(f"  SNR sweep:          {SNR_LEVELS_DB}")
     print(f"{'=' * 60}\n")
 
+    # Compute clean baseline first (no noise added)
+    clean_baseline = _compute_clean_baseline(
+        pipeline=pipeline,
+        df_coi=df_coi,
+        max_samples=MAX_SAMPLES,
+        seed=SEED,
+    )
+
     results = run_noise_increase_experiment(
         pipeline=pipeline,
         df_coi=df_coi,
@@ -369,6 +503,7 @@ def main() -> None:
             "n_background_clean": len(df_bg_clean),
             "n_contaminated_removed": n_contaminated,
         },
+        "clean_baseline": clean_baseline.__dict__,
         **results,
     }
     

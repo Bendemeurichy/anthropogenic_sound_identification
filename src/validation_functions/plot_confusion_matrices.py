@@ -25,19 +25,19 @@ def load_results(results_path: str | Path) -> dict:
 def recompute_atomic_counts(raw_counts: dict) -> dict:
     """
     Recompute atomic label counts from raw label counts.
-    
+
     This is needed because older result files may have corrupted atomic counts
-    where individual characters like '[', ',', ']' were counted instead of 
+    where individual characters like '[', ',', ']' were counted instead of
     actual label atoms.
-    
+
     Args:
         raw_counts: Dictionary mapping raw labels to their counts
-        
+
     Returns:
         Dictionary mapping atomic labels to their counts
     """
     atomic_counts = {}
-    
+
     for raw_label, count in raw_counts.items():
         try:
             atoms = _extract_label_atoms(raw_label)
@@ -50,7 +50,7 @@ def recompute_atomic_counts(raw_counts: dict) -> dict:
             # If parsing fails, skip this label
             print(f"Warning: Failed to parse label '{raw_label[:50]}...': {e}")
             continue
-    
+
     return atomic_counts
 
 
@@ -300,15 +300,15 @@ def create_top_misclassified_figure(
         col = idx % n_cols + 1
 
         data = results[name]
-        
+
         # Check if atomic counts look corrupted (contain punctuation as keys)
         fp_atomic = data.get("fp_raw_atomic_counts", {})
         fn_atomic = data.get("fn_raw_atomic_counts", {})
-        
+
         # If we see suspicious keys like '[', ',', ']' in atomic counts, recompute them
-        suspicious_keys = {'[', ',', ']', '(', ')', 'a', 'r', 'y'}
+        suspicious_keys = {"[", ",", "]", "(", ")", "a", "r", "y"}
         has_suspicious = any(k in suspicious_keys for k in list(fp_atomic.keys())[:10])
-        
+
         if has_suspicious or not fp_atomic:
             # Recompute atomic counts from raw counts
             fp_raw_counts = data.get("fp_raw_counts", {})
@@ -733,7 +733,8 @@ def main():
     # Path to results file
     results_dir = Path(__file__).parent / "meeting_26_03"
     results_file = (
-        results_dir / "validation_results_tuss/cnn/results_test_20260324_211125.json"
+        results_dir
+        / "validation_results_tuss/cnn/results_test_risoux_test_20260324_220758.json"
     )
 
     #  SudoRMRF

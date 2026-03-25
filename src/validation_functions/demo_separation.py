@@ -525,36 +525,36 @@ if __name__ == "__main__":
     #   python demo_separation.py
     # ---------------------------------------------------------------------------
     _detected_sr = sf.info(
-        "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_coi_clean_0.wav"
+        "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_risoux_test_sudormrf/cnn/as_is_sep/clean_coi_0.wav"
     ).samplerate
     wav_files = [
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_coi_clean_0.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_risoux_test_sudormrf/cnn/as_is_sep/clean_coi_0.wav"
+        ),
+        # Path(
+        #     "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_sudormrf/cnn/mixture_sep/mixture_bg_clean_0.wav"
+        # ),
+        # Path(
+        #     "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_sudormrf/cnn/mixture_sep/mixture_created_0.wav"
+        # ),
+        Path(
+            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_risoux_test_sudormrf/cnn/as_is_sep/separated_src0_0.wav"
         ),
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_bg_clean_0.wav"
-        ),
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_created_0.wav"
-        ),
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_separated_src0_0.wav"
-        ),
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_separated_src1_0.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_risoux_test_sudormrf/cnn/as_is_sep/separated_src1_0.wav"
         ),
     ]
     plot_combined_spectrograms_from_wavs(
         wav_files,
-        Path("meeting_26_03/combined_mixture_plane_tuss.png"),
+        Path("meeting_26_03/combined_risoux_sudormrf_0.png"),
         titles=[
-            "Plane (Clean)",
-            "Background (Clean)",
-            "Mixture",
+            "Plane",
+            # "Background (Clean)",
+            # "Mixture",
             "Separated Plane",
             "Separated BG",
         ],
         sr=_detected_sr,
-        ref_idx=2,  # Use mixture as reference
-        delta_indices=[3, 4],  # Only show deltas for the separated sources
+        ref_idx=0,  # Use mixture as reference
+        delta_indices=None,  # Only show deltas for the separated sources
     )
