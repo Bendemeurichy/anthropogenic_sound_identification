@@ -237,14 +237,21 @@ def run_noise_increase_experiment(
                 # Generate artificial white noise of the same shape
                 noise_seg = torch.randn_like(coi_seg)
 
+                # Normalize only the COI signal to get it in the proper range
                 coi_n = pipeline._normalize(coi_seg)  # noqa: SLF001
-                noise_n = pipeline._normalize(noise_seg)  # noqa: SLF001
-
+                
+                # DO NOT normalize the noise - let _create_mixture scale it properly!
+                # The noise from torch.randn has mean=0, std=1 which is a reasonable
+                # reference level. Normalizing both signals to [-1,1] breaks the SNR math
+                # because at negative SNRs the noise should be LOUDER than the signal,
+                # but if both are peak-normalized, scaling the already-normalized noise
+                # down actually makes it quieter instead of louder.
+                
                 # Create mixture using artificial noise
                 # IMPORTANT: disable_clamping=True allows testing extreme noise conditions
                 # that would otherwise be prevented by the scale clamp used during training
                 mixture, actual_snr = pipeline._create_mixture(  # noqa: SLF001
-                    coi_n, noise_n, float(snr_db), disable_clamping=True
+                    coi_n, noise_seg, float(snr_db), disable_clamping=True
                 )
                 seg_actual_snr.append(actual_snr)
 
