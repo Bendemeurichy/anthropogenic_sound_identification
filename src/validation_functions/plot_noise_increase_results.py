@@ -83,6 +83,9 @@ def create_recall_vs_snr_plot(
     if not snr_data:
         raise ValueError("No SNR results found in the data")
     
+    # Sort by SNR level (descending)
+    snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
+    
     # Extract data
     snr_levels = [d["snr_db"] for d in snr_data]
     cls_only_recall = [d["cls_only_recall"] for d in snr_data]
@@ -199,6 +202,9 @@ def create_confidence_vs_snr_plot(
     
     if not snr_data:
         raise ValueError("No SNR results found in the data")
+    
+    # Sort by SNR level (descending)
+    snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
     # Extract data
     snr_levels = [d["snr_db"] for d in snr_data]
@@ -318,6 +324,9 @@ def create_separation_gain_plot(
     if not snr_data:
         raise ValueError("No SNR results found in the data")
     
+    # Sort by SNR level (descending)
+    snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
+    
     # Extract data
     snr_levels = [f"{d['snr_db']:.1f} dB" for d in snr_data]
     cls_only_recall = [d["cls_only_recall"] for d in snr_data]
@@ -393,6 +402,9 @@ def create_summary_table(results: dict, model_info: dict | None = None) -> go.Fi
     
     if not snr_data:
         raise ValueError("No SNR results found in the data")
+    
+    # Sort by SNR level (descending: least noise -> most noise)
+    snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
     # Build header
     header_values = [
@@ -521,6 +533,9 @@ def create_combined_dashboard(
     
     if not snr_data:
         raise ValueError("No SNR results found in the data")
+    
+    # Sort by SNR level (descending: least noise -> most noise)
+    snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
     # Extract data
     snr_levels = [d["snr_db"] for d in snr_data]

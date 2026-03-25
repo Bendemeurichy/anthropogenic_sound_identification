@@ -1014,32 +1014,44 @@ class ValidationPipeline:
         return pred, result["confidence"]
 
     def _create_mixture(
-        self, source: torch.Tensor, noise: torch.Tensor, snr_db: float
+        self, source: torch.Tensor, noise: torch.Tensor, snr_db: float,
+        disable_clamping: bool = False
     ) -> Tuple[torch.Tensor, float]:
         """Mix source and noise at given SNR.
 
         SNR (dB) = 10 * log10(source_power / noise_power)
-        Scales noise to achieve target SNR with clamping to prevent extreme levels.
+        Scales noise to achieve target SNR with optional clamping to prevent extreme levels.
+
+        Args:
+            source: Source signal (COI)
+            noise: Noise/background signal
+            snr_db: Target SNR in decibels
+            disable_clamping: If True, allows extreme noise levels for robustness testing.
+                             If False (default), clamps scale to [0.1, 3.0] for consistency
+                             with separation model training.
 
         Returns:
             Tuple of (mixture, actual_snr_db) where actual_snr_db reflects the
-            SNR after clamping the noise scale factor.
+            SNR after clamping the noise scale factor (if enabled).
         """
         eps = 1e-8
         source_power = torch.mean(source**2) + eps
         noise_power = torch.mean(noise**2) + eps
         scale = torch.sqrt(source_power / (10 ** (snr_db / 10) * noise_power))
         scale_unclamped = scale.item()
-        # Clamp scaling to prevent extreme noise (consistent with training)
-        scale = torch.clamp(scale, min=0.1, max=3.0)
+        
+        # Optionally clamp scaling to prevent extreme noise (consistent with training)
+        if not disable_clamping:
+            scale = torch.clamp(scale, min=0.1, max=3.0)
 
         # Compute actual SNR achieved after clamping
         scaled_noise_power = torch.mean((noise * scale) ** 2) + eps
         actual_snr_db = 10 * torch.log10(source_power / scaled_noise_power).item()
 
         if abs(scale.item() - scale_unclamped) > 1e-6:
+            clamp_status = "DISABLED" if disable_clamping else "ACTIVE"
             print(
-                f"  [SNR clamping] requested={snr_db:.1f}dB -> "
+                f"  [SNR {clamp_status}] requested={snr_db:.1f}dB -> "
                 f"actual={actual_snr_db:.1f}dB (scale {scale_unclamped:.3f} -> {scale.item():.3f})"
             )
 

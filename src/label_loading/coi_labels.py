@@ -106,6 +106,15 @@ def _extract_label_atoms(label: Any) -> List[str]:
             return []
 
         candidates = [text]
+        
+        # Strip common numpy array string representations with dtype suffix
+        # e.g., "[array(['...'], dtype=object)]" -> "[array(['...'])]"
+        if ", dtype=" in text:
+            # Remove everything from ", dtype=" to the end of the dtype declaration
+            import re as _re
+            text_cleaned = _re.sub(r',\s*dtype\s*=\s*[^\])]+([\])])', r'\1', text)
+            candidates.append(text_cleaned)
+        
         if text.startswith("array(") and text.endswith(")"):
             candidates.append(text[6:-1])
         if text.startswith("np.array(") and text.endswith(")"):
@@ -122,6 +131,19 @@ def _extract_label_atoms(label: Any) -> List[str]:
             if parsed is None:
                 return []
             return [str(parsed)]
+
+        # Try to extract JSON from within the string if it contains a JSON array
+        # This handles cases like: '[array(['["tag1", "tag2"]'], dtype=object)]'
+        json_match = re.search(r'\[\"[^\]]+\"\]', text)
+        if json_match:
+            try:
+                import json as _json
+                json_str = json_match.group(0)
+                parsed = _json.loads(json_str)
+                if isinstance(parsed, list):
+                    return list(dict.fromkeys([str(x) for x in parsed if x]))
+            except Exception:
+                pass
 
         quoted = [q.strip() for q in re.findall(r"['\"]([^'\"]+)['\"]", text)]
         if quoted:

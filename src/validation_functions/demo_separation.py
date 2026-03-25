@@ -58,9 +58,7 @@ DISPLAY_MIN_SR = 44_100
 # ---------------------------------------------------------------------------
 
 
-def load_wav(
-    path: Path, target_sr: int | None = None
-) -> tuple[torch.Tensor, int]:
+def load_wav(path: Path, target_sr: int | None = None) -> tuple[torch.Tensor, int]:
     """Load a WAV file and return a ``(waveform, sample_rate)`` tuple.
 
     If *target_sr* is given the waveform is resampled to that rate before
@@ -142,7 +140,11 @@ def compute_spectrogram(
     )
     mel_spec = mel_transform(wav.unsqueeze(0))[0]  # (n_mels, time)
 
-    # Convert power to dB for plotting
+    # Convert power to dBFS (reference: full scale amplitude of 1.0)
+    # For a full-scale sinusoid, power = 0.5, so 10*log10(0.5) ≈ -3 dBFS
+    # But for consistency with RMS (which uses amplitude), we reference to power=1.0
+    # This gives us: dBFS = 10*log10(power / 1.0) = 10*log10(power)
+    # Maximum possible power for a signal with amplitude 1.0 is 1.0, giving 0 dBFS
     mel_spec_db = 10.0 * torch.log10(mel_spec + 1e-8)
 
     return mel_spec_db.cpu().numpy(), sr
@@ -247,11 +249,16 @@ def plot_spectrogram(
 
     # Optional energy metrics annotation (upper-right corner)
     if metrics is not None:
-        annotation = f"RMS: {metrics['rms_db']:.1f} dBFS\nSEL: {metrics['sel_db']:.1f} dBFS"
+        annotation = (
+            f"RMS: {metrics['rms_db']:.1f} dBFS\nSEL: {metrics['sel_db']:.1f} dBFS"
+        )
         ax.text(
-            0.98, 0.97, annotation,
+            0.98,
+            0.97,
+            annotation,
             transform=ax.transAxes,
-            ha="right", va="top",
+            ha="right",
+            va="top",
             fontsize=8,
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
         )
@@ -310,6 +317,7 @@ def plot_combined_spectrograms(
     sr: int = SAMPLE_RATE,
     metrics: list[dict] | None = None,
     ref_idx: int | None = None,
+    delta_indices: list[int] | None = None,
 ) -> None:
     """Create a combined vertical figure from a list of Mel-spectrograms.
 
@@ -326,8 +334,11 @@ def plot_combined_spectrograms(
                   ``sel_db``.  When supplied a narrow text panel is rendered
                   to the right of each spectrogram.
         ref_idx:  Index of the panel to treat as the energy reference.  When
-                  provided, every other panel additionally displays ΔRMS and
+                  provided, panels specified in delta_indices display ΔRMS and
                   ΔSEL relative to that panel.
+        delta_indices: List of panel indices that should show delta values
+                  relative to ref_idx. If None and ref_idx is provided, all
+                  panels except ref_idx show deltas.
     """
     import matplotlib.gridspec as gridspec
 
@@ -340,7 +351,8 @@ def plot_combined_spectrograms(
 
     if has_metrics:
         gs = gridspec.GridSpec(
-            n_plots, 2,
+            n_plots,
+            2,
             width_ratios=[5, 1],
             figure=fig,
             hspace=0.45,
@@ -364,7 +376,19 @@ def plot_combined_spectrograms(
 
     ref_metrics = metrics[ref_idx] if (has_metrics and ref_idx is not None) else None
 
-    for row, (spec, title) in enumerate(zip(specs, titles)):
+    # If delta_indices not specified but ref_idx is, show deltas for all panels except ref_idx
+    if delta_indices is None and ref_idx is not None:
+        delta_indices = [i for i in range(n_plots) if i != ref_idx]
+
+    # Compute global min/max dB values across all spectrograms for uniform scaling
+    global_vmin = min(spec.min() for spec in specs)
+    global_vmax = max(spec.max() for spec in specs)
+
+    # Normalize spectrograms to relative scale (0 = min, max = dynamic range)
+    normalized_specs = [spec - global_vmin for spec in specs]
+    global_vmax_normalized = global_vmax - global_vmin
+
+    for row, (spec, title) in enumerate(zip(normalized_specs, titles)):
         ax = fig.add_subplot(gs[row, 0])
 
         time_sec = spec.shape[1] * HOP_LENGTH / sr
@@ -377,6 +401,8 @@ def plot_combined_spectrograms(
             origin="lower",
             cmap="magma",
             extent=(0, time_sec, 0, n_mels),
+            vmin=0,
+            vmax=global_vmax_normalized,
         )
         ax.set_ylabel("Freq (Hz)")
         ax.set_title(title)
@@ -392,8 +418,6 @@ def plot_combined_spectrograms(
         ax.set_yticks(mel_bin_indices)
         ax.set_yticklabels(hz_labels)
 
-        fig.colorbar(im, ax=ax, label="dB")
-
         # ---- metrics text panel ----
         if has_metrics:
             m = metrics[row]
@@ -401,10 +425,15 @@ def plot_combined_spectrograms(
             tax.axis("off")
 
             lines = [
-                f"RMS:  {m['rms_db']:+.1f} dBFS",
-                f"SEL:  {m['sel_db']:+.1f} dBFS",
+                f"RMS:  {m['rms_db']:.1f} dBFS",
+                f"SEL:  {m['sel_db']:.1f} dBFS",
             ]
-            if ref_metrics is not None and row != ref_idx:
+            # Only show deltas for panels specified in delta_indices
+            if (
+                ref_metrics is not None
+                and delta_indices is not None
+                and row in delta_indices
+            ):
                 delta_rms = m["rms_db"] - ref_metrics["rms_db"]
                 delta_sel = m["sel_db"] - ref_metrics["sel_db"]
                 lines += [
@@ -414,14 +443,20 @@ def plot_combined_spectrograms(
                 ]
 
             tax.text(
-                0.05, 0.5,
+                0.05,
+                0.5,
                 "\n".join(lines),
                 transform=tax.transAxes,
-                ha="left", va="center",
+                ha="left",
+                va="center",
                 fontsize=8,
                 fontfamily="monospace",
                 bbox=dict(boxstyle="round,pad=0.4", facecolor="#f5f5f5", alpha=0.9),
             )
+
+    # Add a single colorbar for all spectrograms to the right of the figure
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    fig.colorbar(im, cax=cbar_ax, label="Magnitude (dB, normalized)")
 
     fig.savefig(str(save_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -434,6 +469,7 @@ def plot_combined_spectrograms_from_wavs(
     titles: list[str] | None = None,
     sr: int | None = None,
     ref_idx: int | None = None,
+    delta_indices: list[int] | None = None,
 ) -> None:
     """Load several WAVs, compute their spectrograms, and make a combined plot.
 
@@ -449,10 +485,12 @@ def plot_combined_spectrograms_from_wavs(
         sr:        Target sample rate for loading.  ``None`` → auto-detect
                    from the first file.
         ref_idx:   Index into *wav_paths* of the panel to use as the energy
-                   reference when computing ΔRMS / ΔSEL values.  Pass ``0``
-                   to use the first WAV (e.g. the clean input) as the
-                   reference.  When ``None`` (default) no delta values are
-                   shown.
+                   reference when computing ΔRMS / ΔSEL values.  Pass ``2``
+                   to use the mixture as the reference.  When ``None``
+                   (default) no delta values are shown.
+        delta_indices: List of panel indices that should show delta values
+                   relative to ref_idx. If None and ref_idx is provided, all
+                   panels except ref_idx show deltas.
     """
     if sr is None:
         sr = sf.info(str(wav_paths[0])).samplerate
@@ -470,10 +508,13 @@ def plot_combined_spectrograms_from_wavs(
         titles = [p.name for p in wav_paths]
 
     plot_combined_spectrograms(
-        specs, titles, save_path,
+        specs,
+        titles,
+        save_path,
         sr=used_sr,
         metrics=wav_metrics,
         ref_idx=ref_idx,
+        delta_indices=delta_indices,
     )
 
 
@@ -484,29 +525,36 @@ if __name__ == "__main__":
     #   python demo_separation.py
     # ---------------------------------------------------------------------------
     _detected_sr = sf.info(
-        "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/clean_sep/clean_coi_1.wav"
+        "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_coi_clean_0.wav"
     ).samplerate
     wav_files = [
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/clean_sep/clean_coi_1.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_coi_clean_0.wav"
         ),
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/clean_sep/separated_src0_1.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_bg_clean_0.wav"
         ),
         Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/clean_sep/separated_src1_1.wav"
+            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_created_0.wav"
         ),
-        # Path(
-        #     "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/mixture_sep/mixture_separated_coi_head_1.wav"
-        # ),
-        # Path(
-        #     "/home/bendm/Thesis/project/code/src/validation_functions/validation_examples_test/pann/mixture_sep/mixture_separated_src1_1.wav"
-        # ),
+        Path(
+            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_separated_src0_0.wav"
+        ),
+        Path(
+            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test_tuss/cnn/mixture_sep/mixture_separated_src1_0.wav"
+        ),
     ]
     plot_combined_spectrograms_from_wavs(
         wav_files,
-        Path("validation_examples_test/pann/combined_clean_plane.png"),
-        titles=["Plane", "Separated", "Background"],
+        Path("meeting_26_03/combined_mixture_plane_tuss.png"),
+        titles=[
+            "Plane (Clean)",
+            "Background (Clean)",
+            "Mixture",
+            "Separated Plane",
+            "Separated BG",
+        ],
         sr=_detected_sr,
-        ref_idx=0,
+        ref_idx=2,  # Use mixture as reference
+        delta_indices=[3, 4],  # Only show deltas for the separated sources
     )

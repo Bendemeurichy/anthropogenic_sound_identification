@@ -127,7 +127,8 @@ def run_noise_increase_experiment(
 
     per_snr: List[SNRStats] = []
 
-    for snr_db in snr_levels_db:
+    for idx, snr_db in enumerate(snr_levels_db, 1):
+        print(f"\n[{idx}/{len(snr_levels_db)}] Processing SNR = {snr_db:.1f} dB...")
         cls_preds: List[int] = []
         sep_preds: List[int] = []
         cls_conf: List[float] = []
@@ -155,8 +156,10 @@ def run_noise_increase_experiment(
                 noise_n = pipeline._normalize(noise_seg)  # noqa: SLF001
 
                 # Create mixture using artificial noise
+                # IMPORTANT: disable_clamping=True allows testing extreme noise conditions
+                # that would otherwise be prevented by the scale clamp used during training
                 mixture, actual_snr = pipeline._create_mixture(  # noqa: SLF001
-                    coi_n, noise_n, float(snr_db)
+                    coi_n, noise_n, float(snr_db), disable_clamping=True
                 )
                 seg_actual_snr.append(actual_snr)
 
@@ -187,6 +190,11 @@ def run_noise_increase_experiment(
         n = len(coi_eval)
         cls_recall = float(np.mean(np.array(cls_preds) == 1)) if n else 0.0
         sep_recall = float(np.mean(np.array(sep_preds) == 1)) if n else 0.0
+        
+        # Log results for this SNR level
+        mean_actual_snr = float(np.mean(actual_snrs)) if actual_snrs else float(snr_db)
+        print(f"  Results: cls_recall={cls_recall:.3f}, sep_recall={sep_recall:.3f}, "
+              f"mean_actual_snr={mean_actual_snr:.1f} dB")
 
         per_snr.append(
             SNRStats(
@@ -198,9 +206,7 @@ def run_noise_increase_experiment(
                 sep_cls_mean_conf=float(np.mean(sep_conf)) if sep_conf else 0.0,
                 cls_only_std_conf=float(np.std(cls_conf)) if cls_conf else 0.0,
                 sep_cls_std_conf=float(np.std(sep_conf)) if sep_conf else 0.0,
-                mean_actual_snr_db=float(np.mean(actual_snrs))
-                if actual_snrs
-                else float(snr_db),
+                mean_actual_snr_db=mean_actual_snr,
             )
         )
 
@@ -264,10 +270,11 @@ def main() -> None:
     EXCLUDE_DATASETS = ["risoux_test"]  # keep independent set out of this experiment
 
     # Experiment sweep
-    # Linear interpolation between 25 and -10 dB with 8 steps
+    # Extended range to -20 dB to test extreme noise conditions
+    # This matches the range from validation data and ensures we see classifier degradation
     SNR_START = 25
-    SNR_END = -10
-    NUM_STEPS = 8
+    SNR_END = -20
+    NUM_STEPS = 10
     SNR_LEVELS_DB = list(np.linspace(SNR_START, SNR_END, NUM_STEPS))
 
     MAX_SAMPLES = 200

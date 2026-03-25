@@ -3,6 +3,7 @@ Script to visualize confusion matrices from validation results using Plotly.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -10,11 +11,47 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+# Add path for label parsing imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from src.label_loading.coi_labels import _extract_label_atoms, normalize_label
+
 
 def load_results(results_path: str | Path) -> dict:
     """Load validation results from JSON file."""
     with open(results_path, "r") as f:
         return json.load(f)
+
+
+def recompute_atomic_counts(raw_counts: dict) -> dict:
+    """
+    Recompute atomic label counts from raw label counts.
+    
+    This is needed because older result files may have corrupted atomic counts
+    where individual characters like '[', ',', ']' were counted instead of 
+    actual label atoms.
+    
+    Args:
+        raw_counts: Dictionary mapping raw labels to their counts
+        
+    Returns:
+        Dictionary mapping atomic labels to their counts
+    """
+    atomic_counts = {}
+    
+    for raw_label, count in raw_counts.items():
+        try:
+            atoms = _extract_label_atoms(raw_label)
+            # Normalize each atom to ensure consistency
+            normalized_atoms = [normalize_label(atom) for atom in atoms]
+            for atom in normalized_atoms:
+                if atom:  # Skip empty strings
+                    atomic_counts[atom] = atomic_counts.get(atom, 0) + count
+        except Exception as e:
+            # If parsing fails, skip this label
+            print(f"Warning: Failed to parse label '{raw_label[:50]}...': {e}")
+            continue
+    
+    return atomic_counts
 
 
 def create_confusion_matrix_figure(
@@ -263,8 +300,25 @@ def create_top_misclassified_figure(
         col = idx % n_cols + 1
 
         data = results[name]
-        fp_raw = data.get("fp_raw_atomic_counts", data.get("fp_raw_counts", {}))
-        fn_raw = data.get("fn_raw_atomic_counts", data.get("fn_raw_counts", {}))
+        
+        # Check if atomic counts look corrupted (contain punctuation as keys)
+        fp_atomic = data.get("fp_raw_atomic_counts", {})
+        fn_atomic = data.get("fn_raw_atomic_counts", {})
+        
+        # If we see suspicious keys like '[', ',', ']' in atomic counts, recompute them
+        suspicious_keys = {'[', ',', ']', '(', ')', 'a', 'r', 'y'}
+        has_suspicious = any(k in suspicious_keys for k in list(fp_atomic.keys())[:10])
+        
+        if has_suspicious or not fp_atomic:
+            # Recompute atomic counts from raw counts
+            fp_raw_counts = data.get("fp_raw_counts", {})
+            fn_raw_counts = data.get("fn_raw_counts", {})
+            fp_raw = recompute_atomic_counts(fp_raw_counts) if fp_raw_counts else {}
+            fn_raw = recompute_atomic_counts(fn_raw_counts) if fn_raw_counts else {}
+        else:
+            # Use existing atomic counts
+            fp_raw = fp_atomic
+            fn_raw = fn_atomic
 
         if fp_raw or fn_raw:
             # Bidirectional mode — use the new split counts.
@@ -322,11 +376,14 @@ def create_top_misclassified_figure(
             # row/col; use add_shape instead, which does.
             fig.add_shape(
                 type="line",
-                x0=0, x1=0,
-                y0=0, y1=1,
+                x0=0,
+                x1=0,
+                y0=0,
+                y1=1,
                 yref="y domain",
                 line=dict(width=1, color="black"),
-                row=row, col=col,
+                row=row,
+                col=col,
             )
             fig.update_xaxes(title_text="← FN  |  FP →", row=row, col=col)
 
@@ -368,7 +425,7 @@ def create_top_misclassified_figure(
 
     fig.update_layout(
         title=dict(text=title_text, font=dict(size=20)),
-        barmode="relative",
+        barmode="overlay",
         width=1200,
         height=max(400 * n_rows, 600),
         legend=dict(
@@ -469,12 +526,14 @@ def create_metrics_table(results: dict, model_info: dict = None) -> go.Figure:
                     font=dict(color="black", size=11),
                 ),
                 cells=dict(
-                    values=list(zip(*rows))
-                    if rows
-                    else [
-                        [],
-                    ]
-                    * len(header_values),
+                    values=(
+                        list(zip(*rows))
+                        if rows
+                        else [
+                            [],
+                        ]
+                        * len(header_values)
+                    ),
                     fill_color=cell_fill_transposed,
                     align="center",
                     font=dict(color="black", size=10),
@@ -672,10 +731,9 @@ def extract_model_info(results: dict) -> dict:
 
 def main():
     # Path to results file
-    results_dir = Path(__file__).parent / "validation_results"
+    results_dir = Path(__file__).parent / "meeting_26_03"
     results_file = (
-        results_dir
-        / "results_test_risoux_test_20260322_221603.json"
+        results_dir / "validation_results_tuss/cnn/results_test_20260324_211125.json"
     )
 
     #  SudoRMRF
