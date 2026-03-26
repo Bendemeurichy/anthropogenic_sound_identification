@@ -1057,6 +1057,75 @@ class ValidationPipeline:
 
         return source + noise * scale, actual_snr_db
 
+    def _create_mixture_rms(
+        self, source: torch.Tensor, noise: torch.Tensor, snr_db: float
+    ) -> Tuple[torch.Tensor, float]:
+        """Mix source and noise at given SNR using RMS-based normalization.
+        
+        This is the CORRECT way to create SNR mixtures for classifier evaluation:
+        1. Normalize both signal and noise to same RMS level
+        2. Scale noise to achieve target SNR
+        3. Uniformly scale mixture to fit within [-1, 1] (preserves SNR)
+        4. Optional safety clipping (should rarely trigger)
+        
+        This approach:
+        - Preserves SNR relationship accurately
+        - Keeps signals within valid audio range [-1, 1]
+        - No harmonic distortion from clipping (at reasonable SNRs)
+        - Matches realistic audio mixing scenarios
+        
+        Args:
+            source: Source signal (COI)
+            noise: Noise/background signal
+            snr_db: Target SNR in decibels
+            
+        Returns:
+            Tuple of (mixture, actual_snr_db)
+        """
+        eps = 1e-8
+        
+        # Step 1: Normalize both to same RMS level (0.1 gives headroom)
+        target_rms = 0.1
+        
+        source_rms = torch.sqrt(torch.mean(source**2)) + eps
+        noise_rms = torch.sqrt(torch.mean(noise**2)) + eps
+        
+        source_normalized = source * (target_rms / source_rms)
+        noise_normalized = noise * (target_rms / noise_rms)
+        
+        # Step 2: Scale noise to achieve target SNR
+        # SNR (dB) = 10 * log10(signal_power / noise_power)
+        # => noise_power_target = signal_power / 10^(SNR/10)
+        signal_power = torch.mean(source_normalized**2) + eps
+        target_noise_power = signal_power / (10 ** (snr_db / 10))
+        
+        current_noise_power = torch.mean(noise_normalized**2) + eps
+        noise_scale = torch.sqrt(target_noise_power / current_noise_power)
+        
+        noise_scaled = noise_normalized * noise_scale
+        
+        # Step 3: Create mixture
+        mixture = source_normalized + noise_scaled
+        
+        # Step 4: Uniformly scale to fit within [-1, 1]
+        # This preserves SNR because both signal and noise are scaled equally
+        mixture_peak = mixture.abs().max()
+        scale_factor = 1.0
+        
+        if mixture_peak > 0.95:  # Leave small headroom
+            scale_factor = 0.95 / (mixture_peak + eps)
+            mixture = mixture * scale_factor
+        
+        # Step 5: Safety clip (should rarely trigger with proper scaling)
+        mixture = torch.clamp(mixture, -1.0, 1.0)
+        
+        # Compute actual SNR achieved
+        final_signal_power = torch.mean((source_normalized * scale_factor)**2) + eps
+        final_noise_power = torch.mean((noise_scaled * scale_factor)**2) + eps
+        actual_snr_db = 10 * torch.log10(final_signal_power / final_noise_power).item()
+        
+        return mixture, actual_snr_db
+
     def _normalize(self, waveform: torch.Tensor) -> torch.Tensor:
         """Peak-normalize a waveform to [-1, 1].
 

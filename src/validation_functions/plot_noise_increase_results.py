@@ -85,7 +85,7 @@ def create_recall_vs_snr_plot(
     if not snr_data:
         raise ValueError("No SNR results found in the data")
     
-    # Sort by SNR level (descending)
+    # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
     snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
     # Extract data - segment-level metrics (primary, shows actual degradation)
@@ -192,6 +192,9 @@ def create_recall_vs_snr_plot(
             zeroline=True,
             zerolinecolor="gray",
             zerolinewidth=2,
+            categoryorder="array",
+            categoryarray=snr_levels,
+            autorange="reversed",
         ),
         yaxis=dict(
             title="Recall (True Positive Rate)",
@@ -237,7 +240,7 @@ def create_confidence_vs_snr_plot(
     if not snr_data:
         raise ValueError("No SNR results found in the data")
     
-    # Sort by SNR level (descending)
+    # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
     snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
     # Extract data
@@ -313,6 +316,9 @@ def create_confidence_vs_snr_plot(
             zeroline=True,
             zerolinecolor="gray",
             zerolinewidth=2,
+            categoryorder="array",
+            categoryarray=snr_levels,
+            autorange="reversed",
         ),
         yaxis=dict(
             title="Mean Confidence",
@@ -359,7 +365,7 @@ def create_separation_gain_plot(
     if not snr_data:
         raise ValueError("No SNR results found in the data")
     
-    # Sort by SNR level (descending)
+    # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
     snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
     # Extract data - prefer segment-level gain if available
@@ -400,7 +406,7 @@ def create_separation_gain_plot(
             title_text += f" ({model_type})"
     
     # Update layout with explicit category ordering to ensure SNR levels
-    # are displayed in descending order (high SNR / low noise on the left)
+    # are displayed in descending order (+25 dB / low noise on the left → -20 dB / high noise on the right)
     fig.update_layout(
         title=dict(text=title_text, font=dict(size=18)),
         xaxis=dict(
@@ -451,7 +457,7 @@ def create_summary_table(results: dict, model_info: dict | None = None) -> go.Fi
     # Check if segment-level metrics are available
     has_segment_metrics = "cls_only_segment_recall" in snr_data[0]
     
-    # Sort by SNR level (descending: least noise -> most noise)
+    # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
     snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
     # Build header based on available metrics
@@ -644,7 +650,7 @@ def create_combined_dashboard(
     # Check if segment-level metrics are available
     has_segment_metrics = "cls_only_segment_recall" in snr_data[0]
     
-    # Sort by SNR level (descending: least noise -> most noise)
+    # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
     snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
     # Extract data - prefer segment-level metrics
@@ -754,9 +760,11 @@ def create_combined_dashboard(
     
     # Row 2, Col 1: Separation Gain (Bar Chart)
     colors = ["forestgreen" if imp > 0 else "crimson" for imp in improvement]
+    # Use consistent label formatting across all bar charts
+    snr_labels_bar = [f"{snr:.1f}" for snr in snr_levels]
     fig.add_trace(
         go.Bar(
-            x=[f"{snr:.1f}" for snr in snr_levels],
+            x=snr_labels_bar,
             y=improvement,
             marker_color=colors,
             name="Gain",
@@ -769,10 +777,10 @@ def create_combined_dashboard(
     )
     
     # Row 2, Col 2: Grouped bar chart for both methods
-    snr_labels = [f"{snr:.0f}" for snr in snr_levels]
+    # Use same consistent formatting as Row 2, Col 1
     fig.add_trace(
         go.Bar(
-            x=snr_labels,
+            x=snr_labels_bar,
             y=cls_only_recall,
             name="Cls Only",
             marker_color="steelblue",
@@ -784,7 +792,7 @@ def create_combined_dashboard(
     )
     fig.add_trace(
         go.Bar(
-            x=snr_labels,
+            x=snr_labels_bar,
             y=sep_cls_recall,
             name="Sep+Cls",
             marker_color="darkorange",
@@ -796,14 +804,14 @@ def create_combined_dashboard(
     )
     
     # Update axes with explicit category ordering for bar chart axes
-    fig.update_xaxes(title_text="SNR (dB)", row=1, col=1)
+    fig.update_xaxes(title_text="SNR (dB)", autorange="reversed", row=1, col=1)
     fig.update_yaxes(title_text="Recall", range=[0, 1.05], row=1, col=1)
     
-    fig.update_xaxes(title_text="SNR (dB)", row=1, col=2)
+    fig.update_xaxes(title_text="SNR (dB)", autorange="reversed", row=1, col=2)
     fig.update_yaxes(title_text="Confidence", range=[0, 1.05], row=1, col=2)
     
     # Bar chart axes need explicit category ordering
-    snr_labels_bar = [f"{snr:.1f}" for snr in snr_levels]
+    # Both bar charts now use the same label format and ordering
     fig.update_xaxes(
         title_text="SNR (dB)",
         categoryorder="array",
@@ -815,7 +823,7 @@ def create_combined_dashboard(
     fig.update_xaxes(
         title_text="SNR (dB)",
         categoryorder="array",
-        categoryarray=snr_labels,
+        categoryarray=snr_labels_bar,
         row=2, col=2
     )
     fig.update_yaxes(title_text="Recall", range=[0, 1.05], row=2, col=2)

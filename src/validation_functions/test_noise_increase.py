@@ -127,6 +127,7 @@ def _compute_clean_baseline(
     """Compute baseline metrics on clean (noise-free) COI samples.
     
     This provides a reference point to see how much noise degrades performance.
+    Uses the same sample selection as the noise experiment for fair comparison.
     """
     coi_eval = df_coi.copy()
     if max_samples is not None and max_samples > 0 and len(coi_eval) > max_samples:
@@ -147,15 +148,33 @@ def _compute_clean_baseline(
         coi_segments = pipeline._split_into_segments(coi_full)
         
         for coi_seg in coi_segments:
-            coi_n = pipeline._normalize(coi_seg)
+            # RMS-based preprocessing: normalize to target RMS (0.1), then scale to fit
+            # [-1, 1] range with headroom. This matches _create_mixture_rms() preprocessing.
+            eps = 1e-8
+            target_rms = 0.1
+            
+            signal_rms = torch.sqrt(torch.mean(coi_seg ** 2)) + eps
+            # Normalize to target RMS (same as done in _create_mixture_rms)
+            coi_normalized = coi_seg * (target_rms / signal_rms)
+            
+            # Scale to fit [-1, 1] with 0.95 headroom (matches _create_mixture_rms line 1115-1117)
+            peak = torch.max(torch.abs(coi_normalized))
+            if peak > 0.95:
+                scale_factor = 0.95 / (peak + eps)
+                coi_preprocessed = coi_normalized * scale_factor
+            else:
+                coi_preprocessed = coi_normalized
+            
+            # Safety clipping (should rarely trigger, matches _create_mixture_rms line 1120)
+            coi_preprocessed = torch.clamp(coi_preprocessed, -1.0, 1.0)
             
             # Classify clean signal directly
-            p_cls, c_cls = pipeline._classify(coi_n)
+            p_cls, c_cls = pipeline._classify(coi_preprocessed)
             all_cls_preds.append(p_cls)
             all_cls_conf.append(_safe_float(c_cls, 0.0))
             
             # Separate clean signal then classify (even though there's no noise to remove)
-            separated = pipeline._separate(coi_n)
+            separated = pipeline._separate(coi_preprocessed)
             p_sep, c_sep = pipeline._classify_separated(separated)
             all_sep_preds.append(p_sep)
             all_sep_conf.append(_safe_float(c_sep, 0.0))
@@ -190,6 +209,11 @@ def run_noise_increase_experiment(
       - target class is always present (y_true=1).
       - metric of interest is recall (fraction predicted positive).
       - noise is generated as white noise and scaled to match target SNR.
+      
+    IMPORTANT: To ensure valid comparison across SNR levels, the SAME noise
+    realization is used for each segment at all SNR levels. Only the noise
+    scaling changes. This tests "how does performance degrade with increasing
+    noise" rather than "how does performance vary with different random noise".
     """
     if len(df_coi) == 0:
         raise ValueError("No COI samples available for experiment.")
@@ -203,6 +227,25 @@ def run_noise_increase_experiment(
         coi_eval = coi_eval.sample(n=max_samples, random_state=seed).reset_index(
             drop=True
         )
+
+    # Pre-generate noise for all segments to ensure consistency across SNR levels
+    # Key: (recording_index, segment_index), Value: noise tensor
+    print("Pre-generating noise realizations for all segments...")
+    noise_cache: Dict[Tuple[int, int], torch.Tensor] = {}
+    
+    for rec_idx, row in enumerate(coi_eval.itertuples(index=False)):
+        coi_full = pipeline._load_labeled_audio(  # noqa: SLF001
+            row.filename,
+            getattr(row, "start_time", None),
+            getattr(row, "end_time", None),
+        )
+        coi_segments = pipeline._split_into_segments(coi_full)  # noqa: SLF001
+        
+        for seg_idx, coi_seg in enumerate(coi_segments):
+            # Generate and cache noise for this segment
+            noise_cache[(rec_idx, seg_idx)] = torch.randn_like(coi_seg)
+    
+    print(f"Generated {len(noise_cache)} noise realizations for {len(coi_eval)} recordings")
 
     per_snr: List[SNRStats] = []
 
@@ -220,7 +263,7 @@ def run_noise_increase_experiment(
         all_seg_cls_conf: List[float] = []
         all_seg_sep_conf: List[float] = []
 
-        for row in coi_eval.itertuples(index=False):
+        for rec_idx, row in enumerate(coi_eval.itertuples(index=False)):
             coi_full = pipeline._load_labeled_audio(  # noqa: SLF001
                 row.filename,
                 getattr(row, "start_time", None),
@@ -233,33 +276,22 @@ def run_noise_increase_experiment(
             seg_cls_conf, seg_sep_conf = [], []
             seg_actual_snr = []
 
-            for coi_seg in coi_segments:
-                # Generate artificial white noise of the same shape
-                noise_seg = torch.randn_like(coi_seg)
+            for seg_idx, coi_seg in enumerate(coi_segments):
+                # Retrieve pre-generated noise for this segment
+                # This ensures the SAME noise is used at all SNR levels
+                noise_seg = noise_cache[(rec_idx, seg_idx)]
 
-                # Normalize only the COI signal to get it in the proper range
-                coi_n = pipeline._normalize(coi_seg)  # noqa: SLF001
-                
-                # DO NOT normalize the noise - let _create_mixture scale it properly!
-                # The noise from torch.randn has mean=0, std=1 which is a reasonable
-                # reference level. Normalizing both signals to [-1,1] breaks the SNR math
-                # because at negative SNRs the noise should be LOUDER than the signal,
-                # but if both are peak-normalized, scaling the already-normalized noise
-                # down actually makes it quieter instead of louder.
-                
-                # Create mixture using artificial noise
-                # IMPORTANT: disable_clamping=True allows testing extreme noise conditions
-                # that would otherwise be prevented by the scale clamp used during training
-                mixture, actual_snr = pipeline._create_mixture(  # noqa: SLF001
-                    coi_n, noise_seg, float(snr_db), disable_clamping=True
+                # Create mixture using RMS-based mixing
+                # This normalizes both signal and noise to same RMS level, scales noise
+                # for target SNR, then uniformly scales the mixture to fit [-1, 1] naturally.
+                # No clipping or second normalization needed - the mixture is already in range.
+                mixture, actual_snr = pipeline._create_mixture_rms(  # noqa: SLF001
+                    coi_seg, noise_seg, float(snr_db)
                 )
                 seg_actual_snr.append(actual_snr)
 
-                # Normalize mixture before classification to ensure valid input range.
-                # This is critical: at negative SNRs, the mixture amplitude can exceed
-                # the [-1, 1] range the classifier expects, causing erroneous predictions.
-                # Normalization preserves the SNR relationship while keeping amplitudes valid.
-                mixture = pipeline._normalize(mixture)  # noqa: SLF001
+                # No post-processing needed - mixture is already in [-1, 1] range
+                # and matches the distribution expected by the classifier
 
                 p_cls, c_cls = pipeline._classify(mixture)  # noqa: SLF001
                 seg_cls_pred.append(p_cls)
@@ -311,10 +343,20 @@ def run_noise_increase_experiment(
         
         # Log results for this SNR level
         mean_actual_snr = float(np.mean(actual_snrs)) if actual_snrs else float(snr_db)
+        snr_error = abs(mean_actual_snr - snr_db)
+        
+        print(f"  Target SNR: {snr_db:.1f} dB, Actual: {mean_actual_snr:.1f} dB (error: {snr_error:.2f} dB)")
         print(f"  Recording-level: cls_recall={cls_recall:.3f}, sep_recall={sep_recall:.3f}")
         print(f"  Segment-level ({n_segs} segs): cls_recall={cls_seg_recall:.3f}, sep_recall={sep_seg_recall:.3f}, "
               f"gain={seg_recall_gain:+.3f}")
-        print(f"  Mean actual SNR: {mean_actual_snr:.1f} dB")
+        
+        # Verify noise consistency by checking if we're actually degrading performance as SNR decreases
+        if len(per_snr) > 0 and snr_db < per_snr[-1].snr_db:
+            prev_cls_recall = per_snr[-1].cls_only_segment_recall
+            if cls_seg_recall > prev_cls_recall:
+                print(f"  ⚠ WARNING: Recall INCREASED from {prev_cls_recall:.3f} to {cls_seg_recall:.3f} "
+                      f"despite lower SNR ({per_snr[-1].snr_db:.1f} → {snr_db:.1f} dB)")
+
 
         per_snr.append(
             SNRStats(
@@ -362,6 +404,26 @@ def run_noise_increase_experiment(
             else 0.0
         ),
     }
+    
+    # Print summary statistics
+    print(f"\n{'=' * 60}")
+    print("EXPERIMENT SUMMARY")
+    print(f"{'=' * 60}")
+    if per_snr:
+        print("Segment-Level Recall Trend (Classification Only):")
+        snr_sorted = sorted(per_snr, key=lambda x: x.snr_db, reverse=True)
+        for s in snr_sorted:
+            print(f"  SNR {s.snr_db:+6.1f} dB: {s.cls_only_segment_recall:.3f}")
+        
+        # Check if trend is correct (should generally decrease with lower SNR)
+        recalls = [s.cls_only_segment_recall for s in snr_sorted]
+        trend_correct = all(recalls[i] >= recalls[i+1] for i in range(len(recalls)-1))
+        if trend_correct:
+            print("✓ Recall correctly decreases with lower SNR")
+        else:
+            print("⚠ WARNING: Recall does NOT consistently decrease with lower SNR!")
+            print("  This suggests an issue with noise generation or mixing.")
+    print(f"{'=' * 60}\n")
 
     return {
         "snr_results": [s.__dict__ for s in per_snr],
