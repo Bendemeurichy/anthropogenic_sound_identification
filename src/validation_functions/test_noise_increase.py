@@ -255,6 +255,12 @@ def run_noise_increase_experiment(
                 )
                 seg_actual_snr.append(actual_snr)
 
+                # Normalize mixture before classification to ensure valid input range.
+                # This is critical: at negative SNRs, the mixture amplitude can exceed
+                # the [-1, 1] range the classifier expects, causing erroneous predictions.
+                # Normalization preserves the SNR relationship while keeping amplitudes valid.
+                mixture = pipeline._normalize(mixture)  # noqa: SLF001
+
                 p_cls, c_cls = pipeline._classify(mixture)  # noqa: SLF001
                 seg_cls_pred.append(p_cls)
                 seg_cls_conf.append(_safe_float(c_cls, 0.0))
@@ -395,7 +401,7 @@ def main() -> None:
     # Classifier checkpoint (shared across all separation models)
     CLS_WEIGHTS = str(
         PROJECT_ROOT
-        / "src/validation_functions/plane_clasifier/checkpoints/final_model.weights.h5"
+        / "src/validation_functions/classification_models/plane_clasifier/results/checkpoints/final_model.weights.h5"
     )
 
     # Dataset filtering

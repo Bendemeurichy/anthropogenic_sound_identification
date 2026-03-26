@@ -399,13 +399,16 @@ def create_separation_gain_plot(
         if model_type:
             title_text += f" ({model_type})"
     
-    # Update layout
+    # Update layout with explicit category ordering to ensure SNR levels
+    # are displayed in descending order (high SNR / low noise on the left)
     fig.update_layout(
         title=dict(text=title_text, font=dict(size=18)),
         xaxis=dict(
             title="SNR Level",
             gridcolor="lightgray",
             gridwidth=1,
+            categoryorder="array",
+            categoryarray=snr_levels,  # Preserve sorted order from data
         ),
         yaxis=dict(
             title="Recall Improvement (Separation - Baseline)",
@@ -792,17 +795,29 @@ def create_combined_dashboard(
         col=2,
     )
     
-    # Update axes
+    # Update axes with explicit category ordering for bar chart axes
     fig.update_xaxes(title_text="SNR (dB)", row=1, col=1)
     fig.update_yaxes(title_text="Recall", range=[0, 1.05], row=1, col=1)
     
     fig.update_xaxes(title_text="SNR (dB)", row=1, col=2)
     fig.update_yaxes(title_text="Confidence", range=[0, 1.05], row=1, col=2)
     
-    fig.update_xaxes(title_text="SNR (dB)", row=2, col=1)
+    # Bar chart axes need explicit category ordering
+    snr_labels_bar = [f"{snr:.1f}" for snr in snr_levels]
+    fig.update_xaxes(
+        title_text="SNR (dB)",
+        categoryorder="array",
+        categoryarray=snr_labels_bar,
+        row=2, col=1
+    )
     fig.update_yaxes(title_text="Recall Gain", row=2, col=1)
     
-    fig.update_xaxes(title_text="SNR (dB)", row=2, col=2)
+    fig.update_xaxes(
+        title_text="SNR (dB)",
+        categoryorder="array",
+        categoryarray=snr_labels,
+        row=2, col=2
+    )
     fig.update_yaxes(title_text="Recall", range=[0, 1.05], row=2, col=2)
     
     # Build title
