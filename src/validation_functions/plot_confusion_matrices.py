@@ -732,10 +732,7 @@ def extract_model_info(results: dict) -> dict:
 def main():
     # Path to results file
     results_dir = Path(__file__).parent / "meeting_26_03"
-    results_file = (
-        results_dir
-        / "validation_results_tuss/cnn/results_test_risoux_test_20260324_220758.json"
-    )
+    results_file = results_dir / "results_test_risoux_test_20260325_233346.json"
 
     #  SudoRMRF
     # "results_20260211_003754.json"

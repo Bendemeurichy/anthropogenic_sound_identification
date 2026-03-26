@@ -56,7 +56,7 @@ model:
   upsampling_depth: 5
   # Number of basis functions for encoder/decoder - 512 on speech separation, 2048 is more computation finer details,
   # 4096 overkill for COI separation and overfitting on small datasets
-  enc_num_basis: 512
+  enc_num_basis: 1024
   # Scale with segment length and sample rate to ensure sufficient temporal context for COI separation
   enc_kernel_size: 41
   # COI separation head U-ConvBlocks
@@ -73,20 +73,20 @@ training:
   grad_accum_steps: 16
   use_amp: true
   num_epochs: 400
-  lr: 3e-4
-  weight_decay: 1e-3
+  lr: 5e-4
+  weight_decay: 1e-4
   num_workers: 1
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 1
   clip_grad_norm: 5.0
-  patience: 25
+  patience: 20
   checkpoint_dir: "checkpoints"
   device: "cuda:0"
   compile_model: false
   compile_backend: "eager"
   class_weight: 2.0
   aux_waveform_weight: 0.0
-  warmup_steps: 600
+  warmup_steps: 400
   validate_every_n_epochs: 1
   seed: 42
