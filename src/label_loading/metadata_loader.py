@@ -6,6 +6,7 @@ Filenames can be used to sample data for finetuning.
 import pandas as pd
 
 from .load_aerosonic_db import load_aerosonic_db
+from .load_birdset import load_birdset
 from .load_esc50 import load_esc50
 from .load_freesound import load_freesound
 from .load_risoux_test import load_risoux_test
@@ -24,6 +25,9 @@ DATASET_CONFIG = {
     "freesound": {
         "metadata": "freesound_curation/source_freesound_field_recordings_links_with_labels.csv",
     },
+    "birdset": {
+        "metadata": "birdset/annotations.csv",
+    },
 }
 
 # Audio file path prefixes for each dataset
@@ -40,6 +44,9 @@ DATASET_AUDIO_PATHS = {
     },
     "freesound": {
         "base": "Backgrounds/Background/Background",  # Base path for Freesound audio files
+    },
+    "birdset": {
+        "base": "birdset",  # Base path for birdset audio files (to be configured)
     },
 }
 
@@ -151,7 +158,16 @@ def load_metadata_datasets(datasets_path: str, audio_base_path: str) -> pd.DataF
     print(f"For val set: {len(freesound[freesound['split'] == 'val'])} samples")
     print(f"For test set: {len(freesound[freesound['split'] == 'test'])} samples")
 
-    master_set = pd.concat([esc50, aerosonic, risoux, freesound], ignore_index=True)
+    #! Birdset for bird separation experiment
+    birdset = load_birdset(
+        f"{datasets_path}/{DATASET_CONFIG['birdset']['metadata']}"
+    )
+    print(f"Found {len(birdset)} bird samples in Birdset dataset.")
+    print(f"For train set: {len(birdset[birdset['split'] == 'train'])} samples")
+    print(f"For val set: {len(birdset[birdset['split'] == 'val'])} samples")
+    print(f"For test set: {len(birdset[birdset['split'] == 'test'])} samples")
+
+    master_set = pd.concat([esc50, aerosonic, risoux, freesound, birdset], ignore_index=True)
 
     master_set = add_audio_file_paths(master_set, audio_base_path)
 

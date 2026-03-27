@@ -114,6 +114,11 @@ training:
 
   clip_grad_norm: 5.0
 
+  # Differential learning rates for prompt extension
+  # When resuming from a checkpoint, prompts that already exist will train at
+  # lr × existing_prompt_lr_multiplier, while new prompts train at full lr.
+  existing_prompt_lr_multiplier: 0.1
+
   # Loss weights
   coi_weight: 2.0 # up-weight COI streams relative to background
   zero_ref_loss_weight: 0.1 # penalty for estimating energy when target is silent
