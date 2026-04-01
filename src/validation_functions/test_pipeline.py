@@ -52,8 +52,14 @@ sys.path.insert(
 
 from src.label_loading.coi_labels import (
     COI_SYNONYMS,
+)
+from src.label_loading.coi_labels import (
     _extract_label_atoms as _extract_label_atoms,
+)
+from src.label_loading.coi_labels import (
     is_coi_label as _is_coi_label,
+)
+from src.label_loading.coi_labels import (
     normalize_label as _norm_label,
 )
 from src.models.clapsep.inference import COI_HEAD_INDEX as CLAPSEP_COI_HEAD
@@ -269,6 +275,10 @@ class ClassificationMetrics:
     fp_raw_atomic_counts: Dict[str, int] = field(default_factory=dict)
     # Atomic false negative counts, split from any multi-label raw annotations.
     fn_raw_atomic_counts: Dict[str, int] = field(default_factory=dict)
+    
+    # List of misclassified COI samples (false negatives) with metadata
+    # Each entry is a dict with: filename, orig_label, confidence, (optional) start_time, end_time
+    false_negative_samples: List[Dict[str, Any]] = field(default_factory=list)
 
     # Signal-level separation quality metrics (populated when reference is available)
     si_snr_scores: List[float] = field(default_factory=list)
@@ -292,6 +302,7 @@ class ClassificationMetrics:
         y_pred: np.ndarray,
         y_scores: np.ndarray = None,
         raw_labels: Sequence[Any] = None,
+        sample_info: List[Dict[str, Any]] = None,
     ):
         """Compute all metrics from predictions.
 
@@ -383,6 +394,19 @@ class ClassificationMetrics:
                             self.fn_raw_atomic_counts[atomic] = (
                                 self.fn_raw_atomic_counts.get(atomic, 0) + 1
                             )
+                        # Track false negative sample details if sample_info is provided
+                        if sample_info is not None and idx < len(sample_info):
+                            fn_entry = {
+                                "filename": sample_info[idx].get("filename", ""),
+                                "orig_label": raw_key,
+                                "confidence": y_scores[idx] if y_scores is not None else 0.0,
+                            }
+                            # Add optional timing info if available
+                            if "start_time" in sample_info[idx]:
+                                fn_entry["start_time"] = sample_info[idx]["start_time"]
+                            if "end_time" in sample_info[idx]:
+                                fn_entry["end_time"] = sample_info[idx]["end_time"]
+                            self.false_negative_samples.append(fn_entry)
 
         # Aggregate signal metrics if populated
         if self.si_snr_scores:
@@ -547,6 +571,9 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
             d["fn_raw_atomic_counts"] = {
                 str(k): int(v) for k, v in self.fn_raw_atomic_counts.items()
             }
+        if self.false_negative_samples:
+            # Include the list of misclassified COI samples with their metadata
+            d["false_negative_samples"] = _sanitize(self.false_negative_samples)
         if getattr(self, "raw_labels", None):
             # preserve the sequence of original labels for downstream inspection
             d["raw_labels"] = [(_sanitize(x)) for x in list(self.raw_labels)]
@@ -1014,8 +1041,11 @@ class ValidationPipeline:
         return pred, result["confidence"]
 
     def _create_mixture(
-        self, source: torch.Tensor, noise: torch.Tensor, snr_db: float,
-        disable_clamping: bool = False
+        self,
+        source: torch.Tensor,
+        noise: torch.Tensor,
+        snr_db: float,
+        disable_clamping: bool = False,
     ) -> Tuple[torch.Tensor, float]:
         """Mix source and noise at given SNR.
 
@@ -1039,7 +1069,7 @@ class ValidationPipeline:
         noise_power = torch.mean(noise**2) + eps
         scale = torch.sqrt(source_power / (10 ** (snr_db / 10) * noise_power))
         scale_unclamped = scale.item()
-        
+
         # Optionally clamp scaling to prevent extreme noise (consistent with training)
         if not disable_clamping:
             scale = torch.clamp(scale, min=0.1, max=3.0)
@@ -1061,69 +1091,69 @@ class ValidationPipeline:
         self, source: torch.Tensor, noise: torch.Tensor, snr_db: float
     ) -> Tuple[torch.Tensor, float]:
         """Mix source and noise at given SNR using RMS-based normalization.
-        
+
         This is the CORRECT way to create SNR mixtures for classifier evaluation:
         1. Normalize both signal and noise to same RMS level
         2. Scale noise to achieve target SNR
         3. Uniformly scale mixture to fit within [-1, 1] (preserves SNR)
         4. Optional safety clipping (should rarely trigger)
-        
+
         This approach:
         - Preserves SNR relationship accurately
         - Keeps signals within valid audio range [-1, 1]
         - No harmonic distortion from clipping (at reasonable SNRs)
         - Matches realistic audio mixing scenarios
-        
+
         Args:
             source: Source signal (COI)
             noise: Noise/background signal
             snr_db: Target SNR in decibels
-            
+
         Returns:
             Tuple of (mixture, actual_snr_db)
         """
         eps = 1e-8
-        
+
         # Step 1: Normalize both to same RMS level (0.1 gives headroom)
         target_rms = 0.1
-        
+
         source_rms = torch.sqrt(torch.mean(source**2)) + eps
         noise_rms = torch.sqrt(torch.mean(noise**2)) + eps
-        
+
         source_normalized = source * (target_rms / source_rms)
         noise_normalized = noise * (target_rms / noise_rms)
-        
+
         # Step 2: Scale noise to achieve target SNR
         # SNR (dB) = 10 * log10(signal_power / noise_power)
         # => noise_power_target = signal_power / 10^(SNR/10)
         signal_power = torch.mean(source_normalized**2) + eps
         target_noise_power = signal_power / (10 ** (snr_db / 10))
-        
+
         current_noise_power = torch.mean(noise_normalized**2) + eps
         noise_scale = torch.sqrt(target_noise_power / current_noise_power)
-        
+
         noise_scaled = noise_normalized * noise_scale
-        
+
         # Step 3: Create mixture
         mixture = source_normalized + noise_scaled
-        
+
         # Step 4: Uniformly scale to fit within [-1, 1]
         # This preserves SNR because both signal and noise are scaled equally
         mixture_peak = mixture.abs().max()
         scale_factor = 1.0
-        
+
         if mixture_peak > 0.95:  # Leave small headroom
             scale_factor = 0.95 / (mixture_peak + eps)
             mixture = mixture * scale_factor
-        
+
         # Step 5: Safety clip (should rarely trigger with proper scaling)
         mixture = torch.clamp(mixture, -1.0, 1.0)
-        
+
         # Compute actual SNR achieved
-        final_signal_power = torch.mean((source_normalized * scale_factor)**2) + eps
-        final_noise_power = torch.mean((noise_scaled * scale_factor)**2) + eps
+        final_signal_power = torch.mean((source_normalized * scale_factor) ** 2) + eps
+        final_noise_power = torch.mean((noise_scaled * scale_factor) ** 2) + eps
         actual_snr_db = 10 * torch.log10(final_signal_power / final_noise_power).item()
-        
+
         return mixture, actual_snr_db
 
     def _normalize(self, waveform: torch.Tensor) -> torch.Tensor:
@@ -1257,6 +1287,7 @@ class ValidationPipeline:
         save_examples_dir: str = None,
         save_n_examples: int = 1,
         classify_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
+        save_false_negatives: bool = False,
     ) -> ClassificationMetrics:
         """Validate on clean (unmixed) audio - both COI and background.
 
@@ -1276,6 +1307,7 @@ class ValidationPipeline:
 
         y_true, y_pred, y_scores = [], [], []
         raw_labels = []
+        sample_info = [] if save_false_negatives else None
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
         desc = "Clean (sep+cls)" if use_separation else "Clean (cls only)"
 
@@ -1427,6 +1459,15 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
                 raw_labels.append(getattr(row, "orig_label", row.label))
+                
+                # Collect sample info if tracking false negatives
+                if sample_info is not None:
+                    info_entry = {"filename": row.filename}
+                    if hasattr(row, "start_time"):
+                        info_entry["start_time"] = row.start_time
+                    if hasattr(row, "end_time"):
+                        info_entry["end_time"] = row.end_time
+                    sample_info.append(info_entry)
             except Exception as e:
                 import traceback
 
@@ -1462,6 +1503,15 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
                 raw_labels.append(getattr(row, "orig_label", row.label))
+                
+                # Collect sample info if tracking false negatives (to keep list aligned)
+                if sample_info is not None:
+                    info_entry = {"filename": row.filename}
+                    if hasattr(row, "start_time"):
+                        info_entry["start_time"] = row.start_time
+                    if hasattr(row, "end_time"):
+                        info_entry["end_time"] = row.end_time
+                    sample_info.append(info_entry)
             except Exception as e:
                 import traceback
 
@@ -1479,6 +1529,7 @@ class ValidationPipeline:
             np.array(y_pred),
             np.array(y_scores),
             raw_labels=raw_labels,
+            sample_info=sample_info,
         )
         return metrics
 
@@ -1491,6 +1542,7 @@ class ValidationPipeline:
         save_examples_dir: str = None,
         save_n_examples: int = 1,
         classify_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
+        save_false_negatives: bool = False,
     ) -> ClassificationMetrics:
         """Validate on mixtures at random SNR (COI+BG) and clean background (BG only).
 
@@ -1510,6 +1562,7 @@ class ValidationPipeline:
 
         y_true, y_pred, y_scores = [], [], []
         raw_labels = []
+        sample_info = [] if save_false_negatives else None
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
         actual_snrs: List[float] = []
         desc = "Mixtures (sep+cls)" if use_separation else "Mixtures (cls only)"
@@ -1677,6 +1730,15 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
                 raw_labels.append(getattr(row, "orig_label", row.label))
+                
+                # Collect sample info if tracking false negatives
+                if sample_info is not None:
+                    info_entry = {"filename": row.filename}
+                    if hasattr(row, "start_time"):
+                        info_entry["start_time"] = row.start_time
+                    if hasattr(row, "end_time"):
+                        info_entry["end_time"] = row.end_time
+                    sample_info.append(info_entry)
             except Exception as e:
                 import traceback
 
@@ -1712,6 +1774,15 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
                 raw_labels.append(getattr(row, "orig_label", row.label))
+                
+                # Collect sample info if tracking false negatives (to keep list aligned)
+                if sample_info is not None:
+                    info_entry = {"filename": row.filename}
+                    if hasattr(row, "start_time"):
+                        info_entry["start_time"] = row.start_time
+                    if hasattr(row, "end_time"):
+                        info_entry["end_time"] = row.end_time
+                    sample_info.append(info_entry)
             except Exception as e:
                 import traceback
 
@@ -1733,6 +1804,7 @@ class ValidationPipeline:
             np.array(y_pred),
             np.array(y_scores),
             raw_labels=raw_labels,
+            sample_info=sample_info,
         )
         return metrics
 
@@ -1748,6 +1820,7 @@ class ValidationPipeline:
         only_dataset: Optional[str] = None,
         exclude_datasets: Optional[List[str]] = None,
         skip_clean_tests: bool = False,
+        save_false_negatives: bool = False,
     ) -> Dict[str, Dict[str, ClassificationMetrics]]:
         """Run full validation suite for every loaded classifier.
 
@@ -1788,7 +1861,7 @@ class ValidationPipeline:
             exclude_datasets: Optional list of dataset names to drop before
                 applying the split filter.
             skip_clean_tests: When ``True`` on normal test sets, steps 1 and 2 are skipped.
-
+            
         Returns:
             Nested dict ``{classifier_name: {test_name: ClassificationMetrics}}``.
         """
@@ -1989,6 +2062,7 @@ class ValidationPipeline:
                     df_bg,
                     use_separation=False,
                     classify_fn=classify_fn,
+                    save_false_negatives=save_false_negatives,
                 )
                 print(results["as_is_cls"])
 
@@ -2007,6 +2081,7 @@ class ValidationPipeline:
                     save_examples_dir=as_is_save_dir,
                     save_n_examples=save_n_examples,
                     classify_fn=classify_fn,
+                    save_false_negatives=save_false_negatives,
                 )
                 print(results["as_is_sep_cls"])
             else:
@@ -2021,6 +2096,7 @@ class ValidationPipeline:
                         snr_range,
                         use_separation=False,
                         classify_fn=classify_fn,
+                        save_false_negatives=save_false_negatives,
                     )
                     print(results["mix_cls"])
 
@@ -2041,6 +2117,7 @@ class ValidationPipeline:
                         save_examples_dir=mix_save_dir,
                         save_n_examples=save_n_examples,
                         classify_fn=classify_fn,
+                        save_false_negatives=save_false_negatives,
                     )
                     print(results["mix_sep_cls"])
                 else:
@@ -2242,15 +2319,15 @@ def main():
     )
 
     # Pass 1: standard held-out test split (esc50, aerosonicdb, freesound)
-    pipeline.run(
-        split="test",
-        snr_range=(-5, 5),
-        data_csv=DATA_CSV,
-        output_dir="./validation_results",
-        save_examples_dir="./validation_examples_test",
-        save_n_examples=2,
-        exclude_datasets=["risoux_test"],
-    )
+    # pipeline.run(
+    #     split="test",
+    #     snr_range=(-5, 5),
+    #     data_csv=DATA_CSV,
+    #     output_dir="./validation_results",
+    #     save_examples_dir="./validation_examples_test",
+    #     save_n_examples=2,
+    #     exclude_datasets=["risoux_test"],
+    # )
 
     # Pass 2: independent Risoux test set — kept separate because
     # load_risoux_test() assigns split="test" to all its rows, so it
@@ -2267,6 +2344,7 @@ def main():
         save_examples_dir="./validation_examples_risoux_test",
         save_n_examples=2,
         skip_clean_tests=True,
+        save_false_negatives=True,
     )
 
 

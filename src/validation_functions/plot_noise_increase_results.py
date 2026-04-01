@@ -1,8 +1,8 @@
 """
-Visualization script for noise increase experiment results.
+Visualization script for energy-based noise increase experiment results.
 
-This script creates comprehensive plots showing how separation affects
-classification robustness across different SNR levels.
+This script creates comprehensive plots showing how separation preserves energy
+(RMS and SEL) across different SNR levels.
 
 Usage:
     python plot_noise_increase_results.py [results_file.json]
@@ -51,7 +51,7 @@ def extract_model_info(results: dict) -> dict:
     model_info = {
         "model_type": config.get("model_type", "Unknown"),
         "noise_type": config.get("noise_type", "artificial_white_noise"),
-        "max_samples": config.get("max_samples", "all"),
+        "experiment_type": config.get("experiment_type", "energy_preservation"),
         "seed": config.get("seed", 42),
     }
     
@@ -63,14 +63,13 @@ def extract_model_info(results: dict) -> dict:
     return model_info
 
 
-def create_recall_vs_snr_plot(
+def create_energy_degradation_plot(
     results: dict, model_info: dict | None = None
 ) -> go.Figure:
-    """Create main recall vs SNR comparison plot.
+    """Create main energy degradation vs SNR plot.
     
-    Shows how recall changes with SNR for both classification-only and
-    separation+classification approaches, highlighting the improvement.
-    Now includes both recording-level and segment-level metrics.
+    Shows how RMS and SEL energy degrade with increasing noise levels
+    (decreasing SNR).
     
     Args:
         results: Dictionary containing experiment results
@@ -88,95 +87,74 @@ def create_recall_vs_snr_plot(
     # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
     snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
-    # Extract data - segment-level metrics (primary, shows actual degradation)
+    # Extract data
     snr_levels = [d["snr_db"] for d in snr_data]
-    
-    # Use segment-level if available, fall back to recording-level
-    if "cls_only_segment_recall" in snr_data[0]:
-        cls_only_recall = [d["cls_only_segment_recall"] for d in snr_data]
-        sep_cls_recall = [d["sep_cls_segment_recall"] for d in snr_data]
-        metric_level = "Segment-Level"
-    else:
-        cls_only_recall = [d["cls_only_recall"] for d in snr_data]
-        sep_cls_recall = [d["sep_cls_recall"] for d in snr_data]
-        metric_level = "Recording-Level"
-    
-    # Calculate improvement
-    improvement = [s - c for s, c in zip(sep_cls_recall, cls_only_recall)]
+    rms_degradation = [d["mean_rms_degradation_db"] for d in snr_data]
+    sel_degradation = [d["mean_sel_degradation_db"] for d in snr_data]
+    rms_std = [d["std_rms_degradation_db"] for d in snr_data]
+    sel_std = [d["std_sel_degradation_db"] for d in snr_data]
     
     # Create figure
     fig = go.Figure()
     
-    # Add classification-only line
+    # Add RMS degradation line with error bars
     fig.add_trace(
         go.Scatter(
             x=snr_levels,
-            y=cls_only_recall,
+            y=rms_degradation,
             mode="lines+markers",
-            name="Classification Only",
+            name="RMS Degradation",
             line=dict(color="steelblue", width=3),
             marker=dict(size=8, symbol="circle"),
-            hovertemplate="<b>Classification Only</b><br>"
+            error_y=dict(
+                type="data",
+                array=rms_std,
+                visible=True,
+                color="steelblue",
+                thickness=1.5,
+                width=4,
+            ),
+            hovertemplate="<b>RMS</b><br>"
             + "SNR: %{x:.1f} dB<br>"
-            + "Recall: %{y:.3f}<extra></extra>",
+            + "Degradation: %{y:+.2f} dB<extra></extra>",
         )
     )
     
-    # Add separation+classification line
+    # Add SEL degradation line with error bars
     fig.add_trace(
         go.Scatter(
             x=snr_levels,
-            y=sep_cls_recall,
+            y=sel_degradation,
             mode="lines+markers",
-            name="Separation + Classification",
+            name="SEL Degradation",
             line=dict(color="darkorange", width=3),
             marker=dict(size=8, symbol="diamond"),
-            hovertemplate="<b>Separation + Classification</b><br>"
+            error_y=dict(
+                type="data",
+                array=sel_std,
+                visible=True,
+                color="darkorange",
+                thickness=1.5,
+                width=4,
+            ),
+            hovertemplate="<b>SEL</b><br>"
             + "SNR: %{x:.1f} dB<br>"
-            + "Recall: %{y:.3f}<extra></extra>",
+            + "Degradation: %{y:+.2f} dB<extra></extra>",
         )
     )
     
-    # Add shaded area showing improvement
-    fig.add_trace(
-        go.Scatter(
-            x=snr_levels + snr_levels[::-1],
-            y=sep_cls_recall + cls_only_recall[::-1],
-            fill="toself",
-            fillcolor="rgba(34, 139, 34, 0.2)",  # Semi-transparent green
-            line=dict(width=0),
-            showlegend=True,
-            name="Separation Improvement",
-            hoverinfo="skip",
-        )
+    # Add horizontal zero line (perfect preservation)
+    fig.add_hline(
+        y=0,
+        line_dash="dash",
+        line_color="gray",
+        opacity=0.7,
+        annotation_text="Perfect Preservation",
+        annotation_position="right",
     )
-    
-    # Add clean baseline reference lines if available
-    if clean_baseline:
-        baseline_cls = clean_baseline.get("cls_recall", None)
-        baseline_sep = clean_baseline.get("sep_recall", None)
-        
-        if baseline_cls is not None:
-            fig.add_hline(
-                y=baseline_cls,
-                line_dash="dash",
-                line_color="steelblue",
-                opacity=0.5,
-                annotation_text=f"Clean Baseline (Cls): {baseline_cls:.3f}",
-                annotation_position="top left",
-            )
-        if baseline_sep is not None:
-            fig.add_hline(
-                y=baseline_sep,
-                line_dash="dash",
-                line_color="darkorange",
-                opacity=0.5,
-                annotation_text=f"Clean Baseline (Sep): {baseline_sep:.3f}",
-                annotation_position="bottom left",
-            )
     
     # Build title
-    title_text = f"{metric_level} Recall vs SNR: Impact of Separation on Classification"
+    title_text = "Energy Degradation vs SNR: Separation Quality"
     if model_info:
         model_type = model_info.get("model_type", "")
         if model_type:
@@ -192,15 +170,15 @@ def create_recall_vs_snr_plot(
             zeroline=True,
             zerolinecolor="gray",
             zerolinewidth=2,
-            categoryorder="array",
-            categoryarray=snr_levels,
-            autorange="reversed",
+            autorange="reversed",  # High SNR (easy) on left, low SNR (hard) on right
         ),
         yaxis=dict(
-            title="Recall (True Positive Rate)",
+            title="Energy Degradation from Clean Baseline (dB)",
             gridcolor="lightgray",
             gridwidth=1,
-            range=[0, 1.05],
+            zeroline=True,
+            zerolinecolor="black",
+            zerolinewidth=2,
         ),
         plot_bgcolor="white",
         width=1000,
@@ -221,12 +199,13 @@ def create_recall_vs_snr_plot(
     return fig
 
 
-def create_confidence_vs_snr_plot(
+def create_absolute_energy_plot(
     results: dict, model_info: dict | None = None
 ) -> go.Figure:
-    """Create confidence vs SNR comparison plot.
+    """Create absolute energy levels vs SNR plot.
     
-    Shows how model confidence changes with SNR for both approaches.
+    Shows the absolute RMS and SEL values (in dBFS) at different SNR levels
+    for both mixture and separated signals.
     
     Args:
         results: Dictionary containing experiment results
@@ -236,71 +215,203 @@ def create_confidence_vs_snr_plot(
         Plotly Figure object
     """
     snr_data = results.get("snr_results", [])
+    clean_baseline = results.get("clean_baseline", {})
     
     if not snr_data:
         raise ValueError("No SNR results found in the data")
     
-    # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
+    # Sort by SNR level (descending)
     snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
     # Extract data
     snr_levels = [d["snr_db"] for d in snr_data]
-    cls_only_conf = [d["cls_only_mean_conf"] for d in snr_data]
-    sep_cls_conf = [d["sep_cls_mean_conf"] for d in snr_data]
-    cls_only_std = [d["cls_only_std_conf"] for d in snr_data]
-    sep_cls_std = [d["sep_cls_std_conf"] for d in snr_data]
+    mixture_rms = [d["mean_mixture_rms_db"] for d in snr_data]
+    mixture_sel = [d["mean_mixture_sel_db"] for d in snr_data]
+    separated_rms = [d["mean_separated_noisy_rms_db"] for d in snr_data]
+    separated_sel = [d["mean_separated_noisy_sel_db"] for d in snr_data]
     
-    # Create figure with error bars
-    fig = go.Figure()
+    # Get clean baseline values
+    baseline_orig_rms = clean_baseline.get("mean_original_rms_db", None)
+    baseline_orig_sel = clean_baseline.get("mean_original_sel_db", None)
+    baseline_sep_rms = clean_baseline.get("mean_separated_rms_db", None)
+    baseline_sep_sel = clean_baseline.get("mean_separated_sel_db", None)
     
-    # Add classification-only line with error bars
+    # Create subplots for RMS and SEL
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("RMS Energy Levels", "SEL Energy Levels"),
+        horizontal_spacing=0.12,
+    )
+    
+    # RMS subplot
     fig.add_trace(
         go.Scatter(
             x=snr_levels,
-            y=cls_only_conf,
+            y=mixture_rms,
             mode="lines+markers",
-            name="Classification Only",
+            name="Mixture RMS",
+            line=dict(color="lightcoral", width=2, dash="dot"),
+            marker=dict(size=6),
+            legendgroup="rms",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=snr_levels,
+            y=separated_rms,
+            mode="lines+markers",
+            name="Separated RMS",
             line=dict(color="steelblue", width=3),
-            marker=dict(size=8, symbol="circle"),
-            error_y=dict(
-                type="data",
-                array=cls_only_std,
-                visible=True,
-                color="steelblue",
-                thickness=1.5,
-                width=4,
-            ),
-            hovertemplate="<b>Classification Only</b><br>"
-            + "SNR: %{x:.1f} dB<br>"
-            + "Mean Confidence: %{y:.3f}<extra></extra>",
+            marker=dict(size=8),
+            legendgroup="rms",
+        ),
+        row=1,
+        col=1,
+    )
+    
+    # Add clean baseline reference for RMS
+    if baseline_orig_rms is not None:
+        fig.add_hline(
+            y=baseline_orig_rms,
+            line_dash="dash",
+            line_color="green",
+            opacity=0.5,
+            annotation_text=f"Clean Baseline: {baseline_orig_rms:.1f} dBFS",
+            annotation_position="top right",
+            row=1,
+            col=1,
+        )
+    
+    # SEL subplot
+    fig.add_trace(
+        go.Scatter(
+            x=snr_levels,
+            y=mixture_sel,
+            mode="lines+markers",
+            name="Mixture SEL",
+            line=dict(color="lightcoral", width=2, dash="dot"),
+            marker=dict(size=6),
+            legendgroup="sel",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=snr_levels,
+            y=separated_sel,
+            mode="lines+markers",
+            name="Separated SEL",
+            line=dict(color="darkorange", width=3),
+            marker=dict(size=8),
+            legendgroup="sel",
+        ),
+        row=1,
+        col=2,
+    )
+    
+    # Add clean baseline reference for SEL
+    if baseline_orig_sel is not None:
+        fig.add_hline(
+            y=baseline_orig_sel,
+            line_dash="dash",
+            line_color="green",
+            opacity=0.5,
+            annotation_text=f"Clean Baseline: {baseline_orig_sel:.1f} dBFS",
+            annotation_position="top right",
+            row=1,
+            col=2,
+        )
+    
+    # Build title
+    title_text = "Absolute Energy Levels vs SNR"
+    if model_info:
+        model_type = model_info.get("model_type", "")
+        if model_type:
+            title_text += f" ({model_type})"
+    
+    # Update axes
+    fig.update_xaxes(title_text="SNR (dB)", autorange="reversed", row=1, col=1)
+    fig.update_xaxes(title_text="SNR (dB)", autorange="reversed", row=1, col=2)
+    fig.update_yaxes(title_text="RMS (dBFS)", row=1, col=1)
+    fig.update_yaxes(title_text="SEL (dBFS)", row=1, col=2)
+    
+    # Update layout
+    fig.update_layout(
+        title=dict(text=title_text, font=dict(size=18)),
+        width=1400,
+        height=600,
+        plot_bgcolor="white",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.15,
+            xanchor="center",
+            x=0.5,
+        ),
+        hovermode="x unified",
+    )
+    
+    return fig
+
+
+def create_clean_separation_quality_plot(
+    results: dict, model_info: dict | None = None
+) -> go.Figure:
+    """Create bar chart showing separation quality on clean signals.
+    
+    Shows how much energy changes when separating clean (noise-free) signals.
+    Ideally should be close to zero (perfect preservation).
+    
+    Args:
+        results: Dictionary containing experiment results
+        model_info: Optional model configuration info
+        
+    Returns:
+        Plotly Figure object
+    """
+    clean_baseline = results.get("clean_baseline", {})
+    
+    if not clean_baseline:
+        raise ValueError("No clean baseline found in the data")
+    
+    # Extract clean separation preservation metrics
+    rms_preservation = clean_baseline.get("mean_rms_preservation_db", 0)
+    sel_preservation = clean_baseline.get("mean_sel_preservation_db", 0)
+    
+    # Create bar chart
+    fig = go.Figure()
+    
+    metrics = ["RMS", "SEL"]
+    values = [rms_preservation, sel_preservation]
+    colors = ["steelblue", "darkorange"]
+    
+    fig.add_trace(
+        go.Bar(
+            x=metrics,
+            y=values,
+            marker_color=colors,
+            text=[f"{v:+.2f} dB" for v in values],
+            textposition="outside",
+            hovertemplate="<b>%{x}</b><br>"
+            + "Energy Change: %{y:+.2f} dB<extra></extra>",
         )
     )
     
-    # Add separation+classification line with error bars
-    fig.add_trace(
-        go.Scatter(
-            x=snr_levels,
-            y=sep_cls_conf,
-            mode="lines+markers",
-            name="Separation + Classification",
-            line=dict(color="darkorange", width=3),
-            marker=dict(size=8, symbol="diamond"),
-            error_y=dict(
-                type="data",
-                array=sep_cls_std,
-                visible=True,
-                color="darkorange",
-                thickness=1.5,
-                width=4,
-            ),
-            hovertemplate="<b>Separation + Classification</b><br>"
-            + "SNR: %{x:.1f} dB<br>"
-            + "Mean Confidence: %{y:.3f}<extra></extra>",
-        )
+    # Add horizontal zero line (perfect preservation)
+    fig.add_hline(
+        y=0,
+        line_dash="dash",
+        line_color="gray",
+        opacity=0.7,
     )
     
     # Build title
-    title_text = "Mean Confidence vs SNR"
+    title_text = "Separation Quality on Clean Signals (No Noise)"
     if model_info:
         model_type = model_info.get("model_type", "")
         if model_type:
@@ -310,114 +421,12 @@ def create_confidence_vs_snr_plot(
     fig.update_layout(
         title=dict(text=title_text, font=dict(size=18)),
         xaxis=dict(
-            title="SNR (dB)",
+            title="Energy Metric",
             gridcolor="lightgray",
             gridwidth=1,
-            zeroline=True,
-            zerolinecolor="gray",
-            zerolinewidth=2,
-            categoryorder="array",
-            categoryarray=snr_levels,
-            autorange="reversed",
         ),
         yaxis=dict(
-            title="Mean Confidence",
-            gridcolor="lightgray",
-            gridwidth=1,
-            range=[0, 1.05],
-        ),
-        plot_bgcolor="white",
-        width=1000,
-        height=600,
-        legend=dict(
-            orientation="v",
-            yanchor="top",
-            y=0.98,
-            xanchor="right",
-            x=0.98,
-            bgcolor="rgba(255, 255, 255, 0.8)",
-            bordercolor="gray",
-            borderwidth=1,
-        ),
-        hovermode="x unified",
-    )
-    
-    return fig
-
-
-def create_separation_gain_plot(
-    results: dict, model_info: dict | None = None
-) -> go.Figure:
-    """Create bar chart showing separation gain per SNR level.
-    
-    Shows the absolute improvement in recall when using separation.
-    Uses segment-level metrics which show actual per-segment robustness.
-    
-    Args:
-        results: Dictionary containing experiment results
-        model_info: Optional model configuration info
-        
-    Returns:
-        Plotly Figure object
-    """
-    snr_data = results.get("snr_results", [])
-    
-    if not snr_data:
-        raise ValueError("No SNR results found in the data")
-    
-    # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
-    snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
-    
-    # Extract data - prefer segment-level gain if available
-    snr_levels = [f"{d['snr_db']:.1f} dB" for d in snr_data]
-    
-    if "segment_recall_gain" in snr_data[0]:
-        improvement = [d["segment_recall_gain"] for d in snr_data]
-        metric_level = "Segment-Level"
-    else:
-        cls_only_recall = [d["cls_only_recall"] for d in snr_data]
-        sep_cls_recall = [d["sep_cls_recall"] for d in snr_data]
-        improvement = [s - c for s, c in zip(sep_cls_recall, cls_only_recall)]
-        metric_level = "Recording-Level"
-    
-    # Color bars based on positive/negative improvement
-    colors = ["forestgreen" if imp > 0 else "crimson" for imp in improvement]
-    
-    # Create figure
-    fig = go.Figure()
-    
-    fig.add_trace(
-        go.Bar(
-            x=snr_levels,
-            y=improvement,
-            marker_color=colors,
-            text=[f"{imp:+.3f}" for imp in improvement],
-            textposition="outside",
-            hovertemplate="<b>%{x}</b><br>"
-            + "Recall Improvement: %{y:+.3f}<extra></extra>",
-        )
-    )
-    
-    # Build title
-    title_text = f"{metric_level} Separation Gain (Recall Improvement)"
-    if model_info:
-        model_type = model_info.get("model_type", "")
-        if model_type:
-            title_text += f" ({model_type})"
-    
-    # Update layout with explicit category ordering to ensure SNR levels
-    # are displayed in descending order (+25 dB / low noise on the left → -20 dB / high noise on the right)
-    fig.update_layout(
-        title=dict(text=title_text, font=dict(size=18)),
-        xaxis=dict(
-            title="SNR Level",
-            gridcolor="lightgray",
-            gridwidth=1,
-            categoryorder="array",
-            categoryarray=snr_levels,  # Preserve sorted order from data
-        ),
-        yaxis=dict(
-            title="Recall Improvement (Separation - Baseline)",
+            title="Energy Change (dB)<br>(Separated - Original)",
             gridcolor="lightgray",
             gridwidth=1,
             zeroline=True,
@@ -425,8 +434,8 @@ def create_separation_gain_plot(
             zerolinewidth=2,
         ),
         plot_bgcolor="white",
-        width=1000,
-        height=600,
+        width=600,
+        height=500,
         showlegend=False,
     )
     
@@ -435,8 +444,6 @@ def create_separation_gain_plot(
 
 def create_summary_table(results: dict, model_info: dict | None = None) -> go.Figure:
     """Create summary table showing key statistics.
-    
-    Now includes segment-level metrics for meaningful noise robustness analysis.
     
     Args:
         results: Dictionary containing experiment results
@@ -454,101 +461,69 @@ def create_summary_table(results: dict, model_info: dict | None = None) -> go.Fi
     if not snr_data:
         raise ValueError("No SNR results found in the data")
     
-    # Check if segment-level metrics are available
-    has_segment_metrics = "cls_only_segment_recall" in snr_data[0]
-    
-    # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
+    # Sort by SNR level (descending)
     snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
-    # Build header based on available metrics
-    if has_segment_metrics:
-        header_values = [
-            "SNR (dB)",
-            "Seg Cls<br>Recall",
-            "Seg Sep<br>Recall",
-            "Seg<br>Gain",
-            "Rec Cls<br>Recall",
-            "Rec Sep<br>Recall",
-            "N Segs",
-            "Actual<br>SNR",
-        ]
-    else:
-        header_values = [
-            "SNR (dB)",
-            "Cls Only<br>Recall",
-            "Sep+Cls<br>Recall",
-            "Improvement",
-            "Cls Only<br>Conf",
-            "Sep+Cls<br>Conf",
-            "Actual<br>SNR (dB)",
-            "N Samples",
-        ]
+    # Build header
+    header_values = [
+        "SNR (dB)",
+        "RMS<br>Degradation",
+        "SEL<br>Degradation",
+        "Mixture<br>RMS (dBFS)",
+        "Separated<br>RMS (dBFS)",
+        "Mixture<br>SEL (dBFS)",
+        "Separated<br>SEL (dBFS)",
+        "N Segments",
+    ]
     
     # Build cell values
     cell_values = []
     for d in snr_data:
-        if has_segment_metrics:
-            seg_gain = d.get("segment_recall_gain", d["sep_cls_segment_recall"] - d["cls_only_segment_recall"])
-            cell_values.append(
-                [
-                    f"{d['snr_db']:.1f}",
-                    f"{d['cls_only_segment_recall']:.3f}",
-                    f"{d['sep_cls_segment_recall']:.3f}",
-                    f"{seg_gain:+.3f}",
-                    f"{d['cls_only_recall']:.3f}",
-                    f"{d['sep_cls_recall']:.3f}",
-                    f"{d['n_segments']}",
-                    f"{d['mean_actual_snr_db']:.1f}",
-                ]
-            )
-        else:
-            improvement = d["sep_cls_recall"] - d["cls_only_recall"]
-            cell_values.append(
-                [
-                    f"{d['snr_db']:.1f}",
-                    f"{d['cls_only_recall']:.3f}",
-                    f"{d['sep_cls_recall']:.3f}",
-                    f"{improvement:+.3f}",
-                    f"{d['cls_only_mean_conf']:.3f}",
-                    f"{d['sep_cls_mean_conf']:.3f}",
-                    f"{d['mean_actual_snr_db']:.1f}",
-                    f"{d['n_samples']}",
-                ]
-            )
+        cell_values.append(
+            [
+                f"{d['snr_db']:.1f}",
+                f"{d['mean_rms_degradation_db']:+.2f} dB",
+                f"{d['mean_sel_degradation_db']:+.2f} dB",
+                f"{d['mean_mixture_rms_db']:.2f}",
+                f"{d['mean_separated_noisy_rms_db']:.2f}",
+                f"{d['mean_mixture_sel_db']:.2f}",
+                f"{d['mean_separated_noisy_sel_db']:.2f}",
+                f"{d['n_segments']}",
+            ]
+        )
     
     # Transpose for table format
     cell_values_transposed = list(zip(*cell_values)) if cell_values else []
     
-    # Color code gain/improvement column (index 3)
-    if has_segment_metrics:
-        gains = [d.get("segment_recall_gain", d["sep_cls_segment_recall"] - d["cls_only_segment_recall"]) for d in snr_data]
-    else:
-        gains = [d["sep_cls_recall"] - d["cls_only_recall"] for d in snr_data]
-    gain_colors = ["lightgreen" if g > 0 else "lightcoral" for g in gains]
+    # Color code degradation columns (indices 1, 2)
+    rms_degs = [d["mean_rms_degradation_db"] for d in snr_data]
+    sel_degs = [d["mean_sel_degradation_db"] for d in snr_data]
+    
+    # Color scale: green (near 0) to red (large negative)
+    def degradation_color(deg_val):
+        if deg_val >= -1:
+            return "lightgreen"
+        elif deg_val >= -3:
+            return "lightyellow"
+        elif deg_val >= -6:
+            return "lightsalmon"
+        else:
+            return "lightcoral"
+    
+    rms_colors = [degradation_color(d) for d in rms_degs]
+    sel_colors = [degradation_color(d) for d in sel_degs]
     
     # Build column colors
-    if has_segment_metrics:
-        cell_fill_colors = [
-            ["lavender"] * len(snr_data),  # SNR
-            ["lightblue"] * len(snr_data),  # Seg Cls Recall
-            ["lightyellow"] * len(snr_data),  # Seg Sep Recall
-            gain_colors,  # Seg Gain (color-coded)
-            ["lightgray"] * len(snr_data),  # Rec Cls Recall
-            ["lightgray"] * len(snr_data),  # Rec Sep Recall
-            ["lavender"] * len(snr_data),  # N Segs
-            ["lavender"] * len(snr_data),  # Actual SNR
-        ]
-    else:
-        cell_fill_colors = [
-            ["lavender"] * len(snr_data),  # SNR
-            ["lightblue"] * len(snr_data),  # Cls Only Recall
-            ["lightyellow"] * len(snr_data),  # Sep+Cls Recall
-            gain_colors,  # Improvement (color-coded)
-            ["lightblue"] * len(snr_data),  # Cls Only Conf
-            ["lightyellow"] * len(snr_data),  # Sep+Cls Conf
-            ["lavender"] * len(snr_data),  # Actual SNR
-            ["lavender"] * len(snr_data),  # N Samples
-        ]
+    cell_fill_colors = [
+        ["lavender"] * len(snr_data),  # SNR
+        rms_colors,  # RMS Degradation (color-coded)
+        sel_colors,  # SEL Degradation (color-coded)
+        ["lightblue"] * len(snr_data),  # Mixture RMS
+        ["lightyellow"] * len(snr_data),  # Separated RMS
+        ["lightblue"] * len(snr_data),  # Mixture SEL
+        ["lightyellow"] * len(snr_data),  # Separated SEL
+        ["lavender"] * len(snr_data),  # N Segments
+    ]
     
     # Create table
     fig = go.Figure(
@@ -573,7 +548,7 @@ def create_summary_table(results: dict, model_info: dict | None = None) -> go.Fi
     )
     
     # Build title with configuration info
-    title_lines = ["Noise Increase Experiment - Detailed Results"]
+    title_lines = ["Energy Preservation Experiment - Detailed Results"]
     
     if model_info:
         model_type = model_info.get("model_type", "")
@@ -587,41 +562,29 @@ def create_summary_table(results: dict, model_info: dict | None = None) -> go.Fi
     
     # Add clean baseline info
     if clean_baseline:
-        baseline_cls = clean_baseline.get("cls_recall", 0)
-        baseline_sep = clean_baseline.get("sep_recall", 0)
+        rms_pres = clean_baseline.get("mean_rms_preservation_db", 0)
+        sel_pres = clean_baseline.get("mean_sel_preservation_db", 0)
         title_lines.append(
-            f"Clean Baseline - Cls: {baseline_cls:.3f} | Sep: {baseline_sep:.3f}"
+            f"Clean Baseline - RMS: {rms_pres:+.2f} dB | SEL: {sel_pres:+.2f} dB"
         )
     
     if summary:
-        # Prefer segment-level gains if available
-        if "best_sep_gain_segment_recall" in summary:
-            best_gain = summary.get("best_sep_gain_segment_recall", 0)
-            mean_gain = summary.get("mean_sep_gain_segment_recall", 0)
-            title_lines.append(
-                f"Segment-Level Gains - Best: {best_gain:+.3f} | Mean: {mean_gain:+.3f}"
-            )
-        else:
-            best_gain = summary.get("best_sep_gain_recall", 0)
-            mean_gain = summary.get("mean_sep_gain_recall", 0)
-            title_lines.append(
-                f"Best Gain: {best_gain:+.3f} | Mean Gain: {mean_gain:+.3f}"
-            )
+        max_rms_deg = summary.get("max_rms_degradation_db", 0)
+        max_sel_deg = summary.get("max_sel_degradation_db", 0)
+        title_lines.append(
+            f"Max Degradation - RMS: {max_rms_deg:+.2f} dB | SEL: {max_sel_deg:+.2f} dB"
+        )
     
     if dataset_stats:
         n_coi = dataset_stats.get("n_coi_samples", "?")
-        n_contam = dataset_stats.get("n_contaminated_removed", 0)
-        if n_contam > 0:
-            title_lines.append(f"Samples: {n_coi} COI ({n_contam} contaminated removed)")
-        else:
-            title_lines.append(f"Samples: {n_coi} COI")
+        title_lines.append(f"Samples: {n_coi} COI")
     
     title_text = "<br>".join(title_lines)
     
     fig.update_layout(
         title=dict(text=title_text, font=dict(size=14)),
         height=max(400, 80 + len(snr_data) * 30),
-        width=1200,
+        width=1400,
     )
     
     return fig
@@ -631,8 +594,6 @@ def create_combined_dashboard(
     results: dict, model_info: dict | None = None
 ) -> go.Figure:
     """Create combined interactive dashboard with all plots.
-    
-    Uses segment-level metrics for more meaningful noise robustness analysis.
     
     Args:
         results: Dictionary containing experiment results
@@ -647,58 +608,50 @@ def create_combined_dashboard(
     if not snr_data:
         raise ValueError("No SNR results found in the data")
     
-    # Check if segment-level metrics are available
-    has_segment_metrics = "cls_only_segment_recall" in snr_data[0]
-    
-    # Sort by SNR level (descending: +25 dB → -20 dB, easy → hard)
+    # Sort by SNR level (descending)
     snr_data = sorted(snr_data, key=lambda x: x["snr_db"], reverse=True)
     
-    # Extract data - prefer segment-level metrics
+    # Extract data
     snr_levels = [d["snr_db"] for d in snr_data]
+    rms_degradation = [d["mean_rms_degradation_db"] for d in snr_data]
+    sel_degradation = [d["mean_sel_degradation_db"] for d in snr_data]
+    separated_rms = [d["mean_separated_noisy_rms_db"] for d in snr_data]
+    separated_sel = [d["mean_separated_noisy_sel_db"] for d in snr_data]
     
-    if has_segment_metrics:
-        cls_only_recall = [d["cls_only_segment_recall"] for d in snr_data]
-        sep_cls_recall = [d["sep_cls_segment_recall"] for d in snr_data]
-        cls_only_conf = [d["cls_only_segment_mean_conf"] for d in snr_data]
-        sep_cls_conf = [d["sep_cls_segment_mean_conf"] for d in snr_data]
-        improvement = [d.get("segment_recall_gain", s - c) for d, s, c in zip(snr_data, sep_cls_recall, cls_only_recall)]
-        metric_label = "Segment"
-    else:
-        cls_only_recall = [d["cls_only_recall"] for d in snr_data]
-        sep_cls_recall = [d["sep_cls_recall"] for d in snr_data]
-        cls_only_conf = [d["cls_only_mean_conf"] for d in snr_data]
-        sep_cls_conf = [d["sep_cls_mean_conf"] for d in snr_data]
-        improvement = [s - c for s, c in zip(sep_cls_recall, cls_only_recall)]
-        metric_label = "Recording"
+    # Get clean baseline
+    baseline_orig_rms = clean_baseline.get("mean_original_rms_db", None)
+    baseline_orig_sel = clean_baseline.get("mean_original_sel_db", None)
+    rms_preservation = clean_baseline.get("mean_rms_preservation_db", 0)
+    sel_preservation = clean_baseline.get("mean_sel_preservation_db", 0)
     
     # Create subplots: 2x2 grid
     fig = make_subplots(
         rows=2,
         cols=2,
         subplot_titles=(
-            f"{metric_label}-Level Recall vs SNR",
-            f"{metric_label}-Level Confidence vs SNR",
-            "Separation Gain per SNR",
-            f"{metric_label}-Level Recall Comparison",
+            "Energy Degradation vs SNR",
+            "Absolute RMS Levels",
+            "Absolute SEL Levels",
+            "Clean Separation Quality",
         ),
         horizontal_spacing=0.12,
         vertical_spacing=0.15,
         specs=[
             [{"type": "scatter"}, {"type": "scatter"}],
-            [{"type": "bar"}, {"type": "scatter"}],
+            [{"type": "scatter"}, {"type": "bar"}],
         ],
     )
     
-    # Row 1, Col 1: Recall vs SNR
+    # Row 1, Col 1: Energy degradation
     fig.add_trace(
         go.Scatter(
             x=snr_levels,
-            y=cls_only_recall,
+            y=rms_degradation,
             mode="lines+markers",
-            name="Cls Only",
+            name="RMS Degradation",
             line=dict(color="steelblue", width=2),
             marker=dict(size=6),
-            legendgroup="cls",
+            legendgroup="rms",
         ),
         row=1,
         col=1,
@@ -706,130 +659,103 @@ def create_combined_dashboard(
     fig.add_trace(
         go.Scatter(
             x=snr_levels,
-            y=sep_cls_recall,
+            y=sel_degradation,
             mode="lines+markers",
-            name="Sep+Cls",
+            name="SEL Degradation",
             line=dict(color="darkorange", width=2),
             marker=dict(size=6),
-            legendgroup="sep",
+            legendgroup="sel",
         ),
         row=1,
         col=1,
     )
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, row=1, col=1)
     
-    # Add clean baseline reference lines if available
-    if clean_baseline:
-        baseline_cls = clean_baseline.get("cls_recall")
-        baseline_sep = clean_baseline.get("sep_recall")
-        if baseline_cls is not None:
-            fig.add_hline(y=baseline_cls, line_dash="dash", line_color="steelblue", 
-                         opacity=0.4, row=1, col=1)
-        if baseline_sep is not None:
-            fig.add_hline(y=baseline_sep, line_dash="dash", line_color="darkorange", 
-                         opacity=0.4, row=1, col=1)
-    
-    # Row 1, Col 2: Confidence vs SNR
+    # Row 1, Col 2: Absolute RMS levels
     fig.add_trace(
         go.Scatter(
             x=snr_levels,
-            y=cls_only_conf,
+            y=separated_rms,
             mode="lines+markers",
-            name="Cls Only",
+            name="Separated RMS",
             line=dict(color="steelblue", width=2),
             marker=dict(size=6),
             showlegend=False,
-            legendgroup="cls",
+            legendgroup="rms",
         ),
         row=1,
         col=2,
     )
+    if baseline_orig_rms is not None:
+        fig.add_hline(
+            y=baseline_orig_rms,
+            line_dash="dash",
+            line_color="green",
+            opacity=0.5,
+            row=1,
+            col=2,
+        )
+    
+    # Row 2, Col 1: Absolute SEL levels
     fig.add_trace(
         go.Scatter(
             x=snr_levels,
-            y=sep_cls_conf,
+            y=separated_sel,
             mode="lines+markers",
-            name="Sep+Cls",
+            name="Separated SEL",
             line=dict(color="darkorange", width=2),
             marker=dict(size=6),
             showlegend=False,
-            legendgroup="sep",
+            legendgroup="sel",
         ),
-        row=1,
-        col=2,
+        row=2,
+        col=1,
     )
+    if baseline_orig_sel is not None:
+        fig.add_hline(
+            y=baseline_orig_sel,
+            line_dash="dash",
+            line_color="green",
+            opacity=0.5,
+            row=2,
+            col=1,
+        )
     
-    # Row 2, Col 1: Separation Gain (Bar Chart)
-    colors = ["forestgreen" if imp > 0 else "crimson" for imp in improvement]
-    # Use consistent label formatting across all bar charts
-    snr_labels_bar = [f"{snr:.1f}" for snr in snr_levels]
+    # Row 2, Col 2: Clean separation quality (bar chart)
+    metrics = ["RMS", "SEL"]
+    values = [rms_preservation, sel_preservation]
+    colors = ["steelblue", "darkorange"]
+    
     fig.add_trace(
         go.Bar(
-            x=snr_labels_bar,
-            y=improvement,
+            x=metrics,
+            y=values,
             marker_color=colors,
-            name="Gain",
+            name="Clean Sep Quality",
             showlegend=False,
-            text=[f"{imp:+.2f}" for imp in improvement],
+            text=[f"{v:+.2f}" for v in values],
             textposition="outside",
         ),
         row=2,
-        col=1,
-    )
-    
-    # Row 2, Col 2: Grouped bar chart for both methods
-    # Use same consistent formatting as Row 2, Col 1
-    fig.add_trace(
-        go.Bar(
-            x=snr_labels_bar,
-            y=cls_only_recall,
-            name="Cls Only",
-            marker_color="steelblue",
-            showlegend=False,
-            legendgroup="cls",
-        ),
-        row=2,
         col=2,
     )
-    fig.add_trace(
-        go.Bar(
-            x=snr_labels_bar,
-            y=sep_cls_recall,
-            name="Sep+Cls",
-            marker_color="darkorange",
-            showlegend=False,
-            legendgroup="sep",
-        ),
-        row=2,
-        col=2,
-    )
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, row=2, col=2)
     
-    # Update axes with explicit category ordering for bar chart axes
+    # Update axes
     fig.update_xaxes(title_text="SNR (dB)", autorange="reversed", row=1, col=1)
-    fig.update_yaxes(title_text="Recall", range=[0, 1.05], row=1, col=1)
+    fig.update_yaxes(title_text="Degradation (dB)", row=1, col=1)
     
     fig.update_xaxes(title_text="SNR (dB)", autorange="reversed", row=1, col=2)
-    fig.update_yaxes(title_text="Confidence", range=[0, 1.05], row=1, col=2)
+    fig.update_yaxes(title_text="RMS (dBFS)", row=1, col=2)
     
-    # Bar chart axes need explicit category ordering
-    # Both bar charts now use the same label format and ordering
-    fig.update_xaxes(
-        title_text="SNR (dB)",
-        categoryorder="array",
-        categoryarray=snr_labels_bar,
-        row=2, col=1
-    )
-    fig.update_yaxes(title_text="Recall Gain", row=2, col=1)
+    fig.update_xaxes(title_text="SNR (dB)", autorange="reversed", row=2, col=1)
+    fig.update_yaxes(title_text="SEL (dBFS)", row=2, col=1)
     
-    fig.update_xaxes(
-        title_text="SNR (dB)",
-        categoryorder="array",
-        categoryarray=snr_labels_bar,
-        row=2, col=2
-    )
-    fig.update_yaxes(title_text="Recall", range=[0, 1.05], row=2, col=2)
+    fig.update_xaxes(title_text="Metric", row=2, col=2)
+    fig.update_yaxes(title_text="Change (dB)", row=2, col=2)
     
     # Build title
-    title_text = f"Noise Increase Experiment Dashboard ({metric_label}-Level Metrics)"
+    title_text = "Energy Preservation Experiment Dashboard"
     if model_info:
         model_type = model_info.get("model_type", "")
         if model_type:
@@ -841,11 +767,10 @@ def create_combined_dashboard(
         width=1400,
         height=1000,
         plot_bgcolor="white",
-        barmode="group",
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=-0.15,
+            y=-0.1,
             xanchor="center",
             x=0.5,
         ),
@@ -855,7 +780,7 @@ def create_combined_dashboard(
 
 
 def find_latest_results_file(results_dir: Path) -> Path | None:
-    """Find the most recent results JSON file in the given directory.
+    """Find the most recent energy results JSON file in the given directory.
     
     Args:
         results_dir: Directory to search for results files
@@ -863,7 +788,12 @@ def find_latest_results_file(results_dir: Path) -> Path | None:
     Returns:
         Path to the most recent JSON file, or None if not found
     """
-    json_files = list(results_dir.glob("noise_increase_results_*.json"))
+    # Look for energy-specific results files first
+    json_files = list(results_dir.glob("noise_increase_energy_*.json"))
+    
+    # Fall back to any noise increase results
+    if not json_files:
+        json_files = list(results_dir.glob("noise_increase_*.json"))
     
     if not json_files:
         return None
@@ -904,8 +834,10 @@ def main():
     # Extract model info
     model_info = extract_model_info(results)
     model_type = model_info.get("model_type", "unknown")
+    experiment_type = model_info.get("experiment_type", "unknown")
     
     print(f"Model type: {model_type}")
+    print(f"Experiment type: {experiment_type}")
     print(f"Number of SNR levels: {len(results.get('snr_results', []))}")
     
     # Create output directory
@@ -917,40 +849,45 @@ def main():
     
     print("\nGenerating visualizations...")
     
-    # 1. Main recall vs SNR plot
-    print("  [1/5] Creating recall vs SNR plot...")
-    recall_fig = create_recall_vs_snr_plot(results, model_info)
-    recall_path = output_dir / f"recall_vs_snr_{model_type.lower()}_{ts}.png"
-    recall_fig.write_image(str(recall_path), scale=2)
-    print(f"    Saved: {recall_path}")
+    # 1. Main energy degradation plot
+    print("  [1/6] Creating energy degradation vs SNR plot...")
+    deg_fig = create_energy_degradation_plot(results, model_info)
+    deg_path = output_dir / f"energy_degradation_{model_type.lower()}_{ts}.png"
+    deg_fig.write_image(str(deg_path), scale=2)
+    print(f"    Saved: {deg_path}")
     
-    # 2. Confidence vs SNR plot
-    print("  [2/5] Creating confidence vs SNR plot...")
-    conf_fig = create_confidence_vs_snr_plot(results, model_info)
-    conf_path = output_dir / f"confidence_vs_snr_{model_type.lower()}_{ts}.png"
-    conf_fig.write_image(str(conf_path), scale=2)
-    print(f"    Saved: {conf_path}")
+    # 2. Absolute energy levels plot
+    print("  [2/6] Creating absolute energy levels plot...")
+    abs_fig = create_absolute_energy_plot(results, model_info)
+    abs_path = output_dir / f"absolute_energy_{model_type.lower()}_{ts}.png"
+    abs_fig.write_image(str(abs_path), scale=2)
+    print(f"    Saved: {abs_path}")
     
-    # 3. Separation gain bar chart
-    print("  [3/5] Creating separation gain plot...")
-    gain_fig = create_separation_gain_plot(results, model_info)
-    gain_path = output_dir / f"separation_gain_{model_type.lower()}_{ts}.png"
-    gain_fig.write_image(str(gain_path), scale=2)
-    print(f"    Saved: {gain_path}")
+    # 3. Clean separation quality plot
+    print("  [3/6] Creating clean separation quality plot...")
+    clean_fig = create_clean_separation_quality_plot(results, model_info)
+    clean_path = output_dir / f"clean_separation_{model_type.lower()}_{ts}.png"
+    clean_fig.write_image(str(clean_path), scale=2)
+    print(f"    Saved: {clean_path}")
     
     # 4. Summary table
-    print("  [4/5] Creating summary table...")
+    print("  [4/6] Creating summary table...")
     table_fig = create_summary_table(results, model_info)
     table_path = output_dir / f"summary_table_{model_type.lower()}_{ts}.png"
     table_fig.write_image(str(table_path), scale=2)
     print(f"    Saved: {table_path}")
     
     # 5. Combined interactive dashboard
-    print("  [5/5] Creating interactive dashboard...")
+    print("  [5/6] Creating interactive dashboard...")
     dashboard_fig = create_combined_dashboard(results, model_info)
     dashboard_path = output_dir / f"dashboard_{model_type.lower()}_{ts}.html"
     dashboard_fig.write_html(str(dashboard_path))
     print(f"    Saved: {dashboard_path}")
+    
+    # 6. Save individual plots as HTML for interactivity
+    print("  [6/6] Saving interactive HTML versions...")
+    deg_fig.write_html(str(output_dir / f"energy_degradation_{model_type.lower()}_{ts}.html"))
+    abs_fig.write_html(str(output_dir / f"absolute_energy_{model_type.lower()}_{ts}.html"))
     
     print(f"\n✓ All visualizations saved to: {output_dir}")
     print(f"\nSummary Statistics:")
@@ -958,28 +895,22 @@ def main():
     # Print clean baseline if available
     clean_baseline = results.get("clean_baseline", {})
     if clean_baseline:
-        print(f"  Clean Baseline (no noise):")
-        print(f"    Classification only recall: {clean_baseline.get('cls_recall', 0):.3f}")
-        print(f"    Separation+cls recall:      {clean_baseline.get('sep_recall', 0):.3f}")
+        print(f"  Clean Baseline (no noise, n={clean_baseline.get('n_segments', 0)} segments):")
+        print(f"    Original RMS: {clean_baseline.get('mean_original_rms_db', 0):.2f} dBFS")
+        print(f"    Original SEL: {clean_baseline.get('mean_original_sel_db', 0):.2f} dBFS")
+        print(f"    RMS preservation: {clean_baseline.get('mean_rms_preservation_db', 0):+.2f} dB")
+        print(f"    SEL preservation: {clean_baseline.get('mean_sel_preservation_db', 0):+.2f} dB")
     
     summary = results.get("summary", {})
     if summary:
-        # Prefer segment-level gains
-        if "best_sep_gain_segment_recall" in summary:
-            print(f"  Segment-Level Separation Gains:")
-            print(f"    Best gain (recall):  {summary.get('best_sep_gain_segment_recall', 0):+.3f}")
-            print(f"    Mean gain (recall):  {summary.get('mean_sep_gain_segment_recall', 0):+.3f}")
-        print(f"  Recording-Level Separation Gains:")
-        print(f"    Best gain (recall):  {summary.get('best_sep_gain_recall', 0):+.3f}")
-        print(f"    Mean gain (recall):  {summary.get('mean_sep_gain_recall', 0):+.3f}")
+        print(f"  Energy Degradation Range:")
+        print(f"    RMS: {summary.get('min_rms_degradation_db', 0):+.2f} to {summary.get('max_rms_degradation_db', 0):+.2f} dB")
+        print(f"    SEL: {summary.get('min_sel_degradation_db', 0):+.2f} to {summary.get('max_sel_degradation_db', 0):+.2f} dB")
     
     dataset_stats = results.get("dataset_stats", {})
     if dataset_stats:
         n_coi = dataset_stats.get("n_coi_samples", "?")
-        n_contam = dataset_stats.get("n_contaminated_removed", 0)
-        print(f"  COI samples evaluated:           {n_coi}")
-        if n_contam > 0:
-            print(f"  Contaminated backgrounds removed: {n_contam}")
+        print(f"  COI samples evaluated: {n_coi}")
 
 
 if __name__ == "__main__":

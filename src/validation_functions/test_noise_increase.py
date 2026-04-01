@@ -1,8 +1,10 @@
-"""Experiment that gradually adds artificial noise to COI samples and measures how
-separation affects classification robustness.
+"""Experiment that gradually adds artificial noise to COI samples and measures
+separation's effect on energy preservation (RMS and SEL).
 
-This script uses generated white noise instead of background samples from a dataset,
-with a noise range that is interpolated between for each sample.
+This script measures how well separation preserves COI energy at different
+SNR levels by comparing clean baseline energy metrics with noisy separation results.
+Classification is not used since classifiers are not robust to the extreme noise
+levels tested here.
 """
 
 from __future__ import annotations
@@ -28,40 +30,81 @@ from src.validation_functions.test_pipeline import (  # noqa: E402
     _filter_contaminated_backgrounds,
     _is_coi_label,
 )
+from src.validation_functions.demo_separation import compute_energy_metrics  # noqa: E402
 
 
 @dataclass
-class SNRStats:
+class SegmentEnergyMetrics:
+    """Per-segment energy metrics for detailed analysis and plotting.
+    
+    All energy values are in dBFS (dB relative to full scale).
+    Delta values show change from clean baseline (positive = more energy).
+    """
+    # Identifiers
+    filename: str
+    recording_idx: int
+    segment_idx: int
+    snr_db: float | None  # None for clean baseline
+    
+    # Clean baseline (no noise, original signal)
+    original_clean_rms_db: float
+    original_clean_sel_db: float
+    separated_clean_rms_db: float
+    separated_clean_sel_db: float
+    
+    # Noisy experiment (only populated for SNR sweeps)
+    mixture_rms_db: float | None = None
+    mixture_sel_db: float | None = None
+    separated_noisy_rms_db: float | None = None
+    separated_noisy_sel_db: float | None = None
+    
+    # Energy preservation metrics (dB differences from clean baseline)
+    clean_sep_rms_delta: float = 0.0  # separated_clean - original_clean
+    clean_sep_sel_delta: float = 0.0
+    noisy_sep_rms_delta: float | None = None  # separated_noisy - original_clean
+    noisy_sep_sel_delta: float | None = None
+    
+    actual_snr_db: float | None = None  # Measured SNR for verification
+
+
+@dataclass
+class CleanBaselineStats:
+    """Aggregate statistics for clean baseline (no noise)."""
+    n_samples: int
+    n_segments: int
+    mean_original_rms_db: float
+    std_original_rms_db: float
+    mean_original_sel_db: float
+    std_original_sel_db: float
+    mean_separated_rms_db: float
+    std_separated_rms_db: float
+    mean_separated_sel_db: float
+    std_separated_sel_db: float
+    # Energy preservation on clean signals
+    mean_rms_preservation_db: float  # How much RMS changes after separation
+    mean_sel_preservation_db: float  # How much SEL changes after separation
+
+
+@dataclass
+class SNREnergyStats:
+    """Aggregate energy statistics at a specific SNR level."""
     snr_db: float
-    n_samples: int
-    # Recording-level metrics (any() aggregation - appropriate for weak labels)
-    cls_only_recall: float
-    sep_cls_recall: float
-    cls_only_mean_conf: float
-    sep_cls_mean_conf: float
-    cls_only_std_conf: float
-    sep_cls_std_conf: float
+    n_segments: int
+    
+    # Mean energy metrics
+    mean_mixture_rms_db: float
+    mean_mixture_sel_db: float
+    mean_separated_noisy_rms_db: float
+    mean_separated_noisy_sel_db: float
+    
+    # Energy degradation from clean baseline
+    mean_rms_degradation_db: float  # How much RMS drops from clean baseline
+    mean_sel_degradation_db: float  # How much SEL drops from clean baseline
+    std_rms_degradation_db: float
+    std_sel_degradation_db: float
+    
+    # Actual measured SNR
     mean_actual_snr_db: float
-    # Segment-level metrics (shows per-segment robustness to noise)
-    n_segments: int
-    cls_only_segment_recall: float
-    sep_cls_segment_recall: float
-    cls_only_segment_mean_conf: float
-    sep_cls_segment_mean_conf: float
-    # Separation gain (positive = separation helps)
-    segment_recall_gain: float  # sep_cls_segment_recall - cls_only_segment_recall
-    segment_conf_gain: float    # sep_cls_segment_mean_conf - cls_only_segment_mean_conf
-
-
-@dataclass
-class CleanBaseline:
-    """Baseline metrics on clean (noise-free) COI samples."""
-    n_samples: int
-    n_segments: int
-    cls_recall: float
-    cls_mean_conf: float
-    sep_recall: float
-    sep_mean_conf: float
 
 
 def _safe_float(x, default=0.0) -> float:
@@ -118,28 +161,39 @@ def _extract_bg_df(df: pd.DataFrame) -> pd.DataFrame:
     return bg.reset_index(drop=True)
 
 
-def _compute_clean_baseline(
+def _compute_clean_baseline_energy(
     pipeline: ValidationPipeline,
     df_coi: pd.DataFrame,
-    max_samples: int | None = None,
     seed: int = 42,
-) -> CleanBaseline:
-    """Compute baseline metrics on clean (noise-free) COI samples.
+) -> Tuple[CleanBaselineStats, Dict[Tuple[int, int], SegmentEnergyMetrics]]:
+    """Compute baseline energy metrics on clean (noise-free) COI samples.
     
-    This provides a reference point to see how much noise degrades performance.
-    Uses the same sample selection as the noise experiment for fair comparison.
+    This provides the reference point to measure energy degradation at different
+    noise levels. Measures both original and separated clean signals.
+    
+    Args:
+        pipeline: ValidationPipeline with loaded separator model
+        df_coi: DataFrame of COI samples
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Tuple of:
+            - CleanBaselineStats: Aggregated statistics
+            - Dict mapping (rec_idx, seg_idx) to detailed SegmentEnergyMetrics
     """
-    coi_eval = df_coi.copy()
-    if max_samples is not None and max_samples > 0 and len(coi_eval) > max_samples:
-        coi_eval = coi_eval.sample(n=max_samples, random_state=seed).reset_index(drop=True)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
     
-    all_cls_preds: List[int] = []
-    all_cls_conf: List[float] = []
-    all_sep_preds: List[int] = []
-    all_sep_conf: List[float] = []
+    all_metrics: List[SegmentEnergyMetrics] = []
+    baseline_map: Dict[Tuple[int, int], SegmentEnergyMetrics] = {}
     
-    print("Computing clean baseline (no noise)...")
-    for row in coi_eval.itertuples(index=False):
+    print(f"\nComputing clean baseline energy (no noise) on {len(df_coi)} samples...")
+    
+    for rec_idx, row in enumerate(df_coi.itertuples(index=False)):
+        if rec_idx % 50 == 0:
+            print(f"  Processing recording {rec_idx}/{len(df_coi)}...")
+            
         coi_full = pipeline._load_labeled_audio(
             row.filename,
             getattr(row, "start_time", None),
@@ -147,7 +201,7 @@ def _compute_clean_baseline(
         )
         coi_segments = pipeline._split_into_segments(coi_full)
         
-        for coi_seg in coi_segments:
+        for seg_idx, coi_seg in enumerate(coi_segments):
             # RMS-based preprocessing: normalize to target RMS (0.1), then scale to fit
             # [-1, 1] range with headroom. This matches _create_mixture_rms() preprocessing.
             eps = 1e-8
@@ -168,52 +222,95 @@ def _compute_clean_baseline(
             # Safety clipping (should rarely trigger, matches _create_mixture_rms line 1120)
             coi_preprocessed = torch.clamp(coi_preprocessed, -1.0, 1.0)
             
-            # Classify clean signal directly
-            p_cls, c_cls = pipeline._classify(coi_preprocessed)
-            all_cls_preds.append(p_cls)
-            all_cls_conf.append(_safe_float(c_cls, 0.0))
+            # Compute energy on original clean signal
+            orig_metrics = compute_energy_metrics(coi_preprocessed, pipeline.sample_rate)
             
-            # Separate clean signal then classify (even though there's no noise to remove)
+            # Separate clean signal (even though there's no noise to remove)
             separated = pipeline._separate(coi_preprocessed)
-            p_sep, c_sep = pipeline._classify_separated(separated)
-            all_sep_preds.append(p_sep)
-            all_sep_conf.append(_safe_float(c_sep, 0.0))
+            
+            # Compute energy on separated clean signal
+            sep_metrics = compute_energy_metrics(separated, pipeline.sample_rate)
+            
+            # Calculate energy preservation
+            rms_delta = sep_metrics["rms_db"] - orig_metrics["rms_db"]
+            sel_delta = sep_metrics["sel_db"] - orig_metrics["sel_db"]
+            
+            # Create segment metrics
+            seg_metrics = SegmentEnergyMetrics(
+                filename=row.filename,
+                recording_idx=rec_idx,
+                segment_idx=seg_idx,
+                snr_db=None,  # Clean baseline has no noise
+                original_clean_rms_db=orig_metrics["rms_db"],
+                original_clean_sel_db=orig_metrics["sel_db"],
+                separated_clean_rms_db=sep_metrics["rms_db"],
+                separated_clean_sel_db=sep_metrics["sel_db"],
+                clean_sep_rms_delta=rms_delta,
+                clean_sep_sel_delta=sel_delta,
+            )
+            
+            all_metrics.append(seg_metrics)
+            baseline_map[(rec_idx, seg_idx)] = seg_metrics
     
-    n_segs = len(all_cls_preds)
-    baseline = CleanBaseline(
-        n_samples=len(coi_eval),
+    # Compute aggregate statistics
+    n_segs = len(all_metrics)
+    
+    orig_rms = [m.original_clean_rms_db for m in all_metrics]
+    orig_sel = [m.original_clean_sel_db for m in all_metrics]
+    sep_rms = [m.separated_clean_rms_db for m in all_metrics]
+    sep_sel = [m.separated_clean_sel_db for m in all_metrics]
+    rms_deltas = [m.clean_sep_rms_delta for m in all_metrics]
+    sel_deltas = [m.clean_sep_sel_delta for m in all_metrics]
+    
+    baseline_stats = CleanBaselineStats(
+        n_samples=len(df_coi),
         n_segments=n_segs,
-        cls_recall=float(np.mean(np.array(all_cls_preds) == 1)) if n_segs else 0.0,
-        cls_mean_conf=float(np.mean(all_cls_conf)) if all_cls_conf else 0.0,
-        sep_recall=float(np.mean(np.array(all_sep_preds) == 1)) if n_segs else 0.0,
-        sep_mean_conf=float(np.mean(all_sep_conf)) if all_sep_conf else 0.0,
+        mean_original_rms_db=float(np.mean(orig_rms)),
+        std_original_rms_db=float(np.std(orig_rms)),
+        mean_original_sel_db=float(np.mean(orig_sel)),
+        std_original_sel_db=float(np.std(orig_sel)),
+        mean_separated_rms_db=float(np.mean(sep_rms)),
+        std_separated_rms_db=float(np.std(sep_rms)),
+        mean_separated_sel_db=float(np.mean(sep_sel)),
+        std_separated_sel_db=float(np.std(sep_sel)),
+        mean_rms_preservation_db=float(np.mean(rms_deltas)),
+        mean_sel_preservation_db=float(np.mean(sel_deltas)),
     )
     
-    print(f"  Clean baseline: cls_recall={baseline.cls_recall:.3f} (conf={baseline.cls_mean_conf:.3f}), "
-          f"sep_recall={baseline.sep_recall:.3f} (conf={baseline.sep_mean_conf:.3f})")
+    print(f"\nClean Baseline Results ({n_segs} segments):")
+    print(f"  Original: RMS={baseline_stats.mean_original_rms_db:.2f} dBFS, "
+          f"SEL={baseline_stats.mean_original_sel_db:.2f} dBFS")
+    print(f"  Separated: RMS={baseline_stats.mean_separated_rms_db:.2f} dBFS, "
+          f"SEL={baseline_stats.mean_separated_sel_db:.2f} dBFS")
+    print(f"  Preservation: RMS_delta={baseline_stats.mean_rms_preservation_db:+.2f} dB, "
+          f"SEL_delta={baseline_stats.mean_sel_preservation_db:+.2f} dB")
     
-    return baseline
-
+    return baseline_stats, baseline_map
 
 
 def run_noise_increase_experiment(
     pipeline: ValidationPipeline,
     df_coi: pd.DataFrame,
+    baseline_map: Dict[Tuple[int, int], SegmentEnergyMetrics],
     snr_levels_db: List[float],
-    max_samples: int | None = None,
     seed: int = 42,
-) -> Dict[str, object]:
-    """Run robustness sweep over SNR levels using artificial noise.
-
-    Positive-only experiment:
-      - target class is always present (y_true=1).
-      - metric of interest is recall (fraction predicted positive).
-      - noise is generated as white noise and scaled to match target SNR.
-      
-    IMPORTANT: To ensure valid comparison across SNR levels, the SAME noise
-    realization is used for each segment at all SNR levels. Only the noise
-    scaling changes. This tests "how does performance degrade with increasing
-    noise" rather than "how does performance vary with different random noise".
+) -> Tuple[List[SegmentEnergyMetrics], List[SNREnergyStats]]:
+    """Run robustness sweep over SNR levels measuring energy preservation.
+    
+    For each SNR level, mixes COI with white noise and measures how much energy
+    is preserved after separation compared to the clean baseline.
+    
+    Args:
+        pipeline: ValidationPipeline with loaded separator model
+        df_coi: DataFrame of COI samples
+        baseline_map: Dictionary mapping (rec_idx, seg_idx) to clean baseline metrics
+        snr_levels_db: List of SNR levels to test (in dB)
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Tuple of:
+            - List of detailed SegmentEnergyMetrics for all segments and SNR levels
+            - List of SNREnergyStats with aggregate statistics per SNR level
     """
     if len(df_coi) == 0:
         raise ValueError("No COI samples available for experiment.")
@@ -222,213 +319,140 @@ def run_noise_increase_experiment(
     random.seed(seed)
     torch.manual_seed(seed)
 
-    coi_eval = df_coi.copy()
-    if max_samples is not None and max_samples > 0 and len(coi_eval) > max_samples:
-        coi_eval = coi_eval.sample(n=max_samples, random_state=seed).reset_index(
-            drop=True
-        )
-
     # Pre-generate noise for all segments to ensure consistency across SNR levels
     # Key: (recording_index, segment_index), Value: noise tensor
-    print("Pre-generating noise realizations for all segments...")
+    print("\nPre-generating noise realizations for all segments...")
     noise_cache: Dict[Tuple[int, int], torch.Tensor] = {}
     
-    for rec_idx, row in enumerate(coi_eval.itertuples(index=False)):
-        coi_full = pipeline._load_labeled_audio(  # noqa: SLF001
+    for rec_idx, row in enumerate(df_coi.itertuples(index=False)):
+        coi_full = pipeline._load_labeled_audio(
             row.filename,
             getattr(row, "start_time", None),
             getattr(row, "end_time", None),
         )
-        coi_segments = pipeline._split_into_segments(coi_full)  # noqa: SLF001
+        coi_segments = pipeline._split_into_segments(coi_full)
         
         for seg_idx, coi_seg in enumerate(coi_segments):
             # Generate and cache noise for this segment
             noise_cache[(rec_idx, seg_idx)] = torch.randn_like(coi_seg)
     
-    print(f"Generated {len(noise_cache)} noise realizations for {len(coi_eval)} recordings")
+    print(f"Generated {len(noise_cache)} noise realizations for {len(df_coi)} recordings")
 
-    per_snr: List[SNRStats] = []
+    all_segment_metrics: List[SegmentEnergyMetrics] = []
+    per_snr_stats: List[SNREnergyStats] = []
 
     for idx, snr_db in enumerate(snr_levels_db, 1):
         print(f"\n[{idx}/{len(snr_levels_db)}] Processing SNR = {snr_db:.1f} dB...")
-        # Recording-level aggregates
-        cls_preds: List[int] = []
-        sep_preds: List[int] = []
-        cls_conf: List[float] = []
-        sep_conf: List[float] = []
-        actual_snrs: List[float] = []
-        # Segment-level aggregates (all segments across all recordings for this SNR)
-        all_seg_cls_preds: List[int] = []
-        all_seg_sep_preds: List[int] = []
-        all_seg_cls_conf: List[float] = []
-        all_seg_sep_conf: List[float] = []
+        
+        snr_segment_metrics: List[SegmentEnergyMetrics] = []
 
-        for rec_idx, row in enumerate(coi_eval.itertuples(index=False)):
-            coi_full = pipeline._load_labeled_audio(  # noqa: SLF001
+        for rec_idx, row in enumerate(df_coi.itertuples(index=False)):
+            coi_full = pipeline._load_labeled_audio(
                 row.filename,
                 getattr(row, "start_time", None),
                 getattr(row, "end_time", None),
             )
 
-            coi_segments = pipeline._split_into_segments(coi_full)  # noqa: SLF001
-
-            seg_cls_pred, seg_sep_pred = [], []
-            seg_cls_conf, seg_sep_conf = [], []
-            seg_actual_snr = []
+            coi_segments = pipeline._split_into_segments(coi_full)
 
             for seg_idx, coi_seg in enumerate(coi_segments):
+                # Retrieve baseline metrics for comparison
+                baseline = baseline_map[(rec_idx, seg_idx)]
+                
                 # Retrieve pre-generated noise for this segment
                 # This ensures the SAME noise is used at all SNR levels
                 noise_seg = noise_cache[(rec_idx, seg_idx)]
 
                 # Create mixture using RMS-based mixing
-                # This normalizes both signal and noise to same RMS level, scales noise
-                # for target SNR, then uniformly scales the mixture to fit [-1, 1] naturally.
-                # No clipping or second normalization needed - the mixture is already in range.
-                mixture, actual_snr = pipeline._create_mixture_rms(  # noqa: SLF001
+                mixture, actual_snr = pipeline._create_mixture_rms(
                     coi_seg, noise_seg, float(snr_db)
                 )
-                seg_actual_snr.append(actual_snr)
 
-                # No post-processing needed - mixture is already in [-1, 1] range
-                # and matches the distribution expected by the classifier
-
-                p_cls, c_cls = pipeline._classify(mixture)  # noqa: SLF001
-                seg_cls_pred.append(p_cls)
-                seg_cls_conf.append(_safe_float(c_cls, 0.0))
-
-                separated = pipeline._separate(mixture)  # noqa: SLF001
-                p_sep, c_sep = pipeline._classify_separated(separated)  # noqa: SLF001
-                seg_sep_pred.append(p_sep)
-                seg_sep_conf.append(_safe_float(c_sep, 0.0))
-
-            # Accumulate segment-level predictions for this SNR level
-            all_seg_cls_preds.extend(seg_cls_pred)
-            all_seg_sep_preds.extend(seg_sep_pred)
-            all_seg_cls_conf.extend(seg_cls_conf)
-            all_seg_sep_conf.extend(seg_sep_conf)
-
-            # Recording-level aggregation: any() positive over segments.
-            # This is appropriate for weak recording-level labels where COI
-            # may only be present in a subset of segments.
-            rec_cls_pred = 1 if any(p == 1 for p in seg_cls_pred) else 0
-            rec_sep_pred = 1 if any(p == 1 for p in seg_sep_pred) else 0
-            rec_cls_conf = float(max(seg_cls_conf)) if seg_cls_conf else 0.0
-            rec_sep_conf = float(max(seg_sep_conf)) if seg_sep_conf else 0.0
-            rec_snr = (
-                float(np.mean(seg_actual_snr)) if seg_actual_snr else float(snr_db)
-            )
-
-            cls_preds.append(rec_cls_pred)
-            sep_preds.append(rec_sep_pred)
-            cls_conf.append(rec_cls_conf)
-            sep_conf.append(rec_sep_conf)
-            actual_snrs.append(rec_snr)
-
-        # Recording-level metrics
-        n = len(coi_eval)
-        cls_recall = float(np.mean(np.array(cls_preds) == 1)) if n else 0.0
-        sep_recall = float(np.mean(np.array(sep_preds) == 1)) if n else 0.0
+                # Compute energy on noisy mixture
+                mixture_metrics = compute_energy_metrics(mixture, pipeline.sample_rate)
+                
+                # Separate noisy mixture
+                separated = pipeline._separate(mixture)
+                
+                # Compute energy on separated noisy signal
+                sep_noisy_metrics = compute_energy_metrics(separated, pipeline.sample_rate)
+                
+                # Calculate energy degradation from clean baseline
+                noisy_rms_delta = sep_noisy_metrics["rms_db"] - baseline.original_clean_rms_db
+                noisy_sel_delta = sep_noisy_metrics["sel_db"] - baseline.original_clean_sel_db
+                
+                # Create segment metrics with all data
+                seg_metrics = SegmentEnergyMetrics(
+                    filename=row.filename,
+                    recording_idx=rec_idx,
+                    segment_idx=seg_idx,
+                    snr_db=float(snr_db),
+                    # Copy clean baseline values
+                    original_clean_rms_db=baseline.original_clean_rms_db,
+                    original_clean_sel_db=baseline.original_clean_sel_db,
+                    separated_clean_rms_db=baseline.separated_clean_rms_db,
+                    separated_clean_sel_db=baseline.separated_clean_sel_db,
+                    clean_sep_rms_delta=baseline.clean_sep_rms_delta,
+                    clean_sep_sel_delta=baseline.clean_sep_sel_delta,
+                    # Add noisy experiment values
+                    mixture_rms_db=mixture_metrics["rms_db"],
+                    mixture_sel_db=mixture_metrics["sel_db"],
+                    separated_noisy_rms_db=sep_noisy_metrics["rms_db"],
+                    separated_noisy_sel_db=sep_noisy_metrics["sel_db"],
+                    noisy_sep_rms_delta=noisy_rms_delta,
+                    noisy_sep_sel_delta=noisy_sel_delta,
+                    actual_snr_db=actual_snr,
+                )
+                
+                snr_segment_metrics.append(seg_metrics)
+                all_segment_metrics.append(seg_metrics)
         
-        # Segment-level metrics (shows actual per-segment robustness to noise)
-        n_segs = len(all_seg_cls_preds)
-        cls_seg_recall = float(np.mean(np.array(all_seg_cls_preds) == 1)) if n_segs else 0.0
-        sep_seg_recall = float(np.mean(np.array(all_seg_sep_preds) == 1)) if n_segs else 0.0
-        cls_seg_mean_conf = float(np.mean(all_seg_cls_conf)) if all_seg_cls_conf else 0.0
-        sep_seg_mean_conf = float(np.mean(all_seg_sep_conf)) if all_seg_sep_conf else 0.0
+        # Compute aggregate statistics for this SNR level
+        n_segs = len(snr_segment_metrics)
         
-        # Separation gains at this SNR level
-        seg_recall_gain = sep_seg_recall - cls_seg_recall
-        seg_conf_gain = sep_seg_mean_conf - cls_seg_mean_conf
+        mixture_rms = [m.mixture_rms_db for m in snr_segment_metrics]
+        mixture_sel = [m.mixture_sel_db for m in snr_segment_metrics]
+        sep_noisy_rms = [m.separated_noisy_rms_db for m in snr_segment_metrics]
+        sep_noisy_sel = [m.separated_noisy_sel_db for m in snr_segment_metrics]
+        rms_deltas = [m.noisy_sep_rms_delta for m in snr_segment_metrics]
+        sel_deltas = [m.noisy_sep_sel_delta for m in snr_segment_metrics]
+        actual_snrs = [m.actual_snr_db for m in snr_segment_metrics]
+        
+        snr_stats = SNREnergyStats(
+            snr_db=float(snr_db),
+            n_segments=n_segs,
+            mean_mixture_rms_db=float(np.mean(mixture_rms)),
+            mean_mixture_sel_db=float(np.mean(mixture_sel)),
+            mean_separated_noisy_rms_db=float(np.mean(sep_noisy_rms)),
+            mean_separated_noisy_sel_db=float(np.mean(sep_noisy_sel)),
+            mean_rms_degradation_db=float(np.mean(rms_deltas)),
+            mean_sel_degradation_db=float(np.mean(sel_deltas)),
+            std_rms_degradation_db=float(np.std(rms_deltas)),
+            std_sel_degradation_db=float(np.std(sel_deltas)),
+            mean_actual_snr_db=float(np.mean(actual_snrs)),
+        )
+        
+        per_snr_stats.append(snr_stats)
         
         # Log results for this SNR level
-        mean_actual_snr = float(np.mean(actual_snrs)) if actual_snrs else float(snr_db)
-        snr_error = abs(mean_actual_snr - snr_db)
-        
-        print(f"  Target SNR: {snr_db:.1f} dB, Actual: {mean_actual_snr:.1f} dB (error: {snr_error:.2f} dB)")
-        print(f"  Recording-level: cls_recall={cls_recall:.3f}, sep_recall={sep_recall:.3f}")
-        print(f"  Segment-level ({n_segs} segs): cls_recall={cls_seg_recall:.3f}, sep_recall={sep_seg_recall:.3f}, "
-              f"gain={seg_recall_gain:+.3f}")
-        
-        # Verify noise consistency by checking if we're actually degrading performance as SNR decreases
-        if len(per_snr) > 0 and snr_db < per_snr[-1].snr_db:
-            prev_cls_recall = per_snr[-1].cls_only_segment_recall
-            if cls_seg_recall > prev_cls_recall:
-                print(f"  ⚠ WARNING: Recall INCREASED from {prev_cls_recall:.3f} to {cls_seg_recall:.3f} "
-                      f"despite lower SNR ({per_snr[-1].snr_db:.1f} → {snr_db:.1f} dB)")
-
-
-        per_snr.append(
-            SNRStats(
-                snr_db=float(snr_db),
-                n_samples=n,
-                cls_only_recall=cls_recall,
-                sep_cls_recall=sep_recall,
-                cls_only_mean_conf=float(np.mean(cls_conf)) if cls_conf else 0.0,
-                sep_cls_mean_conf=float(np.mean(sep_conf)) if sep_conf else 0.0,
-                cls_only_std_conf=float(np.std(cls_conf)) if cls_conf else 0.0,
-                sep_cls_std_conf=float(np.std(sep_conf)) if sep_conf else 0.0,
-                mean_actual_snr_db=mean_actual_snr,
-                n_segments=n_segs,
-                cls_only_segment_recall=cls_seg_recall,
-                sep_cls_segment_recall=sep_seg_recall,
-                cls_only_segment_mean_conf=cls_seg_mean_conf,
-                sep_cls_segment_mean_conf=sep_seg_mean_conf,
-                segment_recall_gain=seg_recall_gain,
-                segment_conf_gain=seg_conf_gain,
-            )
-        )
-
-    # Compact summary
-    summary = {
-        # Recording-level gains (any() aggregation - may stay at 1.0 due to weak labels)
-        "best_sep_gain_recall": float(
-            max((s.sep_cls_recall - s.cls_only_recall) for s in per_snr)
-            if per_snr
-            else 0.0
-        ),
-        "mean_sep_gain_recall": float(
-            np.mean([s.sep_cls_recall - s.cls_only_recall for s in per_snr])
-            if per_snr
-            else 0.0
-        ),
-        # Segment-level gains (shows actual per-segment robustness improvement)
-        "best_sep_gain_segment_recall": float(
-            max((s.sep_cls_segment_recall - s.cls_only_segment_recall) for s in per_snr)
-            if per_snr
-            else 0.0
-        ),
-        "mean_sep_gain_segment_recall": float(
-            np.mean([s.sep_cls_segment_recall - s.cls_only_segment_recall for s in per_snr])
-            if per_snr
-            else 0.0
-        ),
-    }
+        print(f"  Segments: {n_segs}")
+        print(f"  Target SNR: {snr_db:.1f} dB, Actual: {snr_stats.mean_actual_snr_db:.1f} dB")
+        print(f"  Separated RMS: {snr_stats.mean_separated_noisy_rms_db:.2f} dBFS "
+              f"(degradation: {snr_stats.mean_rms_degradation_db:+.2f} dB)")
+        print(f"  Separated SEL: {snr_stats.mean_separated_noisy_sel_db:.2f} dBFS "
+              f"(degradation: {snr_stats.mean_sel_degradation_db:+.2f} dB)")
     
     # Print summary statistics
     print(f"\n{'=' * 60}")
     print("EXPERIMENT SUMMARY")
     print(f"{'=' * 60}")
-    if per_snr:
-        print("Segment-Level Recall Trend (Classification Only):")
-        snr_sorted = sorted(per_snr, key=lambda x: x.snr_db, reverse=True)
-        for s in snr_sorted:
-            print(f"  SNR {s.snr_db:+6.1f} dB: {s.cls_only_segment_recall:.3f}")
-        
-        # Check if trend is correct (should generally decrease with lower SNR)
-        recalls = [s.cls_only_segment_recall for s in snr_sorted]
-        trend_correct = all(recalls[i] >= recalls[i+1] for i in range(len(recalls)-1))
-        if trend_correct:
-            print("✓ Recall correctly decreases with lower SNR")
-        else:
-            print("⚠ WARNING: Recall does NOT consistently decrease with lower SNR!")
-            print("  This suggests an issue with noise generation or mixing.")
+    print("Energy Degradation Trend (Separated Signal vs Clean Baseline):")
+    for s in per_snr_stats:
+        print(f"  SNR {s.snr_db:+6.1f} dB: RMS {s.mean_rms_degradation_db:+6.2f} dB, "
+              f"SEL {s.mean_sel_degradation_db:+6.2f} dB")
     print(f"{'=' * 60}\n")
 
-    return {
-        "snr_results": [s.__dict__ for s in per_snr],
-        "summary": summary,
-    }
+    return all_segment_metrics, per_snr_stats
 
 
 def main() -> None:
@@ -460,25 +484,17 @@ def main() -> None:
         )
         SEP_CHECKPOINT = str(PROJECT_ROOT / "src/models/sudormrf/checkpoints/best_model.pt")
 
-    # Classifier checkpoint (shared across all separation models)
-    CLS_WEIGHTS = str(
-        PROJECT_ROOT
-        / "src/validation_functions/classification_models/plane_clasifier/results/checkpoints/final_model.weights.h5"
-    )
-
     # Dataset filtering
     SPLIT = "test"
     EXCLUDE_DATASETS = ["risoux_test"]  # keep independent set out of this experiment
 
     # Experiment sweep
     # Extended range to -20 dB to test extreme noise conditions
-    # This matches the range from validation data and ensures we see classifier degradation
     SNR_START = 25
     SNR_END = -20
     NUM_STEPS = 10
     SNR_LEVELS_DB = list(np.linspace(SNR_START, SNR_END, NUM_STEPS))
 
-    MAX_SAMPLES = 200
     SEED = 42
 
     # Output
@@ -489,12 +505,12 @@ def main() -> None:
     print("Initializing pipeline...")
     pipeline = ValidationPipeline(base_path=BASE_PATH)
     
-    # Load models with appropriate configuration
+    # Load ONLY separator model (no classifier needed for energy metrics)
     if USE_TUSS:
         print(f"Using TUSS model with prompts: COI='{TUSS_COI_PROMPT}', BG='{TUSS_BG_PROMPT}'")
         pipeline.load_models(
             sep_checkpoint=SEP_CHECKPOINT,
-            cls_weights=CLS_WEIGHTS,
+            cls_weights=None,  # No classifier needed
             use_tuss=True,
             tuss_coi_prompt=TUSS_COI_PROMPT,
             tuss_bg_prompt=TUSS_BG_PROMPT,
@@ -505,7 +521,7 @@ def main() -> None:
         print("Using SudoRM-RF model")
         pipeline.load_models(
             sep_checkpoint=SEP_CHECKPOINT,
-            cls_weights=CLS_WEIGHTS,
+            cls_weights=None,  # No classifier needed
             use_clapsep=False,
             use_tuss=False,
             use_pann=False,
@@ -530,7 +546,7 @@ def main() -> None:
 
     print(f"\n{'=' * 60}")
     print(f"Dataset Statistics:")
-    print(f"  COI samples:        {len(df_coi)}")
+    print(f"  COI samples:        {len(df_coi)} (using ALL samples)")
     print(f"  Background samples: {len(df_bg)} total, {len(df_bg_clean)} clean")
     if n_contaminated > 0:
         print(f"  Contaminated removed: {n_contaminated}")
@@ -538,39 +554,70 @@ def main() -> None:
     print(f"{'=' * 60}\n")
 
     # Compute clean baseline first (no noise added)
-    clean_baseline = _compute_clean_baseline(
+    clean_baseline_stats, baseline_map = _compute_clean_baseline_energy(
         pipeline=pipeline,
         df_coi=df_coi,
-        max_samples=MAX_SAMPLES,
         seed=SEED,
     )
 
-    results = run_noise_increase_experiment(
+    # Run noise increase experiment
+    all_segment_metrics, per_snr_stats = run_noise_increase_experiment(
         pipeline=pipeline,
         df_coi=df_coi,
+        baseline_map=baseline_map,
         snr_levels_db=SNR_LEVELS_DB,
-        max_samples=MAX_SAMPLES,
         seed=SEED,
     )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_name = "tuss" if USE_TUSS else "sudormrf"
-    out_json = OUTPUT_DIR / f"noise_increase_results_artificial_{model_name}_{ts}.json"
-    out_csv = OUTPUT_DIR / f"noise_increase_results_artificial_{model_name}_{ts}.csv"
+    out_json = OUTPUT_DIR / f"noise_increase_energy_{model_name}_{ts}.json"
+    out_csv = OUTPUT_DIR / f"noise_increase_energy_{model_name}_{ts}.csv"
 
+    # Prepare detailed CSV with all segment-level data
+    # Include clean baseline segments (snr_db=None) and all noisy SNR levels
+    clean_baseline_segments = list(baseline_map.values())
+    all_segments_for_csv = clean_baseline_segments + all_segment_metrics
+    
+    # Convert to DataFrame for CSV export
+    csv_data = []
+    for seg in all_segments_for_csv:
+        csv_data.append({
+            "filename": seg.filename,
+            "recording_idx": seg.recording_idx,
+            "segment_idx": seg.segment_idx,
+            "snr_db": seg.snr_db if seg.snr_db is not None else "clean",
+            "original_clean_rms_db": seg.original_clean_rms_db,
+            "original_clean_sel_db": seg.original_clean_sel_db,
+            "separated_clean_rms_db": seg.separated_clean_rms_db,
+            "separated_clean_sel_db": seg.separated_clean_sel_db,
+            "mixture_rms_db": seg.mixture_rms_db,
+            "mixture_sel_db": seg.mixture_sel_db,
+            "separated_noisy_rms_db": seg.separated_noisy_rms_db,
+            "separated_noisy_sel_db": seg.separated_noisy_sel_db,
+            "clean_sep_rms_delta": seg.clean_sep_rms_delta,
+            "clean_sep_sel_delta": seg.clean_sep_sel_delta,
+            "noisy_sep_rms_delta": seg.noisy_sep_rms_delta,
+            "noisy_sep_sel_delta": seg.noisy_sep_sel_delta,
+            "actual_snr_db": seg.actual_snr_db,
+        })
+    
+    df_results = pd.DataFrame(csv_data)
+    df_results.to_csv(out_csv, index=False)
+
+    # Prepare JSON with config, baseline, per-SNR stats, and summary
     payload = {
         "config": {
             "base_path": BASE_PATH,
             "data_csv": DATA_CSV,
             "sep_checkpoint": SEP_CHECKPOINT,
-            "cls_weights": CLS_WEIGHTS,
             "model_type": "TUSS" if USE_TUSS else "SudoRM-RF",
             "split": SPLIT,
             "exclude_datasets": EXCLUDE_DATASETS,
             "snr_levels_db": SNR_LEVELS_DB,
-            "max_samples": MAX_SAMPLES,
             "seed": SEED,
             "noise_type": "artificial_white_noise",
+            "experiment_type": "energy_preservation",
         },
         "dataset_stats": {
             "n_coi_samples": len(df_coi),
@@ -578,8 +625,17 @@ def main() -> None:
             "n_background_clean": len(df_bg_clean),
             "n_contaminated_removed": n_contaminated,
         },
-        "clean_baseline": clean_baseline.__dict__,
-        **results,
+        "clean_baseline": clean_baseline_stats.__dict__,
+        "snr_results": [s.__dict__ for s in per_snr_stats],
+        "summary": {
+            "total_segments": len(all_segments_for_csv),
+            "clean_baseline_segments": len(clean_baseline_segments),
+            "noisy_experiment_segments": len(all_segment_metrics),
+            "max_rms_degradation_db": float(max(s.mean_rms_degradation_db for s in per_snr_stats)),
+            "max_sel_degradation_db": float(max(s.mean_sel_degradation_db for s in per_snr_stats)),
+            "min_rms_degradation_db": float(min(s.mean_rms_degradation_db for s in per_snr_stats)),
+            "min_sel_degradation_db": float(min(s.mean_sel_degradation_db for s in per_snr_stats)),
+        },
     }
     
     # Add TUSS-specific config if applicable
@@ -590,10 +646,11 @@ def main() -> None:
     with out_json.open("w") as f:
         json.dump(payload, f, indent=2)
 
-    pd.DataFrame(results["snr_results"]).to_csv(out_csv, index=False)
-
-    print(f"Saved JSON: {out_json}")
+    print(f"\nSaved JSON: {out_json}")
     print(f"Saved CSV:  {out_csv}")
+    print(f"\nCSV contains {len(df_results)} rows:")
+    print(f"  - {len(clean_baseline_segments)} clean baseline segments")
+    print(f"  - {len(all_segment_metrics)} noisy experiment segments across {len(SNR_LEVELS_DB)} SNR levels")
 
 
 if __name__ == "__main__":
