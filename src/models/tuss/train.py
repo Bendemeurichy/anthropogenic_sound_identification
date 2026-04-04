@@ -1317,7 +1317,7 @@ def create_model(
     
     if resume_ckpt_path and Path(resume_ckpt_path).is_file():
         print(f"Preparing to resume from fine-tuned checkpoint: {resume_ckpt_path}")
-        resume_ckpt = torch.load(resume_ckpt_path, map_location="cpu")
+        resume_ckpt = torch.load(resume_ckpt_path, map_location="cpu", weights_only=False)
         resume_state_dict = resume_ckpt.get("model_state_dict", {})
         
         # Extract existing prompt names from checkpoint
@@ -1349,7 +1349,7 @@ def create_model(
         if resume_state_dict is None:
             ckpt_path = Path(pretrained_path) / "checkpoints" / "model.pth"
             print(f"Loading pretrained weights from {ckpt_path}")
-            state_dict = torch.load(ckpt_path, map_location="cpu")
+            state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             # Strip 'model.' prefix that Lightning checkpoints add
             state_dict = {
                 (k[len("model.") :] if k.startswith("model.") else k): v
@@ -1865,7 +1865,7 @@ def train(config: Config, timestamp: str | None = None):
     resume_path = getattr(config.training, "resume_from", "") or ""
     if resume_path and Path(resume_path).is_file():
         print(f"Resuming training state from checkpoint: {resume_path}")
-        ckpt = torch.load(resume_path, map_location=config.training.device)
+        ckpt = torch.load(resume_path, map_location=config.training.device, weights_only=False)
         # Model weights were already loaded in create_model(), only load optimizer/scheduler/history
         
         # Try to load optimizer state, but skip if parameter groups have changed
