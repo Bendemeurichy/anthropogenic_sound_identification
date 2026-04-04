@@ -1323,7 +1323,7 @@ def create_model(
         # Extract existing prompt names from checkpoint
         for key in resume_state_dict.keys():
             if key.startswith("separator.prompts."):
-                prompt_name = key.replace("separator.prompts.", "")
+                prompt_name = key.replace("separator.prompts.", "", 1)
                 existing_prompts_in_ckpt.add(prompt_name)
         
         if existing_prompts_in_ckpt:
@@ -1387,6 +1387,21 @@ def create_model(
         if init_from in prompts_dict:
             return prompts_dict[init_from].data.clone()
         return torch.randn(emb_dim, 1, 1) * 0.02
+
+    # CRITICAL: First inject ALL prompts from checkpoint so they can be loaded
+    # PyTorch's ParameterDict won't auto-create keys during load_state_dict
+    if resume_state_dict is not None:
+        print(f"Pre-injecting prompts from checkpoint for loading...")
+        for key in resume_state_dict.keys():
+            if key.startswith("separator.prompts."):
+                prompt_name = key.replace("separator.prompts.", "", 1)
+                if prompt_name not in prompts_dict:
+                    # Create placeholder parameter with correct shape from checkpoint
+                    saved_tensor = resume_state_dict[key]
+                    prompts_dict[prompt_name] = torch.nn.Parameter(
+                        torch.zeros_like(saved_tensor)
+                    )
+                    print(f"  Pre-injected prompt '{prompt_name}' from checkpoint")
 
     new_prompts = config.model.coi_prompts + [config.model.bg_prompt]
     init_sources = [config.model.coi_prompt_init_from] * len(
@@ -1526,9 +1541,11 @@ def get_prompts_from_checkpoint(checkpoint_path: str | Path) -> set[str]:
         model_state = ckpt.get("model_state_dict", {})
         
         prompts = set()
+        prompt_prefix = "separator.prompts."
         for key in model_state.keys():
-            if key.startswith("separator.prompts."):
-                prompt_name = key.replace("separator.prompts.", "")
+            if key.startswith(prompt_prefix):
+                # Extract just the prompt name (use replace with count=1 to be explicit)
+                prompt_name = key.replace(prompt_prefix, "", 1)
                 prompts.add(prompt_name)
         
         return prompts

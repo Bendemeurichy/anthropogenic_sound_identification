@@ -40,7 +40,8 @@ def get_prompts_from_checkpoint(checkpoint_path: str | Path) -> dict:
     
     for key, value in model_state.items():
         if key.startswith("separator.prompts."):
-            prompt_name = key.replace("separator.prompts.", "")
+            # Extract just the prompt name (use replace with count=1 to be explicit)
+            prompt_name = key.replace("separator.prompts.", "", 1)
             prompts_in_state[prompt_name] = value.shape
     
     return {

@@ -367,7 +367,8 @@ class TUSSInference:
         prompt_prefix = "separator.prompts."
         for key in state_dict.keys():
             if key.startswith(prompt_prefix):
-                prompt_name = key[len(prompt_prefix):]
+                # Extract prompt name (use replace with count=1 to be explicit)
+                prompt_name = key.replace(prompt_prefix, "", 1)
                 if prompt_name not in prompts_dict:
                     # Infer embedding dimension from the saved tensor shape
                     saved_tensor = state_dict[key]
