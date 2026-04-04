@@ -1906,7 +1906,17 @@ def train(config: Config, timestamp: str | None = None):
         
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         global_step = int(ckpt.get("global_step", 0))
-        best_val_loss = float(ckpt.get("val_loss", float("inf")))
+        
+        # Reset best_val_loss when extending with new prompts
+        # Otherwise new prompts won't get a chance to save checkpoints
+        if is_extending:
+            best_val_loss = float("inf")
+            epochs_without_improvement = 0
+            print("  ⚠️  Resetting best_val_loss to inf (new prompts need to learn)")
+            print(f"     Previous checkpoint had val_loss: {ckpt.get('val_loss', 'N/A')}")
+        else:
+            best_val_loss = float(ckpt.get("val_loss", float("inf")))
+        
         history = ckpt.get("history", history)
         
         # Restore scheduler state so the LR curve continues seamlessly.
