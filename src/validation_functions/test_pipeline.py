@@ -71,8 +71,9 @@ from src.models.tuss.inference import TUSSInference
 from src.validation_functions.classification_models.plane_clasifier.config import (
     TrainingConfig,
 )
-from src.validation_functions.classification_models.plane_clasifier.inference import (
-    PlaneClassifierInference,
+from src.validation_functions.classification_models.Classifier import (
+    create_classifier,
+    AudioClassifier,
 )
 
 
@@ -656,6 +657,7 @@ class ValidationPipeline:
         self,
         sep_checkpoint: str = None,
         cls_weights: str = None,
+        classifier_type: str = "plane",
         use_clapsep: bool = False,
         use_tuss: bool = False,
         tuss_coi_prompt: str = "airplane",
@@ -664,12 +666,18 @@ class ValidationPipeline:
         clapsep_text_neg: str = "",
         use_pann: bool = True,
         use_ast: bool = True,
+        use_birdnet: bool = False,
     ):
         """Load separation and classification models.
 
         Args:
             sep_checkpoint: Path to the separation model checkpoint.
-            cls_weights: Path to the CNN classifier weights.
+            cls_weights: Path to the CNN classifier weights (required for classifier_type="plane").
+            classifier_type: Type of primary classifier to use. One of:
+                - "plane": PlaneClassifier (custom CNN for airplane detection)
+                - "pann": PANN AudioTagging (AudioSet-based airplane detection)
+                - "ast": AST (Audio Spectrogram Transformer for AudioSet)
+                - "birdnet": BirdNET (bird species detection)
             use_clapsep: If True, load the CLAPSep separator instead of SudoRM-RF.
             use_tuss: If True, load the TUSS separator instead of SudoRM-RF.
             tuss_coi_prompt: Prompt name for TUSS Class of Interest (default: "airplane").
@@ -680,6 +688,8 @@ class ValidationPipeline:
                 additional classifier.  Requires the ``panns_inference`` package.
             use_ast: If True (default), load the AST model from HuggingFace as an
                 additional classifier.  Requires the ``transformers`` package.
+            use_birdnet: If True, load the BirdNET model as an additional classifier.
+                Requires the ``birdnet`` package.
         """
         sep_path = sep_checkpoint or self.SEP_CHECKPOINT
         cls_path = cls_weights or self.CLS_WEIGHTS
@@ -770,26 +780,71 @@ class ValidationPipeline:
         # (The target_classes list has already been recovered and printed above;
         # no need to repeat it.)
 
-        print(f"Loading classification model from {cls_path}")
-        config = TrainingConfig(
-            sample_rate=self.classifier_sample_rate, audio_duration=self.segment_length
-        )
-        self.classifier = PlaneClassifierInference(cls_path, config)
+        # ------------------------------------------------------------------
+        # Primary classifier (using new unified interface)
+        # ------------------------------------------------------------------
+        print(f"Loading primary {classifier_type} classifier...")
+        
+        if classifier_type == "plane":
+            cls_path = cls_weights or self.CLS_WEIGHTS
+            print(f"  from {cls_path}")
+            config = TrainingConfig(
+                sample_rate=self.classifier_sample_rate, audio_duration=self.segment_length
+            )
+            self.classifier = create_classifier(
+                "plane",
+                weights_path=cls_path,
+                config=config,
+                device=self.device,
+            )
+        elif classifier_type == "pann":
+            self.classifier = create_classifier(
+                "pann",
+                device=self.device,
+                positive_labels=PANN_POSITIVE_LABELS,
+            )
+            # Update classifier_sample_rate to match PANN's requirement
+            self.classifier_sample_rate = self.classifier.sample_rate
+        elif classifier_type == "ast":
+            self.classifier = create_classifier(
+                "ast",
+                device=self.device,
+                positive_labels=AST_POSITIVE_LABELS,
+            )
+            # Update classifier_sample_rate to match AST's requirement
+            self.classifier_sample_rate = self.classifier.sample_rate
+        elif classifier_type == "birdnet":
+            self.classifier = create_classifier(
+                "birdnet",
+                device=self.device,
+                detect_any_bird=True,  # Detect any bird species
+            )
+            # Update classifier_sample_rate to match BirdNET's requirement
+            self.classifier_sample_rate = self.classifier.sample_rate
+        else:
+            raise ValueError(
+                f"Unknown classifier_type: {classifier_type}. "
+                f"Must be one of: 'plane', 'pann', 'ast', 'birdnet'"
+            )
+        
         self.classifier_segment_samples = int(
             self.classifier_sample_rate * self.segment_length
         )
+        print(f"  Classifier sample rate: {self.classifier_sample_rate} Hz")
+        print(f"  Classifier segment samples: {self.classifier_segment_samples}")
 
         # ------------------------------------------------------------------
-        # Optional: PANN AudioTagging classifier
+        # Optional: PANN AudioTagging classifier (as auxiliary)
         # ------------------------------------------------------------------
-        if use_pann:
+        if use_pann and classifier_type != "pann":
             if _pann_available:
                 try:
-                    from src.validation_functions.classification_models.pann_inference import (
-                        load_pann_model as _load_pann,
+                    self.pann_model = create_classifier(
+                        "pann",
+                        device=self.device,
+                        positive_labels=PANN_POSITIVE_LABELS,
                     )
-
-                    self.pann_model = _load_pann(device=self.device)
+                    print("Loaded auxiliary PANN classifier")
                 except Exception as e:
                     print(
                         f"[Warning] Failed to load PANN model: {e}",
@@ -803,26 +858,53 @@ class ValidationPipeline:
                 )
 
         # ------------------------------------------------------------------
-        # Optional: AST (Audio Spectrogram Transformer) classifier
+        # Optional: AST (Audio Spectrogram Transformer) classifier (as auxiliary)
         # ------------------------------------------------------------------
-        if use_ast:
+        if use_ast and classifier_type != "ast":
             if _ast_available:
                 try:
-                    from src.validation_functions.classification_models.ast_inference import (
-                        load_ast_model as _load_ast,
+                    self.ast_model = create_classifier(
+                        "ast",
+                        device=self.device,
+                        positive_labels=AST_POSITIVE_LABELS,
                     )
-
-                    self.ast_extractor, self.ast_model = _load_ast(device=self.device)
+                    # For backward compatibility, also store the extractor reference
+                    # (though it's now internal to the wrapper)
+                    self.ast_extractor = None  # Not needed with new interface
+                    print("Loaded auxiliary AST classifier")
                 except Exception as e:
                     print(
                         f"[Warning] Failed to load AST model: {e}",
                         file=sys.stderr,
                     )
-                    self.ast_extractor = None
                     self.ast_model = None
+                    self.ast_extractor = None
             else:
                 print(
                     "[Warning] AST classifier requested but transformers is not installed – skipping.",
+                    file=sys.stderr,
+                )
+
+        # ------------------------------------------------------------------
+        # Optional: BirdNET classifier (as auxiliary)
+        # ------------------------------------------------------------------
+        self.birdnet_model = None
+        if use_birdnet and classifier_type != "birdnet":
+            try:
+                self.birdnet_model = create_classifier(
+                    "birdnet",
+                    device=self.device,
+                    detect_any_bird=True,
+                )
+                print("Loaded auxiliary BirdNET classifier")
+            except ImportError as e:
+                print(
+                    f"[Warning] BirdNET classifier requested but package is not installed: {e}",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                print(
+                    f"[Warning] Failed to load BirdNET model: {e}",
                     file=sys.stderr,
                 )
 
@@ -1018,7 +1100,11 @@ class ValidationPipeline:
         return result
 
     def _classify(self, waveform: torch.Tensor) -> Tuple[int, float]:
-        """Run classification. Returns (prediction, confidence)."""
+        """Run classification using the primary classifier. Returns (prediction, confidence).
+        
+        The classifier now handles resampling internally if needed, but we still
+        resample here to ensure the waveform is at the correct sample rate.
+        """
         wav = waveform.detach().cpu()
 
         if self.classifier_sample_rate != self.sample_rate:
@@ -1036,9 +1122,8 @@ class ValidationPipeline:
         else:
             wav = wav[: self.classifier_segment_samples]
 
-        result = self.classifier.predict_waveform(wav.numpy())
-        pred = 1 if result["prediction"] == CNN_POSITIVE_CLASS else 0
-        return pred, result["confidence"]
+        # Call the classifier using the unified interface
+        return self.classifier(wav)
 
     def _create_mixture(
         self,
@@ -1181,57 +1266,92 @@ class ValidationPipeline:
     def _classify_pann(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Classify using the PANN AudioTagging model.
 
-        Resamples *waveform* from ``self.sample_rate`` to the 32 kHz required
-        by PANN internally via :func:`run_pann_inference`.
+        Resamples *waveform* from ``self.sample_rate`` to the PANN's required
+        sample rate internally.
 
         Returns:
             ``(prediction, confidence)`` – 1/0 and the max sigmoid score across
-            all :data:`PANN_POSITIVE_LABELS`.
+            all positive labels.
         """
         if self.pann_model is None:
             raise RuntimeError(
                 "PANN model is not loaded. Call load_models(use_pann=True)."
             )
-        from src.validation_functions.classification_models.pann_inference import (
-            run_pann_inference as _run_pann,
-        )
-
-        return _run_pann(
-            self.pann_model,
-            waveform,
-            self.sample_rate,
-            PANN_POSITIVE_LABELS,
-        )
+        
+        # Resample if needed
+        wav = waveform.detach().cpu()
+        pann_sr = self.pann_model.sample_rate
+        
+        if self.sample_rate != pann_sr:
+            key = (self.sample_rate, pann_sr)
+            if key not in self._resamplers:
+                self._resamplers[key] = torchaudio.transforms.Resample(
+                    self.sample_rate, pann_sr
+                )
+            wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
+        
+        # Call the wrapper using unified interface
+        return self.pann_model(wav)
 
     def _classify_ast(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Classify using the AST (Audio Spectrogram Transformer) model.
 
-        Resamples *waveform* from ``self.sample_rate`` to the 16 kHz required
-        by AST internally via :func:`run_ast_inference`.
+        Resamples *waveform* from ``self.sample_rate`` to the AST's required
+        sample rate internally.
 
         Returns:
             ``(prediction, confidence)`` – 1/0 and the max sigmoid score across
-            all :data:`AST_POSITIVE_LABELS`.
+            all positive labels.
         """
         if self.ast_model is None:
             raise RuntimeError(
                 "AST model is not loaded. Call load_models(use_ast=True)."
             )
-        assert (
-            self.ast_extractor is not None
-        ), "ast_extractor should be set whenever ast_model is set"
-        from src.validation_functions.classification_models.ast_inference import (
-            run_ast_inference as _run_ast,
-        )
+        
+        # Resample if needed
+        wav = waveform.detach().cpu()
+        ast_sr = self.ast_model.sample_rate
+        
+        if self.sample_rate != ast_sr:
+            key = (self.sample_rate, ast_sr)
+            if key not in self._resamplers:
+                self._resamplers[key] = torchaudio.transforms.Resample(
+                    self.sample_rate, ast_sr
+                )
+            wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
+        
+        # Call the wrapper using unified interface
+        return self.ast_model(wav)
+    
+    def _classify_birdnet(self, waveform: torch.Tensor) -> Tuple[int, float]:
+        """Classify using the BirdNET model.
 
-        return _run_ast(
-            self.ast_extractor,
-            self.ast_model,
-            waveform,
-            self.sample_rate,
-            AST_POSITIVE_LABELS,
-            device=self.device,
-        )
+        Resamples *waveform* from ``self.sample_rate`` to BirdNET's required
+        sample rate internally.
+
+        Returns:
+            ``(prediction, confidence)`` – 1/0 and the max confidence score across
+            all detected bird species.
+        """
+        if self.birdnet_model is None:
+            raise RuntimeError(
+                "BirdNET model is not loaded. Call load_models(use_birdnet=True)."
+            )
+        
+        # Resample if needed
+        wav = waveform.detach().cpu()
+        birdnet_sr = self.birdnet_model.sample_rate
+        
+        if self.sample_rate != birdnet_sr:
+            key = (self.sample_rate, birdnet_sr)
+            if key not in self._resamplers:
+                self._resamplers[key] = torchaudio.transforms.Resample(
+                    self.sample_rate, birdnet_sr
+                )
+            wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
+        
+        # Call the wrapper using unified interface
+        return self.birdnet_model(wav)
 
     def _classify_separated(
         self,
