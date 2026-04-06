@@ -68,6 +68,7 @@ from src.models.sudormrf.inference import COI_HEAD_INDEX as SUDORMRF_COI_HEAD
 from src.models.sudormrf.inference import SeparationInference
 from src.models.tuss.inference import COI_HEAD_INDEX as TUSS_COI_HEAD
 from src.models.tuss.inference import TUSSInference
+from src.pipeline.separation_pipeline import SeparationPipeline
 from src.validation_functions.classification_models.plane_clasifier.config import (
     TrainingConfig,
 )
@@ -659,7 +660,11 @@ class ValidationPipeline:
         use_clapsep: bool = False,
         use_tuss: bool = False,
         tuss_coi_prompt: str = "airplane",
+        tuss_coi_prompts: Optional[List[str]] = None,
         tuss_bg_prompt: str = "background",
+        tuss_enable_mask_recycling: bool = False,
+        tuss_cache_size: int = 5,
+        tuss_similarity_threshold: float = 0.85,
         clapsep_text_pos: str = "train passing",
         clapsep_text_neg: str = "",
         use_pann: bool = True,
@@ -672,8 +677,15 @@ class ValidationPipeline:
             cls_weights: Path to the CNN classifier weights.
             use_clapsep: If True, load the CLAPSep separator instead of SudoRM-RF.
             use_tuss: If True, load the TUSS separator instead of SudoRM-RF.
-            tuss_coi_prompt: Prompt name for TUSS Class of Interest (default: "airplane").
+            tuss_coi_prompt: Single COI prompt for backward compatibility (default: "airplane").
+                            Ignored if tuss_coi_prompts is provided.
+            tuss_coi_prompts: List of COI prompts for multi-COI mode (e.g., ["airplane", "bird"]).
+                             If provided, overrides tuss_coi_prompt.
             tuss_bg_prompt: Prompt name for TUSS background (default: "background").
+            tuss_enable_mask_recycling: If True, wrap TUSS in SeparationPipeline with
+                                       mask recycling (default: False).
+            tuss_cache_size: Number of segments to cache for mask recycling (default: 5).
+            tuss_similarity_threshold: Cosine similarity threshold for mask reuse (default: 0.85).
             clapsep_text_pos: Positive text prompt for CLAPSep.
             clapsep_text_neg: Negative text prompt for CLAPSep.
             use_pann: If True (default), load the PANN AudioTagging model as an
@@ -690,18 +702,43 @@ class ValidationPipeline:
 
         if use_tuss:
             print(f"Loading TUSS model from {sep_path}")
+            
+            # Determine COI prompts
+            coi_prompts = tuss_coi_prompts if tuss_coi_prompts is not None else tuss_coi_prompt
+            
             print(
-                f"  COI prompt: '{tuss_coi_prompt}', Background prompt: '{tuss_bg_prompt}'"
+                f"  COI prompt(s): {coi_prompts}, Background prompt: '{tuss_bg_prompt}'"
             )
-            self.separator = TUSSInference.from_checkpoint(
+            
+            # Load base TUSS model
+            tuss_model = TUSSInference.from_checkpoint(
                 sep_path,
                 device=self.device,
-                coi_prompt=tuss_coi_prompt,
+                coi_prompts=coi_prompts,
                 bg_prompt=tuss_bg_prompt,
             )
+            
+            # Wrap in SeparationPipeline if mask recycling is enabled
+            if tuss_enable_mask_recycling:
+                print(
+                    f"  Enabling mask recycling: cache_size={tuss_cache_size}, "
+                    f"threshold={tuss_similarity_threshold}"
+                )
+                self.separator = SeparationPipeline(
+                    tuss_inference=tuss_model,
+                    enable_mask_recycling=True,
+                    cache_size=tuss_cache_size,
+                    similarity_threshold=tuss_similarity_threshold,
+                )
+                # Store reference to underlying TUSS model for access to properties
+                self._tuss_model = tuss_model
+            else:
+                self.separator = tuss_model
+                self._tuss_model = None
+            
             # Propagate sample_rate and segment_samples from TUSS model
-            self.sample_rate = self.separator.sample_rate
-            self.segment_samples = self.separator.segment_samples
+            self.sample_rate = tuss_model.sample_rate
+            self.segment_samples = tuss_model.segment_samples
             self.segment_length = self.segment_samples / self.sample_rate
             print(
                 f"TUSS config: sample_rate={self.sample_rate} Hz, "
@@ -752,15 +789,20 @@ class ValidationPipeline:
 
         # recover and log the target class list if the checkpoint included a
         # config (it should, since the training routine saves the YAML)
-        if hasattr(self.separator, "config") and self.separator.config:
+        # Handle both direct separator and wrapped separator (SeparationPipeline)
+        sep_for_config = self.separator
+        if isinstance(self.separator, SeparationPipeline):
+            sep_for_config = self.separator.tuss
+        
+        if hasattr(sep_for_config, "config") and sep_for_config.config:
             # Try multiple paths depending on model type
             tc = None
-            if hasattr(self.separator.config, "data"):
+            if hasattr(sep_for_config.config, "data"):
                 # SudoRM-RF / CLAPSep format
-                tc = getattr(self.separator.config.data, "target_classes", None)
-            elif isinstance(self.separator.config, dict):
+                tc = getattr(sep_for_config.config.data, "target_classes", None)
+            elif isinstance(sep_for_config.config, dict):
                 # TUSS format (config is a dict from hparams.yaml)
-                data_section = self.separator.config.get("data", {})
+                data_section = sep_for_config.config.get("data", {})
                 tc = data_section.get("target_classes", None)
 
             if tc:
@@ -991,8 +1033,9 @@ class ValidationPipeline:
     def _separate(self, waveform: torch.Tensor, debug: bool = False) -> torch.Tensor:
         """Run separation model. Returns all sources.
 
-        All separator types (TUSS, CLAPSep, SudoRM-RF) implement separate_waveform()
-        which handles normalization, windowing, device placement, and model-specific logic.
+        All separator types (TUSS, CLAPSep, SudoRM-RF, SeparationPipeline) 
+        implement separate_waveform() which handles normalization, windowing, 
+        device placement, and model-specific logic.
         """
         if debug:
             input_rms = torch.sqrt(torch.mean(waveform**2)).item()
@@ -1001,7 +1044,11 @@ class ValidationPipeline:
                 file=sys.stderr,
             )
 
-        result = self.separator.separate_waveform(waveform)
+        # SeparationPipeline returns dict by default, others return tensor
+        if isinstance(self.separator, SeparationPipeline):
+            result = self.separator.separate_waveform(waveform, return_dict=False)
+        else:
+            result = self.separator.separate_waveform(waveform)
 
         if debug:
             output_rms = torch.sqrt(torch.mean(result**2)).item()
@@ -1172,10 +1219,16 @@ class ValidationPipeline:
 
     def _get_coi_head_index(self) -> int:
         """Return the COI head index for the current separator model."""
-        if isinstance(self.separator, TUSSInference):
+        sep = self.separator
+        # Unwrap SeparationPipeline if needed
+        if isinstance(sep, SeparationPipeline):
+            sep = sep.tuss
+        
+        if isinstance(sep, TUSSInference):
             return TUSS_COI_HEAD
-        if isinstance(self.separator, CLAPSepInference):
+        if isinstance(sep, CLAPSepInference):
             return CLAPSEP_COI_HEAD
+        # SudoRM-RF / others
         return SUDORMRF_COI_HEAD
 
     def _classify_pann(self, waveform: torch.Tensor) -> Tuple[int, float]:

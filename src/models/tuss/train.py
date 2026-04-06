@@ -347,7 +347,47 @@ class Config:
         data_cfg = DataConfig(**raw.get("data", {}))
         model_cfg = ModelConfig(**raw.get("model", {}))
         training_cfg = TrainingConfig(**raw.get("training", {}))
-        return cls(data=data_cfg, model=model_cfg, training=training_cfg)
+        config = cls(data=data_cfg, model=model_cfg, training=training_cfg)
+        config.validate()
+        return config
+
+    def validate(self):
+        """Validate configuration consistency."""
+        # Check that target_classes and coi_prompts have matching lengths
+        target_classes = self.data.target_classes
+        coi_prompts = self.model.coi_prompts
+        
+        if not target_classes:
+            raise ValueError(
+                "Configuration error: data.target_classes is empty.\n"
+                "Add class label lists to training_config.yaml under data.target_classes"
+            )
+        
+        if not coi_prompts:
+            raise ValueError(
+                "Configuration error: model.coi_prompts is empty.\n"
+                "Add prompt names to training_config.yaml under model.coi_prompts"
+            )
+        
+        # Normalize target_classes to list-of-lists for validation
+        # (single-class case: flat list is allowed)
+        if isinstance(target_classes[0], str):
+            target_classes_normalized = [target_classes]
+        else:
+            target_classes_normalized = target_classes
+        
+        n_coi_prompts = len(coi_prompts)
+        n_target_classes = len(target_classes_normalized)
+        
+        if n_target_classes != n_coi_prompts:
+            raise ValueError(
+                f"Configuration error: Length mismatch between target_classes and coi_prompts.\n"
+                f"  data.target_classes has {n_target_classes} groups: {target_classes_normalized}\n"
+                f"  model.coi_prompts has {n_coi_prompts} entries: {coi_prompts}\n"
+                f"These must match - one target_classes group per coi_prompt.\n"
+                f"Check training_config.yaml and ensure both lists have the same length."
+            )
+
 
     def save(self, path: Path):
         with open(path, "w") as f:
