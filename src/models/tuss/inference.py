@@ -46,9 +46,12 @@ for _p in [str(_BASE_DIR), str(_SRC_DIR)]:
 from nets.model_wrapper import SeparationModel
 
 # Head index constants for consistent output access (matching sudormrf interface)
+# NOTE: With multi-COI support, COI_HEAD_INDEX now refers to the first COI class.
+# Background is always the last index: sources[-1] or sources[BACKGROUND_HEAD_INDEX]
+# where BACKGROUND_HEAD_INDEX = len(coi_prompts)
 COI_HEAD_INDEX: int = 0
-BACKGROUND_HEAD_INDEX: int = 1
-NUM_SOURCES: int = 2
+BACKGROUND_HEAD_INDEX: int = 1  # Only valid for single-COI mode
+NUM_SOURCES: int = 2  # Only valid for single-COI mode
 
 
 def robust_load_audio(path: Union[str, Path]) -> Tuple[torch.Tensor, int]:
@@ -88,12 +91,21 @@ class TUSSInference:
     """Inference wrapper for trained TUSS separation model.
 
     This class provides methods for loading a trained model and performing
-    audio source separation with guaranteed head assignment:
-        - output[:, COI_HEAD_INDEX, :] = COI (e.g., Airplane) audio
-        - output[:, BACKGROUND_HEAD_INDEX, :] = Background audio
+    audio source separation. Supports both single-COI and multi-COI modes:
+    
+    Single-COI mode (backward compatible):
+        - coi_prompts = ["airplane"]
+        - output shape: (2, T) = [COI, background]
+        - Access: sources[COI_HEAD_INDEX], sources[BACKGROUND_HEAD_INDEX]
+    
+    Multi-COI mode:
+        - coi_prompts = ["airplane", "bird", "car"]  (sorted alphabetically)
+        - output shape: (4, T) = [airplane, bird, car, background]
+        - Access: sources[0:3] for COIs, sources[-1] for background
+        - Or use get_coi_by_name() for named access
 
-    The interface mirrors SeparationInference from sudormrf for compatibility
-    with existing validation code.
+    The interface is compatible with SeparationInference from sudormrf for
+    single-COI usage, with extensions for multi-COI support.
     """
 
     def __init__(
@@ -102,7 +114,7 @@ class TUSSInference:
         sample_rate: int,
         segment_samples: int,
         device: str,
-        coi_prompt: str,
+        coi_prompts: Union[str, List[str]],
         bg_prompt: str,
         config: Optional[dict] = None,
     ):
@@ -113,7 +125,10 @@ class TUSSInference:
             sample_rate: Model's native sample rate (typically 48000 Hz)
             segment_samples: Segment length in samples
             device: Device to run inference on
-            coi_prompt: Prompt name for Class of Interest (e.g., "airplane")
+            coi_prompts: Prompt name(s) for Class(es) of Interest. Can be:
+                        - Single string: "airplane" (backward compatible)
+                        - List of strings: ["airplane", "bird", "car"]
+                        Prompts will be sorted alphabetically for consistent ordering.
             bg_prompt: Prompt name for background (e.g., "background")
             config: Optional training config dict for metadata
         """
@@ -125,12 +140,26 @@ class TUSSInference:
         self.device = device
         self.sample_rate = sample_rate
         self.segment_samples = segment_samples
-        self.coi_prompt = coi_prompt
+        
+        # Support both string and list input for backward compatibility
+        if isinstance(coi_prompts, str):
+            coi_prompts = [coi_prompts]
+        
+        # CRITICAL: Do NOT sort prompts - order must match training config
+        # The model learns prompt embeddings indexed by position, so changing
+        # the order between training and inference breaks everything silently.
+        self.coi_prompts = list(coi_prompts)
         self.bg_prompt = bg_prompt
+        
         # Store config for downstream code (e.g., validation pipelines)
         self.config = config
-        # Number of sources is always 2 for single-COI mode
-        self.num_sources = NUM_SOURCES
+        
+        # Number of sources: N COI classes + 1 background
+        self.num_sources = len(self.coi_prompts) + 1
+        
+        # For backward compatibility: single-COI mode
+        if len(self.coi_prompts) == 1:
+            self.coi_prompt = self.coi_prompts[0]
         
         # Verify all model components are on the correct device
         self._verify_device_placement()
@@ -159,7 +188,7 @@ class TUSSInference:
         cls,
         checkpoint_path: Union[str, Path],
         device: Optional[str] = None,
-        coi_prompt: str = "airplane",
+        coi_prompts: Optional[Union[str, List[str]]] = None,
         bg_prompt: str = "background",
     ) -> "TUSSInference":
         """Load model from training checkpoint.
@@ -167,7 +196,11 @@ class TUSSInference:
         Args:
             checkpoint_path: Path to checkpoint directory or .pth file
             device: Device to load on (default: auto-detect cuda/cpu)
-            coi_prompt: Prompt name for COI (default: "airplane")
+            coi_prompts: Prompt name(s) for COI. Can be:
+                        - None: use config defaults
+                        - String: "airplane" (single COI)
+                        - List: ["airplane", "bird", "car"] (multi-COI)
+                        Defaults to first COI in config if not specified.
             bg_prompt: Prompt name for background (default: "background")
 
         Returns:
@@ -291,8 +324,17 @@ class TUSSInference:
         # Use config prompts as defaults if not provided by caller
         config_coi_prompts = model_conf.get("coi_prompts", ["airplane"])
         config_bg_prompt = model_conf.get("bg_prompt", "background")
-        if coi_prompt == "airplane" and config_coi_prompts:
-            coi_prompt = config_coi_prompts[0]
+        
+        # Handle coi_prompts parameter
+        if coi_prompts is None:
+            # Use config defaults
+            coi_prompts = config_coi_prompts
+        elif isinstance(coi_prompts, str):
+            # Single prompt as string
+            coi_prompts = [coi_prompts]
+        # else: already a list, use as-is
+        
+        # Update bg_prompt from config if using default
         if bg_prompt == "background" and config_bg_prompt:
             bg_prompt = config_bg_prompt
 
@@ -342,9 +384,9 @@ class TUSSInference:
             # Extract prompt info if available
             ckpt_coi_prompts = checkpoint.get("coi_prompts", [])
             ckpt_bg_prompt = checkpoint.get("bg_prompt", "")
-            if ckpt_coi_prompts and coi_prompt == config_coi_prompts[0]:
+            if ckpt_coi_prompts and coi_prompts == config_coi_prompts:
                 # Use checkpoint's prompts if caller used defaults
-                coi_prompt = ckpt_coi_prompts[0] if ckpt_coi_prompts else coi_prompt
+                coi_prompts = ckpt_coi_prompts
             if ckpt_bg_prompt and bg_prompt == config_bg_prompt:
                 bg_prompt = ckpt_bg_prompt
             print(f"  Checkpoint prompts: COI={ckpt_coi_prompts}, BG={ckpt_bg_prompt}")
@@ -389,14 +431,14 @@ class TUSSInference:
             f"segment_length={segment_samples / sample_rate:.2f}s "
             f"({segment_samples} samples)"
         )
-        print(f"  Using prompts: COI='{coi_prompt}', Background='{bg_prompt}'")
+        print(f"  Using prompts: COI={coi_prompts}, Background='{bg_prompt}'")
 
         return cls(
             model=model,
             sample_rate=sample_rate,
             segment_samples=segment_samples,
             device=device,
-            coi_prompt=coi_prompt,
+            coi_prompts=coi_prompts,
             bg_prompt=bg_prompt,
             config=config,
         )
@@ -410,8 +452,15 @@ class TUSSInference:
 
         Returns:
             sources: (n_sources, T) tensor where:
-                     sources[COI_HEAD_INDEX, :] = COI (e.g., Airplane) audio
-                     sources[BACKGROUND_HEAD_INDEX, :] = Background audio
+                     sources[0:len(coi_prompts)] = COI classes (alphabetically sorted)
+                     sources[-1] = background
+                     
+                     Example with coi_prompts=["airplane", "bird"]:
+                     sources[0] = airplane audio
+                     sources[1] = bird audio
+                     sources[2] = background audio
+                     
+                     Use get_coi_by_name() for named access.
         """
         waveform, sr = robust_load_audio(audio_path)
         if sr != self.sample_rate:
@@ -444,8 +493,10 @@ class TUSSInference:
 
         Returns:
             sources: (n_sources, T) tensor where:
-                     sources[COI_HEAD_INDEX, :] = COI audio
-                     sources[BACKGROUND_HEAD_INDEX, :] = Background audio
+                     sources[0:len(coi_prompts)] = COI classes (alphabetically sorted)
+                     sources[-1] = background
+                     
+                     Use get_coi_by_name() for named access.
         """
         if waveform.dim() == 2:
             if waveform.shape[0] > 1:
@@ -468,7 +519,7 @@ class TUSSInference:
         return self._separate_segment(waveform)[:, :original_length]
 
     def _separate_segment(self, segment: torch.Tensor) -> torch.Tensor:
-        """Separate a single segment.
+        """Separate a single segment with all COI prompts + background.
 
         TUSS uses variance normalization (normalize by std) matching training.
         The model expects normalized input and outputs normalized sources.
@@ -477,7 +528,15 @@ class TUSSInference:
             segment: Input waveform (T,) of length segment_samples
 
         Returns:
-            sources: (n_sources, T) tensor [COI, background]
+            sources: (n_sources, T) tensor where:
+                    sources[0:len(coi_prompts)] = COI classes (alphabetically sorted)
+                    sources[-1] = background
+                    
+                    Example with coi_prompts=["airplane", "bird", "car"]:
+                    sources[0] = airplane
+                    sources[1] = bird
+                    sources[2] = car
+                    sources[3] = background
         """
         # Variance normalization (matching TUSS training)
         mean = segment.mean()
@@ -486,11 +545,12 @@ class TUSSInference:
         # Normalize input (zero-mean, unit-variance)
         x = ((segment - mean) / std).unsqueeze(0).to(self.device)  # (1, T)
 
-        # Build prompts list: [[coi_prompt, bg_prompt]]
+        # Build prompts list: [[coi1, coi2, ..., background]]
         # TUSS model expects prompts as List[List[str]] where outer list is batch
-        prompts = [[self.coi_prompt, self.bg_prompt]]
+        # COI prompts are already sorted alphabetically in __init__
+        prompts = [self.coi_prompts + [self.bg_prompt]]
 
-        # Run model
+        # Run model with all prompts in a single forward pass
         output = self.model(x, prompts)  # (1, n_sources, T)
 
         # Scale outputs by input std to restore reasonable amplitude
@@ -511,13 +571,15 @@ class TUSSInference:
             original_length: Original length to trim output to
 
         Returns:
-            sources: (n_sources, T) tensor
+            sources: (n_sources, T) tensor where:
+                    sources[0:len(coi_prompts)] = COI classes
+                    sources[-1] = background
         """
         hop = self.segment_samples // 2
         window = torch.hann_window(self.segment_samples)
 
         # Initialize output buffers
-        output = torch.zeros(NUM_SOURCES, original_length)
+        output = torch.zeros(self.num_sources, original_length)
         weight = torch.zeros(original_length)
 
         # Process overlapping segments
@@ -543,14 +605,49 @@ class TUSSInference:
 
     def get_coi_audio(self, sources: torch.Tensor) -> torch.Tensor:
         """Extract the Class of Interest audio from separated sources.
+        
+        For backward compatibility with single-COI mode.
+        In multi-COI mode, returns the first COI class.
 
         Args:
             sources: Output from separate() with shape (n_sources, T)
 
         Returns:
-            COI audio tensor with shape (T,)
+            COI audio tensor with shape (T,). In multi-COI mode, returns
+            the first COI class (alphabetically first).
         """
         return sources[COI_HEAD_INDEX]
+    
+    def get_coi_by_name(self, sources: torch.Tensor, coi_name: str) -> torch.Tensor:
+        """Extract a specific COI class by name.
+        
+        Args:
+            sources: Output from separate() with shape (n_sources, T)
+            coi_name: Name of the COI class (e.g., "airplane", "bird")
+        
+        Returns:
+            COI audio tensor with shape (T,)
+        
+        Raises:
+            ValueError: If coi_name is not in the configured COI prompts
+        """
+        if coi_name not in self.coi_prompts:
+            raise ValueError(
+                f"COI '{coi_name}' not found. Available COIs: {self.coi_prompts}"
+            )
+        idx = self.coi_prompts.index(coi_name)
+        return sources[idx]
+    
+    def get_all_cois(self, sources: torch.Tensor) -> torch.Tensor:
+        """Extract all COI classes (excluding background).
+        
+        Args:
+            sources: Output from separate() with shape (n_sources, T)
+        
+        Returns:
+            COI audio tensor with shape (n_coi_classes, T)
+        """
+        return sources[:-1]  # All except last (background)
 
     def get_background_audio(self, sources: torch.Tensor) -> torch.Tensor:
         """Extract the background audio from separated sources.
@@ -561,7 +658,23 @@ class TUSSInference:
         Returns:
             Background audio tensor with shape (T,)
         """
-        return sources[BACKGROUND_HEAD_INDEX]
+        return sources[-1]  # Background is always last
+    
+    def get_sources_dict(self, sources: torch.Tensor) -> dict:
+        """Convert sources tensor to named dictionary.
+        
+        Args:
+            sources: Output from separate() with shape (n_sources, T)
+        
+        Returns:
+            Dictionary mapping prompt names to audio tensors:
+            {"airplane": tensor(T,), "bird": tensor(T,), ..., "background": tensor(T,)}
+        """
+        result = {}
+        for i, prompt in enumerate(self.coi_prompts):
+            result[prompt] = sources[i]
+        result[self.bg_prompt] = sources[-1]
+        return result
 
     def save_audio(self, waveform: torch.Tensor, path: Union[str, Path]):
         """Save waveform to file.
