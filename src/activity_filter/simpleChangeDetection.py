@@ -12,4 +12,4 @@ class ChangeDetection:
         self.previous_segment = None
 
     def detect_change(self, segment: np.ndarray) -> bool:
-        pass
+        
