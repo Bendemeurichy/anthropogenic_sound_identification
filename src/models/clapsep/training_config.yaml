@@ -29,8 +29,13 @@ model:
   # STFT parameters
   nfft: 1024
   hop_length: 320
-  # Whether to freeze the CLAP encoder
-  freeze_encoder: true
+  # Encoder fine-tuning options:
+  # Option 1: freeze_encoder=true, use_lora=false  → Decoder-only training (fastest, least memory)
+  # Option 2: freeze_encoder=false, use_lora=true  → LoRA fine-tuning (recommended, parameter-efficient)
+  # Option 3: freeze_encoder=false, use_lora=false → Full fine-tuning (most parameters)
+  freeze_encoder: false
+  use_lora: true
+  lora_rank: 8  # LoRA rank: 4-16 typical (lower = fewer params, faster training)
   # Number of sources (COI + background)
   num_sources: 2
 

@@ -38,16 +38,84 @@ from common.coi_training import (
     sisnr,
 )
 
-# Import CLAPSep components
+# Import CLAPSep components and LoRA
 try:
     import laion_clap
-
     from models.clapsep.base.model.CLAPSep_decoder import HTSAT_Decoder
-
     HAS_CLAP = True
 except ImportError:
     HAS_CLAP = False
     print("Warning: laion_clap not available. Install with: pip install laion-clap")
+
+try:
+    import loralib as lora
+    HAS_LORA = True
+except ImportError:
+    HAS_LORA = False
+    print("Warning: loralib not available. Install with: pip install loralib")
+    print("  LoRA fine-tuning will be disabled. Set use_lora=False or install loralib.")
+
+
+# =============================================================================
+# LoRA utilities (from original CLAPSep implementation)
+# =============================================================================
+
+
+def set_module(model, submodule_key, module):
+    """Set a submodule in a model by its key path."""
+    tokens = submodule_key.split('.')
+    sub_tokens = tokens[:-1]
+    cur_mod = model
+    for s in sub_tokens:
+        cur_mod = getattr(cur_mod, s)
+    setattr(cur_mod, tokens[-1], module)
+
+
+def apply_lora_to_model(model, rank: int = 8):
+    """
+    Replace linear layers in WindowAttention modules with LoRA layers.
+    
+    This follows the original CLAPSep implementation which applies LoRA
+    specifically to attention layers in the HTSAT encoder.
+    
+    Args:
+        model: The audio encoder model
+        rank: LoRA rank (lower = fewer parameters, typically 4-16)
+        
+    Returns:
+        Model with LoRA layers applied
+    """
+    if not HAS_LORA:
+        raise RuntimeError(
+            "loralib is required for LoRA fine-tuning. "
+            "Install with: pip install loralib"
+        )
+    
+    for module_name, module in model.named_modules():
+        # Apply LoRA only to WindowAttention layers (as in original CLAPSep)
+        if 'WindowAttention' in str(type(module)):
+            for layer_name, layer in module.named_modules():
+                if isinstance(layer, torch.nn.Linear):
+                    # Create LoRA layer with same dimensions
+                    lora_layer = lora.Linear(
+                        layer.in_features,
+                        layer.out_features,
+                        r=rank,
+                        bias=hasattr(layer, 'bias'),
+                        merge_weights=False
+                    )
+                    # Copy pretrained weights
+                    lora_layer.weight = layer.weight
+                    if hasattr(layer, 'bias'):
+                        lora_layer.bias = layer.bias
+                    # Replace the layer
+                    full_path = f"{module_name}.{layer_name}" if module_name else layer_name
+                    set_module(model, full_path, lora_layer)
+    
+    # Mark only LoRA parameters as trainable
+    lora.mark_only_lora_as_trainable(model, bias='lora_only')
+    
+    return model
 
 
 # =============================================================================
@@ -121,7 +189,13 @@ class COICLAPSepDecoder(nn.Module):
 
 
 class COICLAPSep(pl.LightningModule):
-    """PyTorch Lightning module for COI separation using CLAPSep architecture."""
+    """PyTorch Lightning module for COI separation using CLAPSep architecture.
+    
+    Supports three encoder modes:
+    1. freeze_encoder=True, use_lora=False: Encoder completely frozen (fastest, least memory)
+    2. freeze_encoder=False, use_lora=False: Full encoder fine-tuning (most parameters)
+    3. freeze_encoder=False, use_lora=True: LoRA fine-tuning (parameter-efficient, recommended)
+    """
 
     def __init__(
         self,
@@ -133,6 +207,8 @@ class COICLAPSep(pl.LightningModule):
         resample_rate: int = 48000,
         class_weight: float = 1.5,
         freeze_encoder: bool = True,
+        use_lora: bool = False,
+        lora_rank: int = 8,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["clap_model", "decoder_model"])
@@ -141,20 +217,40 @@ class COICLAPSep(pl.LightningModule):
         self.class_weight = class_weight
         self.sample_rate = sample_rate
         self.resample_rate = resample_rate
+        self.use_lora = use_lora
+        self.lora_rank = lora_rank
 
-        # CLAP model (frozen for feature extraction)
+        # CLAP model (always frozen, only used for reference)
         self.clap_model = clap_model
         for p in self.clap_model.parameters():
             p.requires_grad = False
 
         # Copy audio branch for fine-tuning
         import copy
-
         self.audio_branch = copy.deepcopy(self.clap_model.model.audio_branch)
 
         if freeze_encoder:
+            # Mode 1: Completely frozen encoder
             for p in self.audio_branch.parameters():
                 p.requires_grad = False
+        elif use_lora:
+            # Mode 2: LoRA fine-tuning (parameter-efficient)
+            if not HAS_LORA:
+                raise RuntimeError(
+                    "loralib is required for LoRA fine-tuning. "
+                    "Install with: pip install loralib\n"
+                    "Or set use_lora=False to use full fine-tuning or frozen encoder."
+                )
+            print(f"Applying LoRA (rank={lora_rank}) to audio encoder...")
+            self.audio_branch = apply_lora_to_model(self.audio_branch, rank=lora_rank)
+            # Count trainable params
+            lora_params = sum(p.numel() for p in self.audio_branch.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in self.audio_branch.parameters())
+            print(f"  LoRA trainable: {lora_params/1e6:.2f}M / {total_params/1e6:.2f}M total "
+                  f"({100*lora_params/total_params:.2f}%)")
+        else:
+            # Mode 3: Full fine-tuning (all parameters trainable)
+            print("Using full encoder fine-tuning (all parameters trainable)")
 
         # COI-adapted decoder
         self.decoder = decoder_model
@@ -361,6 +457,8 @@ def train(
     seed: int = 42,
     nfft: int = 1024,
     freeze_encoder: bool = True,
+    use_lora: bool = False,
+    lora_rank: int = 8,
     class_weight: float = 1.5,
     precision: str = "bf16-mixed",
 ):
@@ -451,11 +549,21 @@ def train(
         resample_rate=48000,
         class_weight=class_weight,
         freeze_encoder=freeze_encoder,
+        use_lora=use_lora,
+        lora_rank=lora_rank,
     )
 
-    print(
-        f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M"
-    )
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params / 1e6:.2f}M")
+    print(f"Trainable parameters: {trainable_params / 1e6:.2f}M ({100*trainable_params/total_params:.2f}%)")
+    
+    if use_lora:
+        print(f"  Using LoRA fine-tuning (rank={lora_rank})")
+    elif freeze_encoder:
+        print(f"  Encoder frozen (decoder-only training)")
+    else:
+        print(f"  Full encoder+decoder fine-tuning")
 
     # Setup trainer
     trainer = pl.Trainer(
@@ -513,11 +621,21 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--nfft", type=int, default=1024)
-    parser.add_argument("--no-freeze-encoder", action="store_true")
+    parser.add_argument("--no-freeze-encoder", action="store_true", 
+                        help="Allow encoder fine-tuning (full or LoRA)")
+    parser.add_argument("--use-lora", action="store_true",
+                        help="Use LoRA for parameter-efficient encoder fine-tuning (requires --no-freeze-encoder)")
+    parser.add_argument("--lora-rank", type=int, default=8,
+                        help="LoRA rank (4-16 typical, lower=fewer params)")
     parser.add_argument("--class-weight", type=float, default=1.5)
     parser.add_argument("--precision", type=str, default="bf16-mixed")
 
     args = parser.parse_args()
+    
+    # Validate LoRA usage
+    if args.use_lora and not args.no_freeze_encoder:
+        print("Warning: --use-lora requires --no-freeze-encoder. Setting --no-freeze-encoder=True")
+        args.no_freeze_encoder = True
 
     train(
         df_path=args.df_path,
@@ -534,6 +652,8 @@ def main():
         seed=args.seed,
         nfft=args.nfft,
         freeze_encoder=not args.no_freeze_encoder,
+        use_lora=args.use_lora,
+        lora_rank=args.lora_rank,
         class_weight=args.class_weight,
         precision=args.precision,
     )
