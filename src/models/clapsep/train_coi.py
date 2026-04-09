@@ -461,6 +461,11 @@ def train(
     lora_rank: int = 8,
     class_weight: float = 1.5,
     precision: str = "bf16-mixed",
+    # Decoder architecture parameters (for hyperparameter tuning)
+    embed_dim: int = 128,
+    encoder_embed_dim: int = 128,
+    d_attn: int = 640,
+    n_masker_layer: int = 3,
 ):
     """Main training function."""
     if not HAS_CLAP:
@@ -522,12 +527,12 @@ def train(
     base_decoder = _HTSAT_Decoder(
         lan_embed_dim=1024,
         depths=[1, 1, 1, 1],
-        embed_dim=128,
-        encoder_embed_dim=128,
+        embed_dim=embed_dim,
+        encoder_embed_dim=encoder_embed_dim,
         phase=False,
         spec_factor=8,
-        d_attn=640,
-        n_masker_layer=3,
+        d_attn=d_attn,
+        n_masker_layer=n_masker_layer,
         conv=False,
     )
 
@@ -629,6 +634,15 @@ def main():
                         help="LoRA rank (4-16 typical, lower=fewer params)")
     parser.add_argument("--class-weight", type=float, default=1.5)
     parser.add_argument("--precision", type=str, default="bf16-mixed")
+    # Decoder architecture parameters
+    parser.add_argument("--embed-dim", type=int, default=128,
+                        help="Decoder embedding dimension")
+    parser.add_argument("--encoder-embed-dim", type=int, default=128,
+                        help="Encoder embedding dimension")
+    parser.add_argument("--d-attn", type=int, default=640,
+                        help="Attention dimension")
+    parser.add_argument("--n-masker-layer", type=int, default=3,
+                        help="Number of masker layers")
 
     args = parser.parse_args()
     
@@ -656,6 +670,10 @@ def main():
         lora_rank=args.lora_rank,
         class_weight=args.class_weight,
         precision=args.precision,
+        embed_dim=args.embed_dim,
+        encoder_embed_dim=args.encoder_embed_dim,
+        d_attn=args.d_attn,
+        n_masker_layer=args.n_masker_layer,
     )
 
 
