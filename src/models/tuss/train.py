@@ -2029,7 +2029,12 @@ def train(config: Config, timestamp: str | None = None):
     with open(checkpoint_dir / "training_history.json", "w") as f:
         json.dump(history, f, indent=2)
 
+    # Convert TUSS loss to SNR for Optuna (approximate, loss is ~negative SNR-like metric)
+    # TUSS uses snr_with_zeroref_loss which is a positive loss value (lower = better)
+    # Negate it to get an approximate SNR for comparison
+    best_val_snr = -best_val_loss
     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
+    print(f"Best Val SNR: {best_val_snr:.2f} dB")
 
 
 # =============================================================================

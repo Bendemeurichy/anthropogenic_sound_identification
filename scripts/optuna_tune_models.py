@@ -375,25 +375,46 @@ def run_training(
         print(f"Trial {trial_number}: Running {model_name} on {device}")
         print(f"Command: {' '.join(cmd[:4])}...")
         print(f"{'=' * 80}\n")
+        sys.stdout.flush()  # Ensure header is written to redirected file
 
-        # Run training script
-        result = subprocess.run(
+        # Run training script and stream output in real-time
+        # This allows progress to be visible when running with start-process on Windows
+        # Using stdout=None allows subprocess to inherit our redirected stdout/stderr
+        process = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",  # Replace invalid UTF-8 sequences instead of crashing
-            timeout=timeout,
+            bufsize=1,  # Line buffered
         )
 
-        print(result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr, file=sys.stderr)
+        # Collect output while streaming it to console
+        output_lines = []
+        try:
+            for line in process.stdout:
+                # Write to our stdout (which might be redirected by Start-Process)
+                sys.stdout.write(line)
+                sys.stdout.flush()  # Critical: flush after each line for redirected output
+                output_lines.append(line)
+            
+            # Wait for process to complete
+            process.wait(timeout=timeout)
+            
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+
+        # Join all output for metric parsing
+        full_output = "".join(output_lines)
 
         # Parse best validation metric from output
-        metric = parse_best_metric(result.stdout, model_name)
+        metric = parse_best_metric(full_output, model_name)
 
         print(f"\nTrial {trial_number} completed with metric: {metric:.2f} dB\n")
+        sys.stdout.flush()  # Ensure completion message is written
         return metric
 
     except subprocess.TimeoutExpired:
