@@ -159,13 +159,13 @@ def run_training(
     try:
         # Determine training script path and build command
         if model_name == "sudormrf":
-            script = "src/models/sudormrf/train.py"
+            script = str(_src_dir / "models" / "sudormrf" / "train.py")
             cmd = [sys.executable, script, "--config", config_path, "--device", device]
         elif model_name == "tuss":
-            script = "src/models/tuss/train.py"
+            script = str(_src_dir / "models" / "tuss" / "train.py")
             cmd = [sys.executable, script, "--config", config_path, "--device", device]
         elif model_name == "clapsep":
-            script = "src/models/clapsep/train_coi.py"
+            script = str(_src_dir / "models" / "clapsep" / "train_coi.py")
             cmd = [sys.executable, script, "--config", config_path, "--device", device]
         else:
             raise ValueError(f"Unknown model: {model_name}")
@@ -310,7 +310,7 @@ def tune_model(
         Best hyperparameters dictionary
     """
     # Load base config
-    config_path = Path(f"src/models/{model_name}/training_config.yaml")
+    config_path = _src_dir / "models" / model_name / "training_config.yaml"
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
     
