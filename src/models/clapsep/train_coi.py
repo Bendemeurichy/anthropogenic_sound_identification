@@ -571,6 +571,14 @@ def train(
         print(f"  Full encoder+decoder fine-tuning")
 
     # Setup trainer
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        dirpath=checkpoint_path,
+        filename="best-{epoch:02d}-{val_loss:.4f}",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=3,
+    )
+    
     trainer = pl.Trainer(
         default_root_dir=str(checkpoint_path),
         devices=1 if device == "cuda" and torch.cuda.is_available() else "auto",
@@ -580,13 +588,7 @@ def train(
         precision=precision,
         max_epochs=num_epochs,
         callbacks=[
-            pl.callbacks.ModelCheckpoint(
-                dirpath=checkpoint_path,
-                filename="best-{epoch:02d}-{val_loss:.4f}",
-                monitor="val_loss",
-                mode="min",
-                save_top_k=3,
-            ),
+            checkpoint_callback,
             pl.callbacks.EarlyStopping(
                 monitor="val_loss",
                 patience=30,
@@ -599,7 +601,13 @@ def train(
     print("Starting training...")
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
+    # Extract best validation metric from checkpoint callback
+    best_val_loss = checkpoint_callback.best_model_score.item() if checkpoint_callback.best_model_score is not None else float('inf')
+    # CLAPSep uses COIWeightedLoss which returns negative SI-SNR
+    best_val_sisnr = -best_val_loss
+    
     print(f"\nTraining completed! Checkpoints saved to {checkpoint_path}")
+    print(f"Best Val SI-SNR: {best_val_sisnr:.2f} dB")
     return checkpoint_path
 
 
