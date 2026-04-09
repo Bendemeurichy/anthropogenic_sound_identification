@@ -1889,6 +1889,8 @@ def train(config: Config, timestamp: str | None = None):
         # (happens when extending model with new prompts)
         has_new_prompts = bool(param_groups['new_prompts'])
         has_frozen_prompts = bool(param_groups['frozen_prompts'])
+        # Only consider it "extending" if there are truly NEW prompts being injected
+        # (not just continuing to train existing prompts)
         is_extending = has_new_prompts or has_frozen_prompts
         
         if is_extending:
@@ -1907,14 +1909,17 @@ def train(config: Config, timestamp: str | None = None):
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         global_step = int(ckpt.get("global_step", 0))
         
-        # Reset best_val_loss when extending with new prompts
+        # Reset best_val_loss ONLY when extending with new prompts (not when continuing all prompts)
         # Otherwise new prompts won't get a chance to save checkpoints
-        if is_extending:
+        # But if all prompts are continuing, we should keep the previous best_val_loss
+        if has_new_prompts:
+            # There are new prompts being injected - reset best_val_loss
             best_val_loss = float("inf")
             epochs_without_improvement = 0
             print("  ⚠️  Resetting best_val_loss to inf (new prompts need to learn)")
             print(f"     Previous checkpoint had val_loss: {ckpt.get('val_loss', 'N/A')}")
         else:
+            # All prompts are continuing - keep previous best_val_loss
             best_val_loss = float(ckpt.get("val_loss", float("inf")))
         
         history = ckpt.get("history", history)
