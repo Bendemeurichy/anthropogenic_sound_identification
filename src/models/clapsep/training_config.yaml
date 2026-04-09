@@ -15,7 +15,7 @@ data:
 # Model settings
 model:
   # CLAP pretrained checkpoint path
-  clap_checkpoint: "checkpoints/music_audioset_epoch_15_esc_90.14.pt"
+  clap_checkpoint: "src/models/clapsep/checkpoint/CLAPSep/model/music_audioset_epoch_15_esc_90.14.pt"
   # Decoder architecture
   lan_embed_dim: 1024
   depths: [1, 1, 1, 1]

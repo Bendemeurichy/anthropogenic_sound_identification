@@ -4,6 +4,32 @@ Lightweight Optuna hyperparameter tuning for COI separation models.
 This script tunes the most important hyperparameters for each model (sudormrf, tuss, clapsep)
 and saves the best configurations for fair model comparison.
 
+IMPORTANT NOTES ON MODEL TRAINING INTERFACES:
+---------------------------------------------
+Each model has a different command-line interface for training:
+
+1. SuDoRMRF (train.py):
+   - Accepts: --config <path_to_yaml>
+   - Optionally: --resume <checkpoint_dir>
+   - Solution: Create temporary YAML file with trial config
+
+2. TUSS (train.py):
+   - Reads config from hardcoded "training_config.yaml" in models/tuss/
+   - Accepts: --device or --gpu to override device
+   - Solution: Temporarily replace training_config.yaml, restore after trial
+   - Note: Loads pretrained TUSS model from pretrained_path in config
+
+3. CLAPSep (train_coi.py):
+   - No --config argument; uses individual CLI arguments
+   - Accepts: --df-path, --clap-checkpoint, --batch-size, --lr, etc.
+   - Solution: Convert config dict to individual command-line arguments
+   - Note: Requires --clap-checkpoint to load pretrained CLAP encoder
+
+All models properly load their pretrained checkpoints because:
+- Base configs are loaded from training_config.yaml files
+- Deep copy preserves pretrained_path and clap_checkpoint settings
+- Trial configs inherit these paths from base_config
+
 Optimized for birds dataset with abundant samples:
 - Uses only 5 epochs by default (converges quickly)
 - Disables augmentations (augment_multiplier=1)
@@ -25,6 +51,7 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import subprocess
 import sys
@@ -35,6 +62,18 @@ from typing import Any, Dict
 
 import optuna
 import yaml
+
+# Fix UTF-8 encoding for Windows Server compatibility
+# Under pythonw there is no console and sys.stdout/stderr are None.
+# Wrap only when the underlying buffer actually exists.
+if sys.stdout is not None and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", line_buffering=True
+    )
+if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", line_buffering=True
+    )
 
 # Ensure we can import from src
 _script_dir = Path(__file__).parent
@@ -49,7 +88,8 @@ if str(_src_dir) not in sys.path:
 
 def create_sudormrf_trial_config(trial: optuna.Trial, base_config: Dict[str, Any]) -> Dict[str, Any]:
     """Create SuDoRMRF config with trial hyperparameters."""
-    config = {k: v for k, v in base_config.items()}  # Deep copy
+    import copy
+    config = copy.deepcopy(base_config)
     
     # Most important architectural hyperparameters
     config["model"]["out_channels"] = trial.suggest_categorical("out_channels", [128, 256, 512])
@@ -74,7 +114,8 @@ def create_sudormrf_trial_config(trial: optuna.Trial, base_config: Dict[str, Any
 
 def create_tuss_trial_config(trial: optuna.Trial, base_config: Dict[str, Any]) -> Dict[str, Any]:
     """Create TUSS config with trial hyperparameters."""
-    config = {k: v for k, v in base_config.items()}
+    import copy
+    config = copy.deepcopy(base_config)
     
     # TUSS-specific hyperparameters
     config["training"]["lr"] = trial.suggest_float("lr", 1e-6, 1e-4, log=True)
@@ -96,7 +137,8 @@ def create_tuss_trial_config(trial: optuna.Trial, base_config: Dict[str, Any]) -
 
 def create_clapsep_trial_config(trial: optuna.Trial, base_config: Dict[str, Any]) -> Dict[str, Any]:
     """Create CLAPSep config with trial hyperparameters."""
-    config = {k: v for k, v in base_config.items()}
+    import copy
+    config = copy.deepcopy(base_config)
     
     # CLAPSep architecture hyperparameters  
     config["model"]["embed_dim"] = trial.suggest_categorical("embed_dim", [64, 128, 256])
@@ -142,36 +184,119 @@ def run_training(
     """
     Run training for a model with given config and return best validation metric.
     
+    IMPORTANT: Each model has different command-line interfaces:
+    - SuDoRMRF: Accepts --config argument for YAML config file
+    - TUSS: Reads from hardcoded training_config.yaml (no --config arg)
+    - CLAPSep: Uses individual command-line arguments (no --config arg)
+    
+    This function handles these differences by:
+    1. SuDoRMRF: Writing config to temp file and passing via --config
+    2. TUSS: Temporarily replacing training_config.yaml with trial config
+    3. CLAPSep: Converting config dict to individual command-line arguments
+    
+    All models properly load pretrained checkpoints because the base_config
+    (which includes pretrained paths) is deep-copied before modification.
+    
     Args:
         model_name: One of 'sudormrf', 'tuss', 'clapsep'
-        config: Configuration dictionary
+        config: Configuration dictionary (must include pretrained checkpoint paths)
         trial_number: Optuna trial number
+        device: Device to use (e.g., 'cuda', 'cuda:0', 'cpu')
         timeout: Maximum training time in seconds
         
     Returns:
         Best validation metric (SI-SNR or SNR in dB)
     """
-    # Create temporary config file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-        yaml.dump(config, f, default_flow_style=False)
-        config_path = f.name
-    
     try:
         # Determine training script path and build command
         if model_name == "sudormrf":
+            # SuDoRMRF accepts --config argument
+            # Device must be set in config, not command line
+            config["training"]["device"] = device
+            
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                yaml.dump(config, f, default_flow_style=False)
+                config_path = f.name
+            
             script = str(_src_dir / "models" / "sudormrf" / "train.py")
-            cmd = [sys.executable, script, "--config", config_path, "--device", device]
+            cmd = [sys.executable, script, "--config", config_path]
+            cleanup_path = config_path
+            
         elif model_name == "tuss":
+            # TUSS reads from hardcoded training_config.yaml - temporarily replace it
+            # Also ensure device is set in config
+            config["training"]["device"] = device
+            
+            tuss_config_path = _src_dir / "models" / "tuss" / "training_config.yaml"
+            
+            # Backup original config
+            backup_path = tuss_config_path.with_suffix('.yaml.backup')
+            if tuss_config_path.exists():
+                import shutil
+                shutil.copy2(tuss_config_path, backup_path)
+            
+            # Write trial config
+            with open(tuss_config_path, 'w') as f:
+                yaml.dump(config, f, default_flow_style=False)
+            
             script = str(_src_dir / "models" / "tuss" / "train.py")
-            cmd = [sys.executable, script, "--config", config_path, "--device", device]
+            # TUSS can accept --device as CLI override, so use it for clarity
+            cmd = [sys.executable, script, "--device", device]
+            cleanup_path = None  # Will restore from backup instead
+            
         elif model_name == "clapsep":
+            # CLAPSep uses individual command-line arguments
             script = str(_src_dir / "models" / "clapsep" / "train_coi.py")
-            cmd = [sys.executable, script, "--config", config_path, "--device", device]
+            
+            # Extract config parameters
+            data_cfg = config.get("data", {})
+            model_cfg = config.get("model", {})
+            train_cfg = config.get("training", {})
+            
+            # Build command with all required and optional arguments
+            cmd = [
+                sys.executable, script,
+                "--df-path", str(data_cfg.get("df_path", "")),
+                "--clap-checkpoint", str(model_cfg.get("clap_checkpoint", "")),
+                "--checkpoint-dir", str(train_cfg.get("checkpoint_dir", "checkpoints/clapsep")),
+                "--sample-rate", str(data_cfg.get("sample_rate", 32000)),
+                "--segment-length", str(data_cfg.get("segment_length", 5.0)),
+                "--batch-size", str(train_cfg.get("batch_size", 16)),
+                "--num-epochs", str(train_cfg.get("num_epochs", 150)),
+                "--lr", str(train_cfg.get("lr", 1e-4)),
+                "--device", device,
+                "--class-weight", str(train_cfg.get("class_weight", 1.5)),
+                "--num-workers", str(train_cfg.get("num_workers", 4)),
+                "--seed", str(train_cfg.get("seed", 42)),
+                "--nfft", str(model_cfg.get("nfft", 1024)),
+                "--precision", str(train_cfg.get("precision", "bf16-mixed")),
+                # Decoder architecture parameters (tunable)
+                "--embed-dim", str(model_cfg.get("embed_dim", 128)),
+                "--encoder-embed-dim", str(model_cfg.get("encoder_embed_dim", 128)),
+                "--d-attn", str(model_cfg.get("d_attn", 640)),
+                "--n-masker-layer", str(model_cfg.get("n_masker_layer", 3)),
+            ]
+            
+            # Add SNR range
+            if "snr_range" in data_cfg:
+                snr_range = data_cfg["snr_range"]
+                cmd.extend(["--snr-min", str(snr_range[0]), "--snr-max", str(snr_range[1])])
+            
+            # Add optional flags
+            if model_cfg.get("freeze_encoder", True) == False:
+                cmd.append("--no-freeze-encoder")
+            if model_cfg.get("use_lora", False):
+                cmd.append("--use-lora")
+                cmd.extend(["--lora-rank", str(model_cfg.get("lora_rank", 8))])
+            
+            cleanup_path = None
+            
         else:
             raise ValueError(f"Unknown model: {model_name}")
         
         print(f"\n{'='*80}")
         print(f"Trial {trial_number}: Running {model_name} on {device}")
+        print(f"Command: {' '.join(cmd[:4])}...")
         print(f"{'='*80}\n")
         
         # Run training script
@@ -201,8 +326,16 @@ def run_training(
         traceback.print_exc()
         return -100.0
     finally:
-        # Clean up temp file
-        Path(config_path).unlink(missing_ok=True)
+        # Clean up temp files and restore backups
+        if model_name == "sudormrf" and cleanup_path:
+            Path(cleanup_path).unlink(missing_ok=True)
+        elif model_name == "tuss":
+            # Restore original config
+            tuss_config_path = _src_dir / "models" / "tuss" / "training_config.yaml"
+            backup_path = tuss_config_path.with_suffix('.yaml.backup')
+            if backup_path.exists():
+                import shutil
+                shutil.move(str(backup_path), str(tuss_config_path))
 
 
 def parse_best_metric(output: str, model_name: str) -> float:
@@ -323,6 +456,44 @@ def tune_model(
         base_config["model"]["coi_prompts"] = [target_class]
     else:
         base_config["data"]["target_classes"] = [target_class, target_class.capitalize()]
+    
+    # CLAPSep requires a pre-existing CSV file (unlike SuDoRMRF/TUSS which generate their own)
+    # Use a shared dataset CSV or set a valid path
+    if model_name == "clapsep":
+        # Look for an existing separation dataset CSV (generated by previous training runs)
+        # Priority: most recent sudormrf checkpoint > most recent tuss checkpoint > config default
+        csv_candidates = [
+            # Most recent SuDoRMRF dataset
+            sorted(
+                (_src_dir / "models" / "sudormrf" / "checkpoints").glob("*/separation_dataset.csv"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            ),
+            # Most recent TUSS dataset
+            sorted(
+                (_src_dir / "models" / "tuss" / "checkpoints").glob("*/separation_dataset.csv"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            ),
+        ]
+        
+        csv_path = None
+        for candidate_list in csv_candidates:
+            if candidate_list:
+                csv_path = str(candidate_list[0])
+                break
+        
+        if csv_path:
+            print(f"Using shared dataset CSV: {csv_path}")
+            base_config["data"]["df_path"] = csv_path
+        elif not Path(base_config["data"]["df_path"]).exists():
+            raise FileNotFoundError(
+                f"CLAPSep requires a dataset CSV file. "
+                f"Config specifies '{base_config['data']['df_path']}' but it doesn't exist.\n"
+                f"Please either:\n"
+                f"  1. Run SuDoRMRF or TUSS training first to generate a dataset CSV, or\n"
+                f"  2. Update the CLAPSep training_config.yaml with a valid df_path"
+            )
     
     # Create study
     if study_name is None:
