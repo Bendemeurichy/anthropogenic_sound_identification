@@ -213,6 +213,18 @@ def create_clapsep_trial_config(
 # =============================================================================
 
 
+def _convert_paths_to_strings(obj):
+    """Recursively convert Path objects to strings in nested dicts/lists."""
+    if isinstance(obj, Path):
+        return str(obj)
+    elif isinstance(obj, dict):
+        return {key: _convert_paths_to_strings(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_paths_to_strings(item) for item in obj]
+    else:
+        return obj
+
+
 def run_training(
     model_name: str,
     config: Dict[str, Any],
@@ -247,6 +259,8 @@ def run_training(
         Best validation metric (SI-SNR or SNR in dB)
     """
     try:
+        # Convert all Path objects to strings to avoid YAML serialization issues
+        config = _convert_paths_to_strings(config)
         # Determine training script path and build command
         if model_name == "sudormrf":
             # SuDoRMRF accepts --config argument
