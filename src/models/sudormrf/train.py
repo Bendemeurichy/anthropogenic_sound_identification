@@ -177,6 +177,7 @@ def progress_bar(iterable, desc: str = "", total: int | None = None, **tqdm_kwar
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from common.audio_utils import ResamplerCache
 from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import GroupCommSudoRmRf
 from base.sudo_rm_rf.dnn.models.improved_sudormrf import SuDORMRF
 
@@ -565,8 +566,7 @@ class AudioDataset(Dataset):
         self._seed = seed
         self._epoch: int = 0
         self._rng = np.random.default_rng(seed)
-        self._resamplers: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
-        self._resampler_cache_max = int(RESAMPLER_CACHE_MAX)
+        self._resampler_cache = ResamplerCache(max_size=RESAMPLER_CACHE_MAX)
         self._file_native_info: dict[
             str, tuple[int, int]
         ] = {}  # filepath -> (orig_sr, total_frames)
@@ -821,14 +821,7 @@ class AudioDataset(Dataset):
                 )
                 waveform = waveform[:, :seg_frames]
                 if sr != self.sample_rate:
-                    key = (sr, self.sample_rate)
-                    if key not in self._resamplers:
-                        if len(self._resamplers) >= self._resampler_cache_max:
-                            self._resamplers.pop(next(iter(self._resamplers)))
-                        self._resamplers[key] = torchaudio.transforms.Resample(
-                            sr, self.sample_rate
-                        )
-                    waveform = self._resamplers[key](waveform)
+                    waveform = self._resampler_cache.resample(waveform, sr, self.sample_rate)
                 if waveform.shape[0] > 1:
                     waveform = waveform.mean(dim=0, keepdim=True)
                 waveform = waveform.squeeze(0)
@@ -873,16 +866,9 @@ class AudioDataset(Dataset):
             except Exception:
                 return torch.zeros(self.segment_samples)
 
-        # Resample if needed
+        # Resample if needed using high-quality Kaiser windowed sinc
         if sr != self.sample_rate:
-            key = (sr, self.sample_rate)
-            if key not in self._resamplers:
-                if len(self._resamplers) >= self._resampler_cache_max:
-                    self._resamplers.pop(next(iter(self._resamplers)))
-                self._resamplers[key] = torchaudio.transforms.Resample(
-                    sr, self.sample_rate
-                )
-            waveform = self._resamplers[key](waveform)
+            waveform = self._resampler_cache.resample(waveform, sr, self.sample_rate)
 
         # Mono and pad/trim
         if waveform.shape[0] > 1:

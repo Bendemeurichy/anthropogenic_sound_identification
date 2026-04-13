@@ -27,6 +27,8 @@ _src_root = Path(__file__).resolve().parent.parent.parent
 if str(_src_root) not in sys.path:
     sys.path.insert(0, str(_src_root))
 
+from common.audio_utils import create_high_quality_resampler
+
 # Head indices (match sudormrf convention)
 COI_HEAD_INDEX: int = 0
 BACKGROUND_HEAD_INDEX: int = 1
@@ -369,7 +371,8 @@ class CLAPSepInference:
         """Separate audio file -> ``(2, T)`` tensor."""
         waveform, sr = torchaudio.load(str(audio_path))
         if sr != self.sample_rate:
-            waveform = torchaudio.transforms.Resample(sr, self.sample_rate)(waveform)
+            resampler = create_high_quality_resampler(sr, self.sample_rate)
+            waveform = resampler(waveform)
         waveform = waveform.mean(0) if waveform.shape[0] > 1 else waveform.squeeze(0)
         return self.separate_waveform(waveform, text_pos, text_neg)
 

@@ -43,6 +43,7 @@ for _p in [str(_BASE_DIR), str(_SRC_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from common.audio_utils import create_high_quality_resampler
 from nets.model_wrapper import SeparationModel
 
 # Head index constants for consistent output access (matching sudormrf interface)
@@ -415,7 +416,8 @@ class TUSSInference:
         """
         waveform, sr = robust_load_audio(audio_path)
         if sr != self.sample_rate:
-            waveform = torchaudio.transforms.Resample(sr, self.sample_rate)(waveform)
+            resampler = create_high_quality_resampler(sr, self.sample_rate)
+            waveform = resampler(waveform)
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0)
         else:

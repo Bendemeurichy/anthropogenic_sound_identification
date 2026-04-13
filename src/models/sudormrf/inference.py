@@ -22,6 +22,7 @@ import torchaudio
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from common.audio_utils import create_high_quality_resampler
 from .config import Config
 
 # Check for environment variable to use old separation head
@@ -418,7 +419,8 @@ class SeparationInference:
         """
         waveform, sr = robust_load_audio(audio_path)
         if sr != self.sample_rate:
-            waveform = torchaudio.transforms.Resample(sr, self.sample_rate)(waveform)
+            resampler = create_high_quality_resampler(sr, self.sample_rate)
+            waveform = resampler(waveform)
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0)
         else:

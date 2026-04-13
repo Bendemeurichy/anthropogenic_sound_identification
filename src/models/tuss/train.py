@@ -193,6 +193,7 @@ for _p in [str(_BASE_DIR), str(_SRC_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from common.audio_utils import ResamplerCache
 from loss_functions.snr import snr_with_zeroref_loss
 from nets.model_wrapper import SeparationModel
 
@@ -555,8 +556,7 @@ class AudioDataset(Dataset):
         )
 
         self._rng = np.random.default_rng(42)
-        self._resamplers: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
-        self._resampler_cache_max = RESAMPLER_CACHE_MAX
+        self._resampler_cache = ResamplerCache(max_size=RESAMPLER_CACHE_MAX)
         self._file_native_info: dict[str, tuple[int, int]] = {}
 
         if split == "test":
@@ -746,14 +746,7 @@ class AudioDataset(Dataset):
                 return torch.zeros(self.segment_samples)
 
         if sr != self.sample_rate:
-            key = (sr, self.sample_rate)
-            if key not in self._resamplers:
-                if len(self._resamplers) >= self._resampler_cache_max:
-                    self._resamplers.pop(next(iter(self._resamplers)))
-                self._resamplers[key] = torchaudio.transforms.Resample(
-                    sr, self.sample_rate
-                )
-            waveform = self._resamplers[key](waveform)
+            waveform = self._resampler_cache.resample(waveform, sr, self.sample_rate)
 
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
