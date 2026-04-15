@@ -6,6 +6,11 @@ This script reads a metadata CSV file and creates WebDataset tar shards containi
 - Audio files compressed as FLAC (lossless compression)
 - JSON metadata for each sample
 
+IMPORTANT: The script extracts the FULL time-bounded region from each audio file
+(from start_time to end_time) and stores it in the shard. During training, random
+crops can be taken from these stored regions for data augmentation, matching the
+behavior of the original training code.
+
 Usage:
     python create_webdataset.py \
         --metadata_csv /path/to/metadata.csv \
@@ -25,12 +30,13 @@ Features:
 - Progress tracking with tqdm
 - Resume support (skips existing shards)
 - Handles variable sample rates and formats
+- Extracts FULL bounded regions (not fixed-length segments)
 
 Expected CSV columns:
     - filename: Path to audio file
-    - start_time: Start time in seconds (can be NaN for full file)
-    - end_time: End time in seconds (can be NaN for full file)
-    - label: Integer label
+    - start_time: Start time in seconds (optional, default=0.0)
+    - end_time: End time in seconds (optional, default=end of file)
+    - label: String, integer, or list of labels
     - split: train/val/test
     - dataset: Dataset name
     - coi_class: (optional) COI class index for multi-class
@@ -70,105 +76,100 @@ def load_and_encode_audio(
     target_sr: Optional[int] = None,
 ) -> Tuple[bytes, int, int]:
     """
-    Load audio file, optionally extract segment, and encode as FLAC.
+    Load audio file and extract the FULL bounded region, then encode as FLAC.
+    
+    This extracts the entire time-bounded region (start_time to end_time) from
+    the source file and stores it in the WebDataset. During training, random
+    crops can be taken from this stored region for data augmentation.
+    
+    Matches the audio loading logic from train.py exactly.
 
     Args:
         filepath: Path to audio file
-        start_time: Start time in seconds (None for full file)
-        end_time: End time in seconds (None for full file)
+        start_time: Start time in seconds (None = 0.0)
+        end_time: End time in seconds (None = end of file)
         target_sr: Target sample rate (None to keep original)
 
     Returns:
         Tuple of (flac_bytes, sample_rate, num_samples)
+        Note: num_samples is the length of the FULL bounded region
 
     Raises:
         Exception: If audio cannot be loaded or encoded
     """
-    # Load audio using soundfile (more compatible across torchaudio versions)
     try:
-        # Get audio info
+        # Get audio info using soundfile (compatible with old torchaudio)
         info = sf.info(filepath)
         orig_sr = info.samplerate
         total_frames = info.frames
 
-        # Calculate frame offsets for efficient partial loading
-        start_frame = 0
-        frames_to_read = None  # None means read all frames
-        
-        # Parse start_time with error handling
+        # Parse time bounds (matching train.py:589-607)
+        # Handle various input types: float, int, string numbers, "nan", "unknown", None
         try:
-            start_sec = (
-                float(start_time)
-                if start_time is not None and not pd.isna(start_time)
-                else 0.0
-            )
+            if start_time is None or pd.isna(start_time):
+                start_sec = 0.0
+            elif isinstance(start_time, str):
+                # Handle string inputs like "0.5", "nan", "unknown"
+                if start_time.lower() in ("nan", "none", "unknown", ""):
+                    start_sec = 0.0
+                else:
+                    start_sec = float(start_time)
+            else:
+                start_sec = float(start_time)
         except (ValueError, TypeError):
             start_sec = 0.0
         
-        # Parse end_time with error handling
         try:
-            end_sec = (
-                float(end_time)
-                if end_time is not None and not pd.isna(end_time)
-                else None
-            )
+            if end_time is None or pd.isna(end_time):
+                end_sec = None
+            elif isinstance(end_time, str):
+                # Handle string inputs like "10.5", "nan", "unknown"
+                if end_time.lower() in ("nan", "none", "unknown", ""):
+                    end_sec = None
+                else:
+                    end_sec = float(end_time)
+            else:
+                end_sec = float(end_time)
         except (ValueError, TypeError):
             end_sec = None
         
-        # Calculate frame offsets (matching train.py logic)
+        # Calculate frame offsets (matching train.py:840-842)
         start_frame = int(start_sec * orig_sr)
-        start_frame = max(0, min(start_frame, total_frames - 1))
-        
-        # Convert end_sec to end_frame (always an integer, matching train.py:726)
         end_frame = int(end_sec * orig_sr) if end_sec is not None else total_frames
         end_frame = min(end_frame, total_frames)
         
-        # Calculate frames to read
-        frames_to_read = max(1, end_frame - start_frame)
+        # Calculate number of frames to read
+        num_frames = max(1, end_frame - start_frame)
         
-        # Only set start/frames if we're not reading the whole file
-        if start_frame == 0 and frames_to_read >= total_frames:
-            start_frame = 0
-            frames_to_read = None  # Read entire file
-
-        # Load audio
-        audio_np, sr = sf.read(
-            filepath,
-            start=start_frame,
-            frames=frames_to_read,
-            dtype='float32',
-            always_2d=False
+        # Load audio using torchaudio (matching train.py:857-859)
+        waveform, sr = torchaudio.load(
+            filepath, 
+            frame_offset=start_frame, 
+            num_frames=num_frames
         )
+        
+        # Convert to mono if needed (matching train.py:874-877)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        waveform = waveform.squeeze(0)  # (1, T) -> (T)
 
     except Exception as e:
         raise RuntimeError(f"Failed to load audio from {filepath}: {e}")
 
-    # Resample if needed
+    # Resample if needed (matching train.py:870-872)
     if target_sr is not None and sr != target_sr:
-        import torch
-        # Convert to torch tensor for resampling
-        if audio_np.ndim == 1:
-            waveform = torch.from_numpy(audio_np).unsqueeze(0)  # (samples,) -> (1, samples)
-        else:
-            waveform = torch.from_numpy(audio_np.T)  # (samples, channels) -> (channels, samples)
-        
+        waveform = waveform.unsqueeze(0)  # (T,) -> (1, T) for resampling
         resampler = torchaudio.transforms.Resample(
             orig_freq=sr,
             new_freq=target_sr,
         )
         waveform = resampler(waveform)
+        waveform = waveform.squeeze(0)  # (1, T) -> (T)
         sr = target_sr
-        
-        # Convert back to numpy
-        audio_np = waveform.numpy()
-        if audio_np.ndim == 2:
-            audio_np = audio_np.T  # (channels, samples) -> (samples, channels)
     
-    # Ensure correct shape for soundfile
-    if audio_np.ndim == 1:
-        num_samples = len(audio_np)
-    else:
-        num_samples = audio_np.shape[0]
+    # Convert to numpy for FLAC encoding
+    audio_np = waveform.numpy()
+    num_samples = len(audio_np)
 
     # Encode to FLAC
     buffer = io.BytesIO()
@@ -236,18 +237,33 @@ def process_sample(
         metadata = {
             "original_filename": str(row["filename"]),
             "sample_rate": sr,
-            "num_samples": num_samples,
-            "duration": num_samples / sr,
+            "num_samples": num_samples,  # Length of the FULL bounded region stored in shard
+            "duration": num_samples / sr,  # Duration of the FULL bounded region
             "label": label,
             "split": str(row.get("split", "train")),
             "dataset": str(row.get("dataset", "unknown")),
+            # Time bounds for the stored audio in the shard (always starts at 0)
+            "start_time": 0.0,  # Stored audio always starts at t=0
+            "end_time": num_samples / sr,  # End time = duration of stored segment
         }
 
-        # Add optional fields
+        # Optionally preserve original source file time bounds for provenance
         if "start_time" in row and pd.notna(row["start_time"]):
-            metadata["original_start_time"] = float(row["start_time"])
+            try:
+                original_start = float(row["start_time"]) if not isinstance(row["start_time"], str) or row["start_time"].lower() not in ("nan", "none", "unknown", "") else None
+                if original_start is not None:
+                    metadata["original_start_time"] = original_start
+            except (ValueError, TypeError):
+                pass
+        
         if "end_time" in row and pd.notna(row["end_time"]):
-            metadata["original_end_time"] = float(row["end_time"])
+            try:
+                original_end = float(row["end_time"]) if not isinstance(row["end_time"], str) or row["end_time"].lower() not in ("nan", "none", "unknown", "") else None
+                if original_end is not None:
+                    metadata["original_end_time"] = original_end
+            except (ValueError, TypeError):
+                pass
+        
         if "coi_class" in row and pd.notna(row["coi_class"]):
             metadata["coi_class"] = int(row["coi_class"])
 
