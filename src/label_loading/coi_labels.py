@@ -3,7 +3,7 @@ Centralized COI (Class of Interest) label definitions and utilities.
 Ensures consistent label handling across dataset creation and evaluation.
 
 This module serves as the single source of truth for:
-- COI synonym definitions (plane/airplane/aircraft variants)
+- COI synonym definitions (airplane/aircraft, bird, or custom variants)
 - Label normalization logic
 - COI detection across different label formats
 
@@ -11,6 +11,9 @@ Used by:
 - src/label_loading/sampler.py (dataset creation)
 - src/validation_functions/test_pipeline.py (evaluation)
 - Training scripts (configuration)
+
+The module supports multiple COI types (airplane, bird, etc.) by providing
+separate synonym sets. ValidationPipeline can be configured to use any set.
 """
 
 import ast
@@ -21,9 +24,8 @@ from typing import Any, List, Set
 # COI SYNONYM DEFINITIONS
 # ============================================================================
 
-# Full set of synonyms for plane/aircraft COI
-# These are normalized (lowercase, whitespace-collapsed) forms
-COI_SYNONYMS: Set[str] = {
+# Airplane/aircraft synonyms (normalized: lowercase, whitespace-collapsed)
+AIRPLANE_SYNONYMS: Set[str] = {
     "plane",
     "planes",
     "airplane",
@@ -41,6 +43,29 @@ COI_SYNONYMS: Set[str] = {
     "jet engine",
     "propeller, airscrew",
 }
+
+# Bird synonyms for bird detection tasks
+BIRD_SYNONYMS: Set[str] = {
+    "bird",
+    "birds",
+    "avian",
+    "birdsong",
+    "bird song",
+    "bird call",
+    "bird calls",
+    # AudioSet bird-related labels
+    "bird vocalization, bird call, bird song",
+    # Common categories (can be extended based on your dataset)
+    "songbird",
+    "songbirds",
+    "waterfowl",
+    "raptor",
+    "raptors",
+}
+
+# Default COI synonyms (airplane for backwards compatibility)
+# Can be overridden by passing custom synonym sets to functions
+COI_SYNONYMS: Set[str] = AIRPLANE_SYNONYMS
 
 
 # ============================================================================
@@ -258,6 +283,50 @@ def label_contains_coi(
 # ============================================================================
 
 
+def get_coi_synonyms_for_classifier(classifier_type: str) -> Set[str]:
+    """Get the appropriate COI synonym set for a given classifier type.
+    
+    This function maps classifier types to their corresponding COI synonym sets,
+    enabling the validation pipeline to use the correct labels for different tasks.
+    
+    Args:
+        classifier_type: Type of classifier being used. One of:
+            - "plane": Custom plane classifier → AIRPLANE_SYNONYMS
+            - "pann": PANN AudioSet model → AIRPLANE_SYNONYMS
+            - "pann_finetuned": Fine-tuned PANN → AIRPLANE_SYNONYMS
+            - "ast": Audio Spectrogram Transformer → AIRPLANE_SYNONYMS
+            - "birdnet": BirdNET classifier → BIRD_SYNONYMS
+            
+    Returns:
+        Set of COI synonyms appropriate for the classifier type
+        
+    Raises:
+        ValueError: If classifier_type is not recognized
+        
+    Examples:
+        >>> get_coi_synonyms_for_classifier("plane")
+        AIRPLANE_SYNONYMS
+        >>> get_coi_synonyms_for_classifier("birdnet")
+        BIRD_SYNONYMS
+    """
+    # Map classifier types to their COI synonym sets
+    classifier_to_synonyms = {
+        "plane": AIRPLANE_SYNONYMS,
+        "pann": AIRPLANE_SYNONYMS,
+        "pann_finetuned": AIRPLANE_SYNONYMS,
+        "ast": AIRPLANE_SYNONYMS,
+        "birdnet": BIRD_SYNONYMS,
+    }
+    
+    if classifier_type not in classifier_to_synonyms:
+        raise ValueError(
+            f"Unknown classifier_type: {classifier_type}. "
+            f"Must be one of: {list(classifier_to_synonyms.keys())}"
+        )
+    
+    return classifier_to_synonyms[classifier_type]
+
+
 def get_coi_synonyms_list() -> List[str]:
     """Return COI synonyms as a sorted list (for display/logging).
 
@@ -267,27 +336,35 @@ def get_coi_synonyms_list() -> List[str]:
     return sorted(COI_SYNONYMS)
 
 
-def expand_target_classes_with_synonyms(target_classes: List[str]) -> Set[str]:
+def expand_target_classes_with_synonyms(
+    target_classes: List[str], coi_synonyms: Set[str] = None
+) -> Set[str]:
     """Expand a target class list to include all relevant synonyms.
 
     Given a list of target classes (e.g., ["plane", "airplane"]), returns
-    the full set of synonyms from COI_SYNONYMS that match any of them.
+    the full set of synonyms from coi_synonyms that match any of them.
 
     Args:
         target_classes: List of target class names
+        coi_synonyms: Set of COI synonyms to use (defaults to COI_SYNONYMS)
 
     Returns:
-        Set of all matching synonyms from COI_SYNONYMS
+        Set of all matching synonyms from coi_synonyms
 
     Examples:
         >>> expand_target_classes_with_synonyms(["plane"])
         {"plane", "planes", "airplane", "airplanes", ...}
+        >>> expand_target_classes_with_synonyms(["bird"], BIRD_SYNONYMS)
+        {"bird", "birds", "avian", ...}
     """
+    if coi_synonyms is None:
+        coi_synonyms = COI_SYNONYMS
+    
     expanded = set()
     for tc in target_classes:
-        if is_coi_label(tc, COI_SYNONYMS):
-            # If this target matches any synonym, include all aircraft synonyms
-            expanded.update(COI_SYNONYMS)
+        if is_coi_label(tc, coi_synonyms):
+            # If this target matches any synonym, include all synonyms
+            expanded.update(coi_synonyms)
             break
     return expanded
 
@@ -297,34 +374,73 @@ def expand_target_classes_with_synonyms(target_classes: List[str]) -> Set[str]:
 # ============================================================================
 
 
-def validate_coi_config():
-    """Validate that the COI configuration is internally consistent.
+def validate_synonym_set(synonym_set: Set[str], set_name: str = "COI_SYNONYMS"):
+    """Validate that a synonym set is internally consistent.
 
-    Runs basic sanity checks on COI_SYNONYMS and utilities.
+    Runs basic sanity checks on a synonym set.
     Raises AssertionError if validation fails.
+    
+    Args:
+        synonym_set: Set of synonyms to validate
+        set_name: Name of the set for error messages
     """
-    # Check that COI_SYNONYMS is not empty
-    assert len(COI_SYNONYMS) > 0, "COI_SYNONYMS cannot be empty"
+    # Check that set is not empty
+    assert len(synonym_set) > 0, f"{set_name} cannot be empty"
 
     # Check that all synonyms are normalized (lowercase, no extra whitespace)
-    for synonym in COI_SYNONYMS:
+    for synonym in synonym_set:
         normalized = normalize_label(synonym)
         assert (
             synonym == normalized
-        ), f"Synonym '{synonym}' is not normalized (should be '{normalized}')"
+        ), f"{set_name}: Synonym '{synonym}' is not normalized (should be '{normalized}')"
 
     # Check that is_coi_label works for all synonyms
-    for synonym in COI_SYNONYMS:
+    for synonym in synonym_set:
         assert is_coi_label(
-            synonym
-        ), f"is_coi_label failed to detect synonym '{synonym}'"
+            synonym, synonym_set
+        ), f"{set_name}: is_coi_label failed to detect synonym '{synonym}'"
 
-    # Check that is_coi_label rejects non-COI labels
-    non_coi_labels = ["train", "car", "background", "wind", "rain", "bird"]
+
+def validate_coi_config():
+    """Validate that all COI configurations are internally consistent.
+
+    Runs basic sanity checks on AIRPLANE_SYNONYMS, BIRD_SYNONYMS, and COI_SYNONYMS.
+    Raises AssertionError if validation fails.
+    """
+    # Validate all predefined synonym sets
+    validate_synonym_set(AIRPLANE_SYNONYMS, "AIRPLANE_SYNONYMS")
+    validate_synonym_set(BIRD_SYNONYMS, "BIRD_SYNONYMS")
+    validate_synonym_set(COI_SYNONYMS, "COI_SYNONYMS")
+    
+    # Check that airplane and bird sets are disjoint (don't overlap)
+    overlap = AIRPLANE_SYNONYMS & BIRD_SYNONYMS
+    assert len(overlap) == 0, (
+        f"AIRPLANE_SYNONYMS and BIRD_SYNONYMS should be disjoint, "
+        f"but found overlapping terms: {overlap}"
+    )
+    
+    # Check that is_coi_label correctly rejects labels from other sets
+    # When using airplane synonyms, bird labels should be rejected
+    for bird_label in ["bird", "songbird", "avian"]:
+        assert not is_coi_label(
+            bird_label, AIRPLANE_SYNONYMS
+        ), f"AIRPLANE_SYNONYMS incorrectly detected bird label '{bird_label}' as COI"
+    
+    # When using bird synonyms, airplane labels should be rejected
+    for plane_label in ["plane", "airplane", "aircraft"]:
+        assert not is_coi_label(
+            plane_label, BIRD_SYNONYMS
+        ), f"BIRD_SYNONYMS incorrectly detected airplane label '{plane_label}' as COI"
+    
+    # Check that is_coi_label rejects non-COI labels for both sets
+    non_coi_labels = ["train", "car", "background", "wind", "rain", "traffic"]
     for label in non_coi_labels:
         assert not is_coi_label(
-            label
-        ), f"is_coi_label incorrectly detected '{label}' as COI"
+            label, AIRPLANE_SYNONYMS
+        ), f"AIRPLANE_SYNONYMS incorrectly detected '{label}' as COI"
+        assert not is_coi_label(
+            label, BIRD_SYNONYMS
+        ), f"BIRD_SYNONYMS incorrectly detected '{label}' as COI"
 
 
 # Run validation on import

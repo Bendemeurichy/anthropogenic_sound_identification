@@ -15,6 +15,7 @@ import torchaudio
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.validation_functions.classification_models.Classifier import create_classifier
+from src.common.audio_utils import create_high_quality_resampler
 
 
 def load_audio_for_classifier(audio_path: str, classifier) -> torch.Tensor:
@@ -38,7 +39,7 @@ def load_audio_for_classifier(audio_path: str, classifier) -> torch.Tensor:
     
     # Resample if needed
     if sr != classifier.sample_rate:
-        resampler = torchaudio.transforms.Resample(sr, classifier.sample_rate)
+        resampler = create_high_quality_resampler(sr, classifier.sample_rate)
         waveform = resampler(waveform)
     
     return waveform

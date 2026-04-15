@@ -14,6 +14,7 @@ Example usage:
 """
 
 import sys
+from pathlib import Path
 from typing import List, Tuple
 
 import torch
@@ -22,6 +23,10 @@ from panns_inference import AudioTagging
 from panns_inference import (
     labels as AUDIOSET_LABELS,  # list of 527 AudioSet class names
 )
+
+# Add project root to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+from src.common.audio_utils import create_high_quality_resampler
 
 # PANN models were trained on audio resampled to 32 kHz.
 PANN_SAMPLE_RATE: int = 32_000
@@ -84,8 +89,8 @@ def run_pann_inference(
 
     # Resample to PANN's expected 32 kHz when necessary.
     if sample_rate != PANN_SAMPLE_RATE:
-        resampler = torchaudio.transforms.Resample(
-            orig_freq=sample_rate, new_freq=PANN_SAMPLE_RATE
+        resampler = create_high_quality_resampler(
+            orig_sr=sample_rate, target_sr=PANN_SAMPLE_RATE
         )
         wav = resampler(wav)
 

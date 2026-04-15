@@ -52,6 +52,9 @@ sys.path.insert(
 
 from src.label_loading.coi_labels import (
     COI_SYNONYMS,
+    AIRPLANE_SYNONYMS,
+    BIRD_SYNONYMS,
+    get_coi_synonyms_for_classifier,
 )
 from src.label_loading.coi_labels import (
     _extract_label_atoms as _extract_label_atoms,
@@ -75,6 +78,7 @@ from src.validation_functions.classification_models.Classifier import (
     create_classifier,
     AudioClassifier,
 )
+from src.common.audio_utils import create_high_quality_resampler
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +152,7 @@ CNN_POSITIVE_CLASS: str = "plane"
 
 
 def _filter_contaminated_backgrounds(
-    df_bg: pd.DataFrame, verbose: bool = True
+    df_bg: pd.DataFrame, coi_synonyms: set = None, verbose: bool = True
 ) -> Tuple[pd.DataFrame, int]:
     """Filter out background samples that have COI synonyms in orig_label.
 
@@ -158,18 +162,25 @@ def _filter_contaminated_backgrounds(
 
     Args:
         df_bg: DataFrame of background samples (label=0)
+        coi_synonyms: Set of COI synonyms to check for contamination.
+            If None, uses COI_SYNONYMS (AIRPLANE_SYNONYMS).
         verbose: If True, print detailed filtering report
 
     Returns:
         Tuple of (filtered DataFrame, number of contaminated samples removed)
     """
+    if coi_synonyms is None:
+        coi_synonyms = COI_SYNONYMS
+    
     if "orig_label" not in df_bg.columns:
         if verbose:
             print("[Info] No 'orig_label' column found - skipping contamination filter")
         return df_bg, 0
 
     # Check each background sample for COI synonyms in orig_label
-    contaminated_mask = df_bg["orig_label"].apply(_is_coi_label)
+    contaminated_mask = df_bg["orig_label"].apply(
+        lambda x: _is_coi_label(x, coi_synonyms)
+    )
 
     n_contaminated = int(contaminated_mask.sum())
     if n_contaminated == 0:
@@ -607,12 +618,16 @@ class ValidationPipeline:
     )
     DATA_CSV = PROJECT_ROOT / "src/models/sudormrf/checkpoints/separation_dataset.csv"
 
-    def __init__(self, base_path: str = None):
+    def __init__(self, base_path: str = None, coi_synonyms: set = None):
         """
         Args:
             base_path: Base path for audio files (to convert Windows paths in CSV)
+            coi_synonyms: Set of COI (Class of Interest) synonyms to use for label matching.
+                If None, will be auto-detected based on classifier_type in load_models().
+                Can be AIRPLANE_SYNONYMS, BIRD_SYNONYMS, or a custom set.
         """
         self.base_path = base_path
+        self.coi_synonyms = coi_synonyms  # Will be set in load_models() if None
         self.sample_rate = 16000
         self.segment_length = 5.0
         self.classifier_sample_rate = self.sample_rate
@@ -676,6 +691,7 @@ class ValidationPipeline:
             classifier_type: Type of primary classifier to use. One of:
                 - "plane": PlaneClassifier (custom CNN for airplane detection)
                 - "pann": PANN AudioTagging (AudioSet-based airplane detection)
+                - "pann_finetuned": Fine-tuned PANN CNN14 (trained specifically for plane detection)
                 - "ast": AST (Audio Spectrogram Transformer for AudioSet)
                 - "birdnet": BirdNET (bird species detection)
             use_clapsep: If True, load the CLAPSep separator instead of SudoRM-RF.
@@ -805,6 +821,19 @@ class ValidationPipeline:
             )
             # Update classifier_sample_rate to match PANN's requirement
             self.classifier_sample_rate = self.classifier.sample_rate
+        elif classifier_type == "pann_finetuned":
+            cls_path = cls_weights or (
+                PROJECT_ROOT 
+                / "src/validation_functions/classification_models/plane_classifier_pann/checkpoints/final_model.pth"
+            )
+            print(f"  from {cls_path}")
+            self.classifier = create_classifier(
+                "pann_finetuned",
+                checkpoint_path=str(cls_path),
+                device=self.device,
+            )
+            # Update classifier_sample_rate to match PANN's requirement (32kHz)
+            self.classifier_sample_rate = self.classifier.sample_rate
         elif classifier_type == "ast":
             self.classifier = create_classifier(
                 "ast",
@@ -824,7 +853,7 @@ class ValidationPipeline:
         else:
             raise ValueError(
                 f"Unknown classifier_type: {classifier_type}. "
-                f"Must be one of: 'plane', 'pann', 'ast', 'birdnet'"
+                f"Must be one of: 'plane', 'pann', 'pann_finetuned', 'ast', 'birdnet'"
             )
         
         self.classifier_segment_samples = int(
@@ -834,9 +863,19 @@ class ValidationPipeline:
         print(f"  Classifier segment samples: {self.classifier_segment_samples}")
 
         # ------------------------------------------------------------------
+        # Auto-detect COI synonyms based on classifier type if not provided
+        # ------------------------------------------------------------------
+        if self.coi_synonyms is None:
+            self.coi_synonyms = get_coi_synonyms_for_classifier(classifier_type)
+            synonym_type = "AIRPLANE" if self.coi_synonyms == AIRPLANE_SYNONYMS else "BIRD"
+            print(f"  Auto-detected COI synonyms: {synonym_type}_SYNONYMS ({len(self.coi_synonyms)} terms)")
+        else:
+            print(f"  Using custom COI synonyms: {len(self.coi_synonyms)} terms")
+
+        # ------------------------------------------------------------------
         # Optional: PANN AudioTagging classifier (as auxiliary)
         # ------------------------------------------------------------------
-        if use_pann and classifier_type != "pann":
+        if use_pann and classifier_type not in ("pann", "pann_finetuned"):
             if _pann_available:
                 try:
                     self.pann_model = create_classifier(
@@ -929,7 +968,7 @@ class ValidationPipeline:
         if sr != self.sample_rate:
             key = (sr, self.sample_rate)
             if key not in self._resamplers:
-                self._resamplers[key] = torchaudio.transforms.Resample(
+                self._resamplers[key] = create_high_quality_resampler(
                     sr, self.sample_rate
                 )
             waveform = self._resamplers[key](waveform)
@@ -992,7 +1031,7 @@ class ValidationPipeline:
         if sr != self.sample_rate:
             key = (sr, self.sample_rate)
             if key not in self._resamplers:
-                self._resamplers[key] = torchaudio.transforms.Resample(
+                self._resamplers[key] = create_high_quality_resampler(
                     sr, self.sample_rate
                 )
             waveform = self._resamplers[key](waveform)
@@ -1038,7 +1077,7 @@ class ValidationPipeline:
         if sr != self.sample_rate:
             key = (sr, self.sample_rate)
             if key not in self._resamplers:
-                self._resamplers[key] = torchaudio.transforms.Resample(
+                self._resamplers[key] = create_high_quality_resampler(
                     sr, self.sample_rate
                 )
             waveform = self._resamplers[key](waveform)
@@ -1110,7 +1149,7 @@ class ValidationPipeline:
         if self.classifier_sample_rate != self.sample_rate:
             key = (self.sample_rate, self.classifier_sample_rate)
             if key not in self._resamplers:
-                self._resamplers[key] = torchaudio.transforms.Resample(
+                self._resamplers[key] = create_high_quality_resampler(
                     self.sample_rate, self.classifier_sample_rate
                 )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
@@ -1285,7 +1324,7 @@ class ValidationPipeline:
         if self.sample_rate != pann_sr:
             key = (self.sample_rate, pann_sr)
             if key not in self._resamplers:
-                self._resamplers[key] = torchaudio.transforms.Resample(
+                self._resamplers[key] = create_high_quality_resampler(
                     self.sample_rate, pann_sr
                 )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
@@ -1315,7 +1354,7 @@ class ValidationPipeline:
         if self.sample_rate != ast_sr:
             key = (self.sample_rate, ast_sr)
             if key not in self._resamplers:
-                self._resamplers[key] = torchaudio.transforms.Resample(
+                self._resamplers[key] = create_high_quality_resampler(
                     self.sample_rate, ast_sr
                 )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
@@ -1345,7 +1384,7 @@ class ValidationPipeline:
         if self.sample_rate != birdnet_sr:
             key = (self.sample_rate, birdnet_sr)
             if key not in self._resamplers:
-                self._resamplers[key] = torchaudio.transforms.Resample(
+                self._resamplers[key] = create_high_quality_resampler(
                     self.sample_rate, birdnet_sr
                 )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
@@ -2041,13 +2080,17 @@ class ValidationPipeline:
                 if "orig_label" in df_split.columns
                 else df_split["label"]
             )
-            df_split["label"] = raw_series.apply(lambda x: 1 if _is_coi_label(x) else 0)
+            df_split["label"] = raw_series.apply(
+                lambda x: 1 if _is_coi_label(x, self.coi_synonyms) else 0
+            )
 
         df_coi = df_split[df_split["label"] == 1].reset_index(drop=True)
         df_bg = df_split[df_split["label"] == 0].reset_index(drop=True)
 
         # Filter contaminated backgrounds (only when orig_label exists)
-        df_bg, n_contaminated = _filter_contaminated_backgrounds(df_bg, verbose=True)
+        df_bg, n_contaminated = _filter_contaminated_backgrounds(
+            df_bg, coi_synonyms=self.coi_synonyms, verbose=True
+        )
 
         # Human-readable label for logging and output filenames.
         run_label = only_dataset if only_dataset is not None else split
@@ -2321,7 +2364,7 @@ def demo_two_wav_separation(
         wav, sr = torchaudio.load(str(path))
         if sr != pipeline.sample_rate:
             key = (sr, pipeline.sample_rate)
-            resampler = torchaudio.transforms.Resample(sr, pipeline.sample_rate)
+            resampler = create_high_quality_resampler(sr, pipeline.sample_rate)
             wav = resampler(wav)
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0)

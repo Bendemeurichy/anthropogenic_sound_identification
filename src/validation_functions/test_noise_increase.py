@@ -114,8 +114,17 @@ def _safe_float(x, default=0.0) -> float:
         return float(default)
 
 
-def _extract_coi_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep rows considered COI in a robust way."""
+def _extract_coi_df(df: pd.DataFrame, coi_synonyms: set = None) -> pd.DataFrame:
+    """Keep rows considered COI in a robust way.
+    
+    Args:
+        df: DataFrame with label/orig_label columns
+        coi_synonyms: Set of COI synonyms to use for label matching.
+            If None, uses default from test_pipeline (_is_coi_label default).
+    
+    Returns:
+        DataFrame containing only COI samples (label=1)
+    """
     if "label" not in df.columns:
         raise ValueError("CSV must contain a 'label' column.")
 
@@ -130,17 +139,27 @@ def _extract_coi_df(df: pd.DataFrame) -> pd.DataFrame:
     # String fallback: use the canonical COI synonym set from test_pipeline so
     # both experiments operate on the same definition of "COI sample".
     base_series = out["orig_label"] if "orig_label" in out.columns else out["label"]
-    out["label_bin"] = base_series.apply(lambda x: 1 if _is_coi_label(x) else 0)
+    out["label_bin"] = base_series.apply(
+        lambda x: 1 if _is_coi_label(x, coi_synonyms) else 0
+    )
     coi = out[out["label_bin"] == 1].copy()
     return coi.reset_index(drop=True)
 
 
-def _extract_bg_df(df: pd.DataFrame) -> pd.DataFrame:
+def _extract_bg_df(df: pd.DataFrame, coi_synonyms: set = None) -> pd.DataFrame:
     """Keep rows considered background (non-COI) in a robust way.
     
     This function mirrors _extract_coi_df but for background samples.
     Useful when the experiment needs real background samples instead of
     synthetic white noise.
+    
+    Args:
+        df: DataFrame with label/orig_label columns
+        coi_synonyms: Set of COI synonyms to use for label matching.
+            If None, uses default from test_pipeline (_is_coi_label default).
+    
+    Returns:
+        DataFrame containing only background samples (label=0)
     """
     if "label" not in df.columns:
         raise ValueError("CSV must contain a 'label' column.")
@@ -156,7 +175,9 @@ def _extract_bg_df(df: pd.DataFrame) -> pd.DataFrame:
     # String fallback: use the canonical COI synonym set from test_pipeline so
     # both experiments operate on the same definition of "background sample".
     base_series = out["orig_label"] if "orig_label" in out.columns else out["label"]
-    out["label_bin"] = base_series.apply(lambda x: 1 if _is_coi_label(x) else 0)
+    out["label_bin"] = base_series.apply(
+        lambda x: 1 if _is_coi_label(x, coi_synonyms) else 0
+    )
     bg = out[out["label_bin"] == 0].copy()
     return bg.reset_index(drop=True)
 
@@ -536,13 +557,17 @@ def main() -> None:
         df = df[df["split"] == SPLIT].copy()
 
     # Extract COI and background DataFrames
-    df_coi = _extract_coi_df(df)
-    df_bg = _extract_bg_df(df)
+    # Use pipeline's COI synonyms if available (set by load_models), otherwise use default
+    coi_syns = getattr(pipeline, 'coi_synonyms', None)
+    df_coi = _extract_coi_df(df, coi_synonyms=coi_syns)
+    df_bg = _extract_bg_df(df, coi_synonyms=coi_syns)
     
     # Apply contamination filtering to background samples
     # (This ensures consistency with test_pipeline.py, even though this experiment
     # currently uses synthetic white noise instead of real background samples)
-    df_bg_clean, n_contaminated = _filter_contaminated_backgrounds(df_bg, verbose=True)
+    df_bg_clean, n_contaminated = _filter_contaminated_backgrounds(
+        df_bg, coi_synonyms=coi_syns, verbose=True
+    )
 
     print(f"\n{'=' * 60}")
     print(f"Dataset Statistics:")

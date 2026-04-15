@@ -228,5 +228,5 @@ __pycache__/
 validation_examples*
 *ast/
 *cnn/
-*pann/
+*/pann/
 *meeting_*/

@@ -8,6 +8,7 @@ they return a binary prediction (0/1) and a confidence score (0.0-1.0).
 Supported classifiers:
 - "plane": PlaneClassifier (TensorFlow/YAMNet-based CNN for airplane detection)
 - "pann": PANN AudioTagging (PyTorch-based AudioSet classifier)
+- "pann_finetuned": Fine-tuned PANN CNN14 (PyTorch-based, trained specifically for plane detection)
 - "ast": Audio Spectrogram Transformer (HuggingFace transformer for AudioSet)
 - "birdnet": BirdNET (acoustic bird species classifier)
 
@@ -87,6 +88,7 @@ def create_classifier(
         classifier_type: Type of classifier to create. One of:
             - "plane": Airplane detection using custom CNN (TensorFlow/YAMNet)
             - "pann": PANN AudioTagging for AudioSet classification
+            - "pann_finetuned": Fine-tuned PANN CNN14 for airplane detection
             - "ast": Audio Spectrogram Transformer for AudioSet
             - "birdnet": BirdNET for bird species detection
         device: Device for model inference. Examples: "cpu", "cuda", "cuda:0", "cuda:1"
@@ -105,6 +107,10 @@ def create_classifier(
             positive_labels (List[str], optional): AudioSet labels for positive class.
                 Default: ["Fixed-wing aircraft, airplane", "Aircraft", "Jet aircraft",
                          "Propeller, airscrew", "Turboprop, small aircraft"]
+        
+        PANN fine-tuned classifier:
+            checkpoint_path (str, required): Path to fine-tuned model checkpoint (.pth file)
+            config (TrainingConfig, optional): Training configuration
         
         AST classifier:
             positive_labels (List[str], optional): AudioSet labels for positive class.
@@ -181,6 +187,22 @@ def create_classifier(
             **kwargs
         )
     
+    elif classifier_type == "pann_finetuned":
+        from .pann_finetuned_wrapper import PANNFinetunedWrapper
+        
+        checkpoint_path = kwargs.pop("checkpoint_path", None)
+        if checkpoint_path is None:
+            raise ValueError("'checkpoint_path' is required for pann_finetuned classifier")
+        
+        config = kwargs.pop("config", None)
+        return PANNFinetunedWrapper(
+            checkpoint_path=checkpoint_path,
+            config=config,
+            device=device,
+            threshold=threshold,
+            **kwargs
+        )
+    
     elif classifier_type == "ast":
         from .ast_wrapper import ASTClassifierWrapper
         
@@ -202,5 +224,5 @@ def create_classifier(
     else:
         raise ValueError(
             f"Unknown classifier_type: {classifier_type!r}. "
-            f"Must be one of: 'plane', 'pann', 'ast', 'birdnet'"
+            f"Must be one of: 'plane', 'pann', 'pann_finetuned', 'ast', 'birdnet'"
         )

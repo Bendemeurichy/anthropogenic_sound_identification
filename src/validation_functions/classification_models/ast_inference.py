@@ -15,11 +15,16 @@ Example usage:
 """
 
 import sys
+from pathlib import Path
 from typing import List, Tuple
 
 import torch
 import torchaudio
 from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+
+# Add project root to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+from src.common.audio_utils import create_high_quality_resampler
 
 # The MIT AST model was fine-tuned on AudioSet with 16 kHz audio.
 AST_SAMPLE_RATE: int = 16_000
@@ -101,8 +106,8 @@ def run_ast_inference(
 
     # Resample to AST's expected 16 kHz when necessary.
     if sample_rate != AST_SAMPLE_RATE:
-        resampler = torchaudio.transforms.Resample(
-            orig_freq=sample_rate, new_freq=AST_SAMPLE_RATE
+        resampler = create_high_quality_resampler(
+            orig_sr=sample_rate, target_sr=AST_SAMPLE_RATE
         )
         wav = resampler(wav)
 
