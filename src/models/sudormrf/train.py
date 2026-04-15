@@ -174,8 +174,9 @@ def progress_bar(iterable, desc: str = "", total: int | None = None, **tqdm_kwar
     return StepProgress(iterable, desc=desc, total=total)
 
 
-# Add parent directories to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add src directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # project root
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))  # src dir
 
 from common.audio_utils import ResamplerCache
 from base.sudo_rm_rf.dnn.models.groupcomm_sudormrf_v2 import GroupCommSudoRmRf
