@@ -115,19 +115,21 @@ def load_and_encode_audio(
         except (ValueError, TypeError):
             end_sec = None
         
-        # Calculate frame offsets
-        if start_sec > 0.0 or end_sec is not None:
-            start_frame = int(start_sec * orig_sr)
-            start_frame = max(0, min(start_frame, total_frames - 1))
-            
-            if end_sec is not None:
-                # Extract specific segment
-                end_frame = int(end_sec * orig_sr)
-                end_frame = min(end_frame, total_frames)
-                frames_to_read = max(1, end_frame - start_frame)
-            else:
-                # Read from start_time to end of file
-                frames_to_read = total_frames - start_frame
+        # Calculate frame offsets (matching train.py logic)
+        start_frame = int(start_sec * orig_sr)
+        start_frame = max(0, min(start_frame, total_frames - 1))
+        
+        # Convert end_sec to end_frame (always an integer, matching train.py:726)
+        end_frame = int(end_sec * orig_sr) if end_sec is not None else total_frames
+        end_frame = min(end_frame, total_frames)
+        
+        # Calculate frames to read
+        frames_to_read = max(1, end_frame - start_frame)
+        
+        # Only set start/frames if we're not reading the whole file
+        if start_frame == 0 and frames_to_read >= total_frames:
+            start_frame = 0
+            frames_to_read = None  # Read entire file
 
         # Load audio
         audio_np, sr = sf.read(
