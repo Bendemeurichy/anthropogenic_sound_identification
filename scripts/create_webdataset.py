@@ -84,24 +84,31 @@ def load_and_encode_audio(
     Raises:
         Exception: If audio cannot be loaded or encoded
     """
-    # Load audio
+    # Load audio using soundfile (more compatible across torchaudio versions)
     try:
-        info = torchaudio.info(filepath)
-        orig_sr = info.sample_rate
+        # Get audio info
+        info = sf.info(filepath)
+        orig_sr = info.samplerate
+        total_frames = info.frames
 
         # Calculate frame offsets for efficient partial loading
-        frame_offset = 0
-        num_frames = -1
+        start_frame = 0
+        frames_to_read = -1
 
         if start_time is not None and end_time is not None:
             if not (pd.isna(start_time) or pd.isna(end_time)):
-                frame_offset = int(float(start_time) * orig_sr)
-                num_frames = int((float(end_time) - float(start_time)) * orig_sr)
-                frame_offset = max(0, min(frame_offset, info.num_frames - 1))
-                num_frames = min(num_frames, info.num_frames - frame_offset)
+                start_frame = int(float(start_time) * orig_sr)
+                frames_to_read = int((float(end_time) - float(start_time)) * orig_sr)
+                start_frame = max(0, min(start_frame, total_frames - 1))
+                frames_to_read = min(frames_to_read, total_frames - start_frame)
 
-        waveform, sr = torchaudio.load(
-            filepath, frame_offset=frame_offset, num_frames=num_frames
+        # Load audio
+        audio_np, sr = sf.read(
+            filepath,
+            start=start_frame,
+            frames=frames_to_read if frames_to_read > 0 else None,
+            dtype='float32',
+            always_2d=False
         )
 
     except Exception as e:
@@ -109,30 +116,37 @@ def load_and_encode_audio(
 
     # Resample if needed
     if target_sr is not None and sr != target_sr:
+        import torch
+        # Convert to torch tensor for resampling
+        if audio_np.ndim == 1:
+            waveform = torch.from_numpy(audio_np).unsqueeze(0)  # (samples,) -> (1, samples)
+        else:
+            waveform = torch.from_numpy(audio_np.T)  # (samples, channels) -> (channels, samples)
+        
         resampler = torchaudio.transforms.Resample(
             orig_freq=sr,
             new_freq=target_sr,
-            resampling_method="sinc_interp_kaiser",
-            lowpass_filter_width=64,
-            rolloff=0.99,
-            beta=14.769,
         )
         waveform = resampler(waveform)
         sr = target_sr
-
-    # Convert to numpy for soundfile
-    audio_np = waveform.numpy()
-
-    # Handle multi-channel: keep as-is, soundfile handles it
-    if audio_np.ndim == 2:
-        audio_np = audio_np.T  # (channels, samples) -> (samples, channels)
+        
+        # Convert back to numpy
+        audio_np = waveform.numpy()
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T  # (channels, samples) -> (samples, channels)
+    
+    # Ensure correct shape for soundfile
+    if audio_np.ndim == 1:
+        num_samples = len(audio_np)
+    else:
+        num_samples = audio_np.shape[0]
 
     # Encode to FLAC
     buffer = io.BytesIO()
     sf.write(buffer, audio_np, sr, format="FLAC", subtype="PCM_16")
     flac_bytes = buffer.getvalue()
 
-    return flac_bytes, sr, waveform.shape[-1]
+    return flac_bytes, sr, num_samples
 
 
 def process_sample(
