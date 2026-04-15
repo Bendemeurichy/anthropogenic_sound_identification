@@ -1843,7 +1843,10 @@ def train(config: Config, timestamp: str | None = None):
     with open(checkpoint_dir / "training_history.json", "w") as f:
         json.dump(history, f, indent=2)
 
+    # Convert negative SI-SNR to positive for reporting
+    best_val_sisnr = -best_val_loss
     print(f"\nTraining completed! Best val loss: {best_val_loss:.4f}")
+    print(f"Best Val SI-SNR: {best_val_sisnr:.2f} dB")
 
 
 def main():
