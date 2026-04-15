@@ -175,12 +175,41 @@ def process_sample(
         )
 
         # Build metadata
+        # Handle label: can be string, int, or list (or string representation of list)
+        label_value = row.get("label")
+        if pd.notna(label_value):
+            # If it's already an int, use it
+            if isinstance(label_value, (int, np.integer)):
+                label = int(label_value)
+            # If it's a list, keep it as list
+            elif isinstance(label_value, list):
+                label = label_value
+            # If it's a string, check if it's a string representation of a list
+            elif isinstance(label_value, str):
+                # Try to parse as list (e.g., "['Rain', 'Thunder']")
+                if label_value.startswith('[') and label_value.endswith(']'):
+                    try:
+                        import ast
+                        label = ast.literal_eval(label_value)
+                    except (ValueError, SyntaxError):
+                        label = label_value
+                else:
+                    label = label_value
+            else:
+                # Try to convert to int, fallback to string
+                try:
+                    label = int(label_value)
+                except (ValueError, TypeError):
+                    label = str(label_value)
+        else:
+            label = None
+        
         metadata = {
             "original_filename": str(row["filename"]),
             "sample_rate": sr,
             "num_samples": num_samples,
             "duration": num_samples / sr,
-            "label": int(row["label"]) if pd.notna(row.get("label")) else 0,
+            "label": label,
             "split": str(row.get("split", "train")),
             "dataset": str(row.get("dataset", "unknown")),
         }
