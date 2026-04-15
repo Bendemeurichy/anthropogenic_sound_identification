@@ -289,6 +289,9 @@ class DataConfig:
     background_only_prob: float = 0.15
     background_mix_n: int = 2
     augment_multiplier: int = 2
+    # WebDataset configuration
+    use_webdataset: bool = False
+    webdataset_path: str = ""
 
 
 @dataclass
@@ -1232,6 +1235,54 @@ def validate_epoch(
 
 
 def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioDataset]:
+    """Create dataloader for specified split.
+    
+    Supports both file-based and WebDataset loading modes based on config.
+    """
+    # Check if we should use WebDataset
+    use_webdataset = getattr(config.data, "use_webdataset", False)
+    webdataset_path = getattr(config.data, "webdataset_path", "")
+    
+    if use_webdataset:
+        if not webdataset_path:
+            raise ValueError("webdataset_path must be set when use_webdataset=True")
+        
+        from src.common.webdataset_utils import COIWebDatasetWrapper
+        from src.label_loading.metadata_loader import get_webdataset_paths
+        
+        print(f"Using WebDataset loading from: {webdataset_path}")
+        
+        n_coi = len(config.model.coi_prompts)
+        tar_paths = get_webdataset_paths(webdataset_path, split)
+        
+        dataset = COIWebDatasetWrapper(
+            tar_paths=tar_paths,
+            split=split,
+            target_sr=config.data.sample_rate,
+            segment_length=config.data.segment_length,
+            snr_range=tuple(config.data.snr_range),
+            n_coi_classes=n_coi,
+            shuffle=(split == "train"),
+            augment=(split == "train"),
+            stereo=False,
+            background_only_prob=(
+                config.data.background_only_prob if split == "train" else 0.0
+            ),
+        )
+        
+        num_workers = config.training.num_workers
+        pin_memory = config.training.pin_memory and torch.cuda.is_available()
+        
+        loader = DataLoader(
+            dataset,
+            batch_size=config.training.batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        
+        return loader, dataset
+    
+    # File-based mode (original behavior)
     header_cols = pd.read_csv(config.data.df_path, nrows=0).columns.tolist()
     usecols = ["filename", "label", "split", "coi_class"]
     for opt in ("start_time", "end_time", "duration"):

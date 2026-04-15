@@ -1,0 +1,55 @@
+#!/bin/bash
+# =============================================================================
+# PBS Job Script: SudoRM-RF Training
+# =============================================================================
+# Submit with: qsub scripts/hpc/train_sudormrf.pbs
+# Monitor with: qstat -u $USER
+# =============================================================================
+
+#PBS -N sudormrf_train
+#PBS -l nodes=1:ppn=8:gpus=1
+#PBS -l walltime=32:00:00
+#PBS -l mem=64gb
+#PBS -m abe
+
+# Switch to GPU cluster (A100 80GB)
+module swap cluster/accelgor
+
+# Load Python and activate virtual environment
+module load Python/3.11.3-GCCcore-12.3.0
+source $VSC_DATA/venv/bin/activate
+
+# Navigate to project directory
+cd $VSC_DATA/code
+
+# Print job information
+echo "=============================================="
+echo "SudoRM-RF Training Job"
+echo "=============================================="
+echo "Job ID:    $PBS_JOBID"
+echo "Node:      $(hostname)"
+echo "Started:   $(date)"
+echo "Directory: $(pwd)"
+echo ""
+echo "GPU Information:"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+echo ""
+echo "Python:    $(python --version)"
+echo "PyTorch:   $(python -c 'import torch; print(torch.__version__)')"
+echo "CUDA:      $(python -c 'import torch; print(torch.version.cuda)')"
+echo "=============================================="
+echo ""
+
+# Run training
+# NOTE: Before running, edit src/models/sudormrf/training_config.yaml:
+#   - Set use_webdataset: true
+#   - Set webdataset_path to your $VSC_SCRATCH path
+#   - Set checkpoint_dir to $VSC_DATA/checkpoints/sudormrf
+python -u src/models/sudormrf/train.py \
+    --config src/models/sudormrf/training_config.yaml
+
+# Print completion info
+echo ""
+echo "=============================================="
+echo "Job completed: $(date)"
+echo "=============================================="

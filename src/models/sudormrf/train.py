@@ -1438,7 +1438,60 @@ def validate_epoch(
 
 
 def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioDataset]:
-    """Create dataloader for specified split."""
+    """Create dataloader for specified split.
+    
+    Supports both file-based and WebDataset loading modes based on config.
+    """
+    # Check if we should use WebDataset
+    use_webdataset = getattr(config.data, "use_webdataset", False)
+    webdataset_path = getattr(config.data, "webdataset_path", "")
+    
+    if use_webdataset:
+        if not webdataset_path:
+            raise ValueError("webdataset_path must be set when use_webdataset=True")
+        
+        from src.common.webdataset_utils import COIWebDatasetWrapper
+        from src.label_loading.metadata_loader import get_webdataset_paths
+        
+        print(f"Using WebDataset loading from: {webdataset_path}")
+        
+        tar_paths = get_webdataset_paths(webdataset_path, split)
+        
+        dataset = COIWebDatasetWrapper(
+            tar_paths=tar_paths,
+            split=split,
+            target_sr=config.data.sample_rate,
+            segment_length=config.data.segment_length,
+            snr_range=tuple(config.data.snr_range),
+            n_coi_classes=config.data.n_coi_classes,
+            shuffle=(split == "train"),
+            augment=(split == "train"),
+            stereo=False,
+            background_only_prob=(
+                getattr(config.data, "background_only_prob", 0.0)
+                if split == "train"
+                else 0.0
+            ),
+        )
+        
+        num_workers = int(getattr(config.training, "num_workers", 0))
+        pin_memory = (
+            getattr(config.training, "pin_memory", False) and torch.cuda.is_available()
+        )
+        
+        # WebDataset is an IterableDataset - different DataLoader settings
+        loader = DataLoader(
+            dataset,
+            batch_size=config.training.batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            # No shuffle for IterableDataset - handled internally
+            # No drop_last for IterableDataset
+        )
+        
+        return loader, dataset
+    
+    # File-based mode (original behavior)
     # Read a minimal probe of the header to discover which optional columns
     # (start_time, end_time, duration, …) are actually present in the CSV so
     # that AudioDataset can use file-level bounds for segmentation.

@@ -1,0 +1,59 @@
+#!/bin/bash
+# =============================================================================
+# PBS Job Script: CLAPSep Training
+# =============================================================================
+# Submit with: qsub scripts/hpc/train_clapsep.pbs
+# Monitor with: qstat -u $USER
+# =============================================================================
+
+#PBS -N clapsep_train
+#PBS -l nodes=1:ppn=8:gpus=1
+#PBS -l walltime=32:00:00
+#PBS -l mem=64gb
+#PBS -m abe
+
+# Switch to GPU cluster (A100 80GB)
+module swap cluster/accelgor
+
+# Load Python and activate virtual environment
+module load Python/3.11.3-GCCcore-12.3.0
+source $VSC_DATA/venv/bin/activate
+
+# Navigate to project directory
+cd $VSC_DATA/code
+
+# Print job information
+echo "=============================================="
+echo "CLAPSep Training Job"
+echo "=============================================="
+echo "Job ID:    $PBS_JOBID"
+echo "Node:      $(hostname)"
+echo "Started:   $(date)"
+echo "Directory: $(pwd)"
+echo ""
+echo "GPU Information:"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+echo ""
+echo "Python:    $(python --version)"
+echo "PyTorch:   $(python -c 'import torch; print(torch.__version__)')"
+echo "CUDA:      $(python -c 'import torch; print(torch.version.cuda)')"
+echo "=============================================="
+echo ""
+
+# Run training
+# NOTE: Adjust paths below as needed for your setup
+# The checkpoint directory is set to $VSC_DATA for persistent storage
+python -u src/models/clapsep/train_coi.py \
+    --df-path data/aircraft_data.csv \
+    --clap-checkpoint src/models/clapsep/checkpoint/CLAPSep/model/music_audioset_epoch_15_esc_90.14.pt \
+    --checkpoint-dir $VSC_DATA/checkpoints/clapsep \
+    --device cuda \
+    --no-freeze-encoder \
+    --use-lora \
+    --precision bf16-mixed
+
+# Print completion info
+echo ""
+echo "=============================================="
+echo "Job completed: $(date)"
+echo "=============================================="

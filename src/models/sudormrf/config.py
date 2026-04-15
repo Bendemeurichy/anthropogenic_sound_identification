@@ -78,6 +78,12 @@ class DataConfig:
     # (independently per class).  0.0 = disabled (single-class per sample).
     # Only meaningful when n_coi_classes > 1.
     multi_coi_prob: float = 0.0
+    # WebDataset configuration
+    # Set use_webdataset=True to load from tar shards instead of individual files
+    use_webdataset: bool = False
+    # Path to directory containing WebDataset tar shards
+    # Required when use_webdataset=True
+    webdataset_path: str = ""
 
 
 @dataclass

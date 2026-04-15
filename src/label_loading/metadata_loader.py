@@ -1,7 +1,22 @@
 """
 This module contains the functionality responsible for loading all the labels of the dataset.
 Filenames can be used to sample data for finetuning.
+
+Supports both:
+1. File-based loading (original): Load audio from disk using file paths
+2. WebDataset loading: Load audio from compressed tar shards
+
+Usage:
+    # File-based (original)
+    df = load_metadata_datasets(datasets_path, audio_base_path)
+    
+    # WebDataset mode
+    shard_paths = get_webdataset_paths(webdataset_dir, split="train")
 """
+
+import json
+from pathlib import Path
+from typing import Dict, List, Optional, Union
 
 import pandas as pd
 
@@ -222,3 +237,156 @@ def test_load_metadata_datasets():
 
 if __name__ == "__main__":
     test_load_metadata_datasets()
+
+
+# =============================================================================
+# WebDataset Support
+# =============================================================================
+
+
+def get_webdataset_paths(
+    webdataset_dir: Union[str, Path],
+    split: str = "train",
+    manifest_file: str = "manifest.json",
+) -> str:
+    """
+    Get WebDataset shard path pattern for a given split.
+
+    Args:
+        webdataset_dir: Directory containing WebDataset shards
+        split: Data split (train, val, test)
+        manifest_file: Name of manifest file
+
+    Returns:
+        Brace-expansion path pattern for shards
+
+    Example:
+        >>> paths = get_webdataset_paths("/data/shards", "train")
+        >>> print(paths)
+        '/data/shards/train-{000000..000099}.tar'
+    """
+    webdataset_dir = Path(webdataset_dir)
+    manifest_path = webdataset_dir / manifest_file
+
+    if manifest_path.exists():
+        # Use manifest for accurate shard counts
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        if split not in manifest.get("splits", {}):
+            raise ValueError(
+                f"Split '{split}' not found in manifest. "
+                f"Available: {list(manifest['splits'].keys())}"
+            )
+
+        shard_pattern = manifest["splits"][split].get("shard_pattern")
+        if shard_pattern:
+            return str(webdataset_dir / shard_pattern)
+
+        # Fallback: calculate from num_shards
+        num_shards = manifest["splits"][split]["num_shards"]
+        return str(webdataset_dir / f"{split}-{{000000..{num_shards-1:06d}}}.tar")
+
+    # No manifest: discover shards by listing directory
+    import glob
+
+    shard_files = sorted(glob.glob(str(webdataset_dir / f"{split}-*.tar")))
+    if not shard_files:
+        raise FileNotFoundError(
+            f"No shards found for split '{split}' in {webdataset_dir}"
+        )
+
+    num_shards = len(shard_files)
+    return str(webdataset_dir / f"{split}-{{000000..{num_shards-1:06d}}}.tar")
+
+
+def get_all_webdataset_paths(
+    webdataset_dir: Union[str, Path],
+    splits: Optional[List[str]] = None,
+) -> Dict[str, str]:
+    """
+    Get WebDataset shard paths for multiple splits.
+
+    Args:
+        webdataset_dir: Directory containing WebDataset shards
+        splits: List of splits to get (default: ['train', 'val', 'test'])
+
+    Returns:
+        Dictionary mapping split names to shard path patterns
+    """
+    if splits is None:
+        splits = ["train", "val", "test"]
+
+    paths = {}
+    for split in splits:
+        try:
+            paths[split] = get_webdataset_paths(webdataset_dir, split)
+        except (ValueError, FileNotFoundError):
+            pass  # Split doesn't exist
+
+    return paths
+
+
+def load_webdataset_manifest(
+    webdataset_dir: Union[str, Path],
+    manifest_file: str = "manifest.json",
+) -> Dict:
+    """
+    Load WebDataset manifest containing shard information.
+
+    Args:
+        webdataset_dir: Directory containing WebDataset shards
+        manifest_file: Name of manifest file
+
+    Returns:
+        Manifest dictionary with shard information
+    """
+    manifest_path = Path(webdataset_dir) / manifest_file
+
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+    with open(manifest_path) as f:
+        return json.load(f)
+
+
+def get_webdataset_info(webdataset_dir: Union[str, Path]) -> Dict:
+    """
+    Get summary information about a WebDataset.
+
+    Args:
+        webdataset_dir: Directory containing WebDataset shards
+
+    Returns:
+        Dictionary with dataset info (sample counts, sample rate, etc.)
+    """
+    try:
+        manifest = load_webdataset_manifest(webdataset_dir)
+        return {
+            "total_samples": manifest.get("total_samples", 0),
+            "total_shards": manifest.get("total_shards", 0),
+            "target_sample_rate": manifest.get("target_sample_rate"),
+            "splits": {
+                name: {
+                    "samples": info.get("num_samples", 0),
+                    "shards": info.get("num_shards", 0),
+                }
+                for name, info in manifest.get("splits", {}).items()
+            },
+        }
+    except FileNotFoundError:
+        # No manifest, count shards manually
+        import glob
+
+        webdataset_dir = Path(webdataset_dir)
+        info = {"splits": {}}
+
+        for split in ["train", "val", "test"]:
+            shards = glob.glob(str(webdataset_dir / f"{split}-*.tar"))
+            if shards:
+                info["splits"][split] = {"shards": len(shards)}
+
+        info["total_shards"] = sum(
+            s.get("shards", 0) for s in info["splits"].values()
+        )
+        return info

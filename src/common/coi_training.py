@@ -730,11 +730,17 @@ def create_coi_dataloader(
     num_workers: int = 0,
     pin_memory: bool = True,
     seed: int = 42,
+    # WebDataset options
+    use_webdataset: bool = False,
+    webdataset_path: Optional[str] = None,
 ) -> tuple:
     """Create dataloader for COI separation training.
 
+    Supports both file-based and WebDataset loading modes.
+
     Args:
         df_path: Path to CSV with 'filename', 'split', 'label' columns
+                 (ignored if use_webdataset=True)
         split: Data split ('train', 'val', 'test')
         batch_size: Batch size
         sample_rate: Target sample rate
@@ -748,14 +754,54 @@ def create_coi_dataloader(
         num_workers: DataLoader workers
         pin_memory: Whether to pin memory
         seed: Random seed
+        use_webdataset: If True, load from WebDataset shards instead of files
+        webdataset_path: Path to WebDataset shards directory (required if use_webdataset=True)
 
     Returns:
-        tuple: (DataLoader, COIAudioDataset)
+        tuple: (DataLoader, Dataset)
     """
     import gc
 
     from torch.utils.data import DataLoader
 
+    if use_webdataset:
+        # WebDataset mode
+        if webdataset_path is None:
+            raise ValueError("webdataset_path is required when use_webdataset=True")
+
+        from .webdataset_utils import COIWebDatasetWrapper
+
+        # Get shard paths for the split
+        from src.label_loading.metadata_loader import get_webdataset_paths
+
+        tar_paths = get_webdataset_paths(webdataset_path, split)
+
+        dataset = COIWebDatasetWrapper(
+            tar_paths=tar_paths,
+            split=split,
+            target_sr=sample_rate,
+            segment_length=segment_length,
+            snr_range=snr_range,
+            n_coi_classes=n_coi_classes,
+            shuffle=(split == "train"),
+            augment=(split == "train"),
+            stereo=stereo,
+            background_only_prob=background_only_prob if split == "train" else 0.0,
+        )
+
+        # WebDataset is an IterableDataset - different DataLoader settings
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory and torch.cuda.is_available(),
+            # No shuffle - WebDataset handles it internally
+            # No drop_last for iterable datasets
+        )
+
+        return loader, dataset
+
+    # File-based mode (original behavior)
     usecols = ["filename", "label", "split"]
     if n_coi_classes > 1:
         usecols.append("coi_class")

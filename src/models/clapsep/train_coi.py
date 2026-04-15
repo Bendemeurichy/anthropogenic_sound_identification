@@ -466,6 +466,9 @@ def train(
     encoder_embed_dim: int = 128,
     d_attn: int = 640,
     n_masker_layer: int = 3,
+    # WebDataset options
+    use_webdataset: bool = False,
+    webdataset_path: str = "",
 ):
     """Main training function."""
     if not HAS_CLAP:
@@ -501,6 +504,8 @@ def train(
         stereo=False,  # CLAPSep uses mono
         num_workers=num_workers,
         seed=seed,
+        use_webdataset=use_webdataset,
+        webdataset_path=webdataset_path if use_webdataset else None,
     )
 
     val_loader, _ = create_coi_dataloader(
@@ -513,6 +518,8 @@ def train(
         stereo=False,
         num_workers=num_workers,
         seed=seed,
+        use_webdataset=use_webdataset,
+        webdataset_path=webdataset_path if use_webdataset else None,
     )
 
     # Load pretrained CLAP model

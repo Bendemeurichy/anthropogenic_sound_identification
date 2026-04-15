@@ -4,6 +4,10 @@ Generic PyTorch dataset for audio classification tasks.
 This module provides a reusable dataset implementation that works with any
 PyTorch-based audio classification model (PANN, AST, BirdNET, etc.).
 
+Supports both:
+1. File-based loading (original): Load audio from disk using file paths
+2. WebDataset loading: Load audio from compressed tar shards
+
 Key features:
 - Load audio from disk with variable-length annotations
 - High-quality resampling using audio_utils.ResamplerCache
@@ -12,6 +16,7 @@ Key features:
 - Memory-efficient lazy loading
 
 Example:
+    >>> # File-based loading (original)
     >>> from src.common.audio_dataset import AudioClassificationDataset
     >>> dataset = AudioClassificationDataset(
     ...     df=train_df,
@@ -20,16 +25,26 @@ Example:
     ...     augment=True
     ... )
     >>> waveform, label = dataset[0]
+    
+    >>> # WebDataset loading
+    >>> from src.common.audio_dataset import create_classification_dataloader
+    >>> loader = create_classification_dataloader(
+    ...     df_path="metadata.csv",
+    ...     split="train",
+    ...     batch_size=32,
+    ...     use_webdataset=True,
+    ...     webdataset_path="/data/shards"
+    ... )
 """
 
 import pandas as pd
 import numpy as np
 import torch
 import torchaudio
-from torch.utils.data import Dataset
-from pathlib import Path
-from typing import Optional, Dict, Tuple
 import warnings
+from torch.utils.data import Dataset, DataLoader
+from pathlib import Path
+from typing import Optional, Dict, Tuple, Callable
 
 from .audio_utils import ResamplerCache
 
@@ -324,3 +339,144 @@ class AudioClassificationDataset(Dataset):
             return stretched
         
         return waveform
+
+
+# =============================================================================
+# Factory Functions for DataLoader Creation
+# =============================================================================
+
+
+def create_classification_dataloader(
+    df_path: str,
+    split: str,
+    batch_size: int,
+    target_sample_rate: int = 32000,
+    audio_duration: float = 10.0,
+    augment: bool = True,
+    augmentation_config: Optional[Dict] = None,
+    num_workers: int = 0,
+    pin_memory: bool = True,
+    shuffle: Optional[bool] = None,
+    # WebDataset options
+    use_webdataset: bool = False,
+    webdataset_path: Optional[str] = None,
+) -> Tuple[DataLoader, Dataset]:
+    """
+    Create dataloader for audio classification.
+    
+    Supports both file-based and WebDataset loading modes.
+    
+    Args:
+        df_path: Path to CSV with audio metadata (ignored if use_webdataset=True)
+        split: Data split ('train', 'val', 'test')
+        batch_size: Batch size
+        target_sample_rate: Target sample rate
+        audio_duration: Target audio duration in seconds
+        augment: Whether to apply augmentations (only for training)
+        augmentation_config: Augmentation parameters
+        num_workers: DataLoader workers
+        pin_memory: Whether to pin memory
+        shuffle: Whether to shuffle (default: True for train, False otherwise)
+        use_webdataset: If True, load from WebDataset shards
+        webdataset_path: Path to WebDataset directory (required if use_webdataset=True)
+        
+    Returns:
+        Tuple of (DataLoader, Dataset)
+        
+    Example:
+        >>> # File-based loading
+        >>> loader, dataset = create_classification_dataloader(
+        ...     df_path="train.csv",
+        ...     split="train",
+        ...     batch_size=32,
+        ... )
+        
+        >>> # WebDataset loading
+        >>> loader, dataset = create_classification_dataloader(
+        ...     df_path="",  # Not used
+        ...     split="train",
+        ...     batch_size=32,
+        ...     use_webdataset=True,
+        ...     webdataset_path="/data/shards",
+        ... )
+    """
+    import warnings
+    
+    if shuffle is None:
+        shuffle = (split == "train")
+    
+    augment = augment and (split == "train")
+    
+    if use_webdataset:
+        # WebDataset mode
+        if webdataset_path is None:
+            raise ValueError("webdataset_path is required when use_webdataset=True")
+        
+        from .webdataset_utils import WebDatasetWrapper
+        from src.label_loading.metadata_loader import get_webdataset_paths
+        
+        tar_paths = get_webdataset_paths(webdataset_path, split)
+        
+        # Create augmentation function if needed
+        augmentation_fn = None
+        if augment and augmentation_config:
+            def augmentation_fn(waveform):
+                # Apply simple augmentations
+                if torch.rand(1).item() < augmentation_config.get('noise_prob', 0):
+                    noise_stddev = augmentation_config.get('noise_stddev', 0.005)
+                    waveform = waveform + torch.randn_like(waveform) * noise_stddev
+                if torch.rand(1).item() < augmentation_config.get('gain_prob', 0):
+                    gain_range = augmentation_config.get('gain_range', (0.7, 1.3))
+                    gain = torch.FloatTensor(1).uniform_(*gain_range).item()
+                    waveform = waveform * gain
+                return torch.clamp(waveform, -1.0, 1.0)
+        
+        dataset = WebDatasetWrapper(
+            tar_paths=tar_paths,
+            target_sr=target_sample_rate,
+            segment_length=audio_duration,
+            label_col="label",
+            shuffle=shuffle,
+            augment=augment,
+            augmentation_fn=augmentation_fn,
+            filter_fn=lambda m: m.get("split") == split,
+        )
+        
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory and torch.cuda.is_available(),
+        )
+        
+        return loader, dataset
+    
+    # File-based mode (original behavior)
+    df = pd.read_csv(df_path)
+    
+    # Filter by split
+    if "split" in df.columns:
+        df = df[df["split"] == split]
+    
+    if len(df) == 0:
+        warnings.warn(f"No samples found for split '{split}'")
+    
+    dataset = AudioClassificationDataset(
+        df=df,
+        target_sample_rate=target_sample_rate,
+        audio_duration=audio_duration,
+        augment=augment,
+        augmentation_config=augmentation_config,
+    )
+    
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=(split == "train"),
+        num_workers=num_workers,
+        pin_memory=pin_memory and torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0 and split == "train"),
+    )
+    
+    return loader, dataset

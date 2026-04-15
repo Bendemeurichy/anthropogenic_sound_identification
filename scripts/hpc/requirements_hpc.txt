@@ -1,0 +1,47 @@
+# =============================================================================
+# HPC Requirements for Audio Separation Models
+# =============================================================================
+# Install with: pip install -r requirements_hpc.txt
+#
+# PyTorch with CUDA 12.1 (matches accelgor A100 GPUs)
+# =============================================================================
+
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.2.0
+torchaudio>=2.2.0
+torchvision>=0.17.0
+
+# WebDataset for efficient data loading
+webdataset>=0.2.86
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+resampy>=0.4.0
+torchlibrosa>=0.1.0
+
+# Deep learning utilities
+pytorch-lightning>=2.0.0
+torchmetrics>=1.0.0
+einops>=0.6.0
+
+# CLAPSep specific
+laion-clap>=1.1.4
+loralib>=0.1.2
+transformers>=4.30.0
+
+# Training utilities
+tqdm>=4.65.0
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+pyyaml>=6.0
+
+# Logging/monitoring
+comet-ml>=3.30.0
+python-dotenv>=1.0.0
+
+# Other utilities
+psutil>=5.9.0
+joblib>=1.2.0
