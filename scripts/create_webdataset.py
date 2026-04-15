@@ -93,20 +93,47 @@ def load_and_encode_audio(
 
         # Calculate frame offsets for efficient partial loading
         start_frame = 0
-        frames_to_read = -1
-
-        if start_time is not None and end_time is not None:
-            if not (pd.isna(start_time) or pd.isna(end_time)):
-                start_frame = int(float(start_time) * orig_sr)
-                frames_to_read = int((float(end_time) - float(start_time)) * orig_sr)
-                start_frame = max(0, min(start_frame, total_frames - 1))
-                frames_to_read = min(frames_to_read, total_frames - start_frame)
+        frames_to_read = None  # None means read all frames
+        
+        # Parse start_time with error handling
+        try:
+            start_sec = (
+                float(start_time)
+                if start_time is not None and not pd.isna(start_time)
+                else 0.0
+            )
+        except (ValueError, TypeError):
+            start_sec = 0.0
+        
+        # Parse end_time with error handling
+        try:
+            end_sec = (
+                float(end_time)
+                if end_time is not None and not pd.isna(end_time)
+                else None
+            )
+        except (ValueError, TypeError):
+            end_sec = None
+        
+        # Calculate frame offsets
+        if start_sec > 0.0 or end_sec is not None:
+            start_frame = int(start_sec * orig_sr)
+            start_frame = max(0, min(start_frame, total_frames - 1))
+            
+            if end_sec is not None:
+                # Extract specific segment
+                end_frame = int(end_sec * orig_sr)
+                end_frame = min(end_frame, total_frames)
+                frames_to_read = max(1, end_frame - start_frame)
+            else:
+                # Read from start_time to end of file
+                frames_to_read = total_frames - start_frame
 
         # Load audio
         audio_np, sr = sf.read(
             filepath,
             start=start_frame,
-            frames=frames_to_read if frames_to_read > 0 else None,
+            frames=frames_to_read,
             dtype='float32',
             always_2d=False
         )
