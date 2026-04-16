@@ -2,7 +2,10 @@
 # =============================================================================
 # PBS Job Script: SudoRM-RF Training
 # =============================================================================
-# Submit with: qsub scripts/hpc/train_sudormrf.pbs
+# IMPORTANT: Before submitting, switch to the accelgor cluster:
+#   module swap cluster/accelgor
+#   qsub scripts/hpc/train_sudormrf.pbs
+#
 # Monitor with: qstat -u $USER
 # =============================================================================
 
@@ -11,9 +14,6 @@
 #PBS -l walltime=32:00:00
 #PBS -l mem=64gb
 #PBS -m abe
-
-# Switch to GPU cluster (A100 80GB)
-module swap cluster/accelgor
 
 # Load Python and activate virtual environment
 module load Python/3.11.3-GCCcore-12.3.0

@@ -57,10 +57,22 @@ echo "  VSC_DATA    = $VSC_DATA"
 ```
 
 ## Submit Jobs
+
+First, switch to the accelgor cluster (GPU cluster with A100 GPUs):
+```bash
+module swap cluster/accelgor
+```
+
+Then submit the jobs:
 ```bash
 qsub scripts/hpc/train_sudormrf.pbs
 qsub scripts/hpc/train_tuss.pbs
 qsub scripts/hpc/train_clapsep.pbs
+```
+
+Monitor your jobs:
+```bash
+qstat -u $USER
 ```
 
 ## That's It!
