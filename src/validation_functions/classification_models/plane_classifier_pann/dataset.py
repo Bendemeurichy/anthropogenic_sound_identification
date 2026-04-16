@@ -5,17 +5,13 @@ This module provides a thin wrapper around the shared AudioClassificationDataset
 with PANN-specific configuration (32kHz sample rate, 10-second duration).
 """
 
-import sys
-from pathlib import Path
 import pandas as pd
 from torch.utils.data import DataLoader
 from typing import Tuple
 
-# Add parent directories to path for imports
-sys.path.append(str(Path(__file__).parent.parent.parent))
-
 from common.audio_dataset import AudioClassificationDataset
-from config import TrainingConfig, DataLoaderConfig
+from config import TrainingConfig
+from data_config import DataLoaderConfig
 
 
 class PANNDataset(AudioClassificationDataset):
