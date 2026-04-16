@@ -8,19 +8,19 @@ import torch
 import numpy as np
 
 # Add parent directories to path for imports
-sys.path.append(str(Path(__file__).parent.parent.parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from .config import TrainingConfig
-from .dataset import create_dataloaders
-from .model_loader import create_plane_classifier
-from .train import train_plane_classifier
+from config import TrainingConfig
+from dataset import create_dataloaders
+from model_loader import create_plane_classifier
+from train import train_plane_classifier
 
-from src.common.audio_validation import validate_dataset_files
-from src.label_loading.metadata_loader import (
+from common.audio_validation import validate_dataset_files
+from label_loading.metadata_loader import (
     load_metadata_datasets,
     split_seperation_classification,
 )
-from src.label_loading.sampler import get_coi, sample_non_coi
+from label_loading.sampler import get_coi, sample_non_coi
 
 
 def main():
