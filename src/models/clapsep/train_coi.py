@@ -658,6 +658,12 @@ def main():
                         help="Attention dimension")
     parser.add_argument("--n-masker-layer", type=int, default=3,
                         help="Number of masker layers")
+    
+    # WebDataset arguments
+    parser.add_argument("--use-webdataset", action="store_true",
+                        help="Use WebDataset tar shards instead of individual files (faster on HPC)")
+    parser.add_argument("--webdataset-path", type=str, default="",
+                        help="Path to WebDataset tar shards directory (required if --use-webdataset is set)")
 
     args = parser.parse_args()
     
@@ -665,6 +671,10 @@ def main():
     if args.use_lora and not args.no_freeze_encoder:
         print("Warning: --use-lora requires --no-freeze-encoder. Setting --no-freeze-encoder=True")
         args.no_freeze_encoder = True
+    
+    # Validate WebDataset usage
+    if args.use_webdataset and not args.webdataset_path:
+        parser.error("--webdataset-path is required when --use-webdataset is set")
 
     train(
         df_path=args.df_path,
@@ -689,6 +699,8 @@ def main():
         encoder_embed_dim=args.encoder_embed_dim,
         d_attn=args.d_attn,
         n_masker_layer=args.n_masker_layer,
+        use_webdataset=args.use_webdataset,
+        webdataset_path=args.webdataset_path,
     )
 
 

@@ -44,19 +44,18 @@ echo "=============================================="
 echo ""
 
 # Run training
-# NOTE: Update the paths below with your actual $VSC_DATA and $VSC_SCRATCH paths
-# 
-# For WebDataset mode (recommended for HPC):
-#   1. Set use_webdataset: true in training config OR add --use-webdataset flag
-#   2. Set webdataset_path to $VSC_SCRATCH/webdataset_shards
+# NOTE: Before running, edit src/models/clapsep/training_config.yaml:
+#   - Set use_webdataset: true (under data: section)
+#   - Set webdataset_path to your $VSC_SCRATCH path
+#   - Set checkpoint_dir to $VSC_DATA/checkpoints/clapsep (under training: section)
 #
-# For file-based mode:
-#   - Keep --df-path pointing to your metadata CSV
-#   - Ensure audio files are accessible at the paths in the CSV
+# The command-line flags below will override the config file values
 python -u src/models/clapsep/train_coi.py \
     --df-path data/aircraft_data.csv \
     --clap-checkpoint src/models/clapsep/checkpoint/CLAPSep/model/music_audioset_epoch_15_esc_90.14.pt \
     --checkpoint-dir $VSC_DATA/checkpoints/clapsep \
+    --use-webdataset \
+    --webdataset-path $VSC_SCRATCH/webdataset_shards \
     --device cuda \
     --no-freeze-encoder \
     --use-lora \

@@ -11,6 +11,14 @@ data:
   background_only_prob: 0.20
   background_mix_n: 2
   augment_multiplier: 3
+  
+  # WebDataset configuration for HPC compressed data loading
+  # Set use_webdataset: true to load from pre-compressed tar shards
+  # instead of individual audio files (much faster on HPC scratch storage)
+  use_webdataset: false
+  # Path to WebDataset tar shards directory (e.g., $VSC_SCRATCH/webdataset_shards)
+  # Only used when use_webdataset is true
+  webdataset_path: ""
 
 # Model settings
 model:

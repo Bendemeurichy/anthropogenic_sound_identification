@@ -72,21 +72,22 @@ Edit `src/models/tuss/training_config.yaml`:
 
 ### 3. CLAPSep
 
-Edit `scripts/hpc/train_clapsep.pbs`:
+**Option A:** Edit `src/models/clapsep/training_config.yaml` (recommended for consistency):
 
-**Around line 49-56** (add the WebDataset flags):
-```bash
-python -u src/models/clapsep/train_coi.py \
-    --df-path data/aircraft_data.csv \
-    --clap-checkpoint src/models/clapsep/checkpoint/CLAPSep/model/music_audioset_epoch_15_esc_90.14.pt \
-    --checkpoint-dir $VSC_DATA/checkpoints/clapsep \
-    --use-webdataset \
-    --webdataset-path $VSC_SCRATCH/webdataset_shards \
-    --device cuda \
-    --no-freeze-encoder \
-    --use-lora \
-    --precision bf16-mixed
+**Line ~15-21** (in the `data:` section):
+```yaml
+  # WebDataset configuration for HPC compressed data loading
+  use_webdataset: true
+  webdataset_path: "/kyukon/scratch/gent/464/vsc46423/webdataset_shards"  # ← Replace with your $VSC_SCRATCH path
 ```
+
+**Line ~62** (in the `training:` section):
+```yaml
+  checkpoint_dir: "/data/gent/464/vsc46423/checkpoints/clapsep"  # ← Replace with your $VSC_DATA path
+```
+
+**Option B:** Or use command-line overrides in `scripts/hpc/train_clapsep.pbs` (already configured):
+The PBS script already includes `--use-webdataset` and `--webdataset-path $VSC_SCRATCH/webdataset_shards` flags which will override the config file.
 
 ## Verification
 
