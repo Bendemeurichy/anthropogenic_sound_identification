@@ -19,6 +19,12 @@ data:
   # Path to WebDataset tar shards directory (e.g., $VSC_SCRATCH/webdataset_shards)
   # Only used when use_webdataset is true
   webdataset_path: ""
+  
+  # Target classes for COI filtering (used with WebDataset)
+  # List of semantic labels to treat as Class of Interest
+  # Examples: ["airplane", "helicopter"] or ["dog", "cat"]
+  # Leave empty to use all label==1 samples as COI
+  target_classes: []
 
 # Model settings
 model:

@@ -733,6 +733,9 @@ def create_coi_dataloader(
     # WebDataset options
     use_webdataset: bool = False,
     webdataset_path: Optional[str] = None,
+    target_classes: Optional[list] = None,
+    dataset_filter: Optional[str] = None,
+    coi_ratio: float = 0.25,
 ) -> tuple:
     """Create dataloader for COI separation training.
 
@@ -756,6 +759,9 @@ def create_coi_dataloader(
         seed: Random seed
         use_webdataset: If True, load from WebDataset shards instead of files
         webdataset_path: Path to WebDataset shards directory (required if use_webdataset=True)
+        target_classes: List of semantic labels to filter as COI (e.g., ["airplane", "train"])
+        dataset_filter: Optional dataset filter (e.g., "UrbanSound8K")
+        coi_ratio: Target ratio of COI to background samples (default 0.25)
 
     Returns:
         tuple: (DataLoader, Dataset)
@@ -775,6 +781,15 @@ def create_coi_dataloader(
         from src.label_loading.metadata_loader import get_webdataset_paths
 
         tar_paths = get_webdataset_paths(webdataset_path, split)
+        
+        # Log filtering configuration
+        if target_classes:
+            print(f"  Filtering COI by labels: {target_classes}")
+        else:
+            print("  Warning: No target_classes specified, using all label==1 as COI")
+        
+        if dataset_filter:
+            print(f"  Filtering by dataset: {dataset_filter}")
 
         dataset = COIWebDatasetWrapper(
             tar_paths=tar_paths,
@@ -787,6 +802,10 @@ def create_coi_dataloader(
             augment=(split == "train"),
             stereo=stereo,
             background_only_prob=background_only_prob if split == "train" else 0.0,
+            target_classes=target_classes or [],
+            dataset_filter=dataset_filter,
+            coi_ratio=coi_ratio,
+            seed=seed,
         )
 
         # WebDataset is an IterableDataset - different DataLoader settings

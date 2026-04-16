@@ -647,10 +647,6 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
             coi_ratio: Target ratio of COI samples in yielded data (default 0.25)
             seed: Random seed for reproducibility (default 42)
         """
-            dataset_filter: Optional dataset name filter (e.g., "aerosonicdb")
-                          Only samples from matching datasets will be used as COI
-            coi_ratio: Target ratio of COI samples in yielded data (default 0.25)
-        """
         if not WEBDATASET_AVAILABLE:
             raise ImportError("webdataset is required. Install with: pip install webdataset")
 

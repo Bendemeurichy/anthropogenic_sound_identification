@@ -491,6 +491,22 @@ def train(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     checkpoint_path = Path(checkpoint_dir) / timestamp
     checkpoint_path.mkdir(exist_ok=True, parents=True)
+    
+    # Load config for target_classes if using WebDataset
+    target_classes = []
+    if use_webdataset:
+        import yaml
+        config_path = Path(__file__).parent / "training_config.yaml"
+        if config_path.exists():
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+                target_classes = config.get("data", {}).get("target_classes", [])
+                if target_classes:
+                    print(f"Loaded target_classes from config: {target_classes}")
+                else:
+                    print("  Warning: No target_classes in config, using all label==1 as COI")
+        else:
+            print(f"  Warning: Config file not found at {config_path}")
 
     # Create dataloaders
     print("Creating dataloaders...")
@@ -506,6 +522,8 @@ def train(
         seed=seed,
         use_webdataset=use_webdataset,
         webdataset_path=webdataset_path if use_webdataset else None,
+        target_classes=target_classes if use_webdataset else None,
+        coi_ratio=0.25,
     )
 
     val_loader, _ = create_coi_dataloader(
@@ -520,6 +538,8 @@ def train(
         seed=seed,
         use_webdataset=use_webdataset,
         webdataset_path=webdataset_path if use_webdataset else None,
+        target_classes=target_classes if use_webdataset else None,
+        coi_ratio=0.25,
     )
 
     # Load pretrained CLAP model
