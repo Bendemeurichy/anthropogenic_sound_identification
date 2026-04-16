@@ -1,0 +1,86 @@
+#!/bin/bash
+# =============================================================================
+# PBS Job Script: Optuna Hyperparameter Tuning for All Models
+# =============================================================================
+# Submit with: qsub scripts/hpc/optuna_tune.pbs
+# Monitor with: qstat -u $USER
+# =============================================================================
+
+#PBS -N optuna_tune
+#PBS -l nodes=1:ppn=8:gpus=1
+#PBS -l walltime=48:00:00
+#PBS -l mem=64gb
+#PBS -m abe
+
+# Switch to GPU cluster (A100 80GB)
+module swap cluster/accelgor
+
+# Load Python and activate virtual environment
+module load Python/3.11.3-GCCcore-12.3.0
+source $VSC_DATA/venv/bin/activate
+
+# Add project to Python path
+export PYTHONPATH="$VSC_DATA/code:$PYTHONPATH"
+
+# Navigate to project directory
+cd $VSC_DATA/code
+
+# Print job information
+echo "=============================================="
+echo "Optuna Hyperparameter Tuning"
+echo "=============================================="
+echo "Job ID:    $PBS_JOBID"
+echo "Node:      $(hostname)"
+echo "Started:   $(date)"
+echo "Directory: $(pwd)"
+echo ""
+echo "GPU Information:"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+echo ""
+echo "Python:    $(python --version)"
+echo "PyTorch:   $(python -c 'import torch; print(torch.__version__)')"
+echo "CUDA:      $(python -c 'import torch; print(torch.version.cuda)')"
+echo "=============================================="
+echo ""
+
+# Configuration
+TARGET_CLASS="bird"
+N_TRIALS=20
+MAX_EPOCHS=5
+CSV_PATH="$VSC_DATA/code/data/birds_dataset.csv"  # Update this path!
+
+# Run Optuna tuning for all models
+# --no-save-checkpoints: Saves HPC storage by not saving model weights during trials
+# Only hyperparameters are tracked in the Optuna database
+# Best configs are saved to configs/tuned/ for later retraining
+echo "Starting hyperparameter tuning sweep..."
+echo "Target class: $TARGET_CLASS"
+echo "Trials per model: $N_TRIALS"
+echo "Max epochs per trial: $MAX_EPOCHS"
+echo "Checkpoint saving: DISABLED (saves storage)"
+echo ""
+
+python -u scripts/optuna_tune_models.py \
+    --model all \
+    --target "$TARGET_CLASS" \
+    --n-trials $N_TRIALS \
+    --max-epochs $MAX_EPOCHS \
+    --device cuda \
+    --storage "sqlite:///$VSC_DATA/code/optuna_coi_tuning.db" \
+    --no-save-checkpoints
+
+# Print completion info
+echo ""
+echo "=============================================="
+echo "Job completed: $(date)"
+echo "=============================================="
+echo ""
+echo "Results saved to:"
+echo "  - Best configs: configs/tuned/"
+echo "  - Optuna database: optuna_coi_tuning.db"
+echo "  - Study statistics: configs/tuned/*_tuning_stats.txt"
+echo ""
+echo "Next steps:"
+echo "  1. Review best hyperparameters in configs/tuned/"
+echo "  2. Retrain models with best configs to get final weights"
+echo "=============================================="

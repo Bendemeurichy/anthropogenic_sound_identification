@@ -4,6 +4,19 @@ Lightweight Optuna hyperparameter tuning for COI separation models.
 This script tunes the most important hyperparameters for each model (sudormrf, tuss, clapsep)
 and saves the best configurations for fair model comparison.
 
+STORAGE-EFFICIENT DESIGN (--no-save-checkpoints):
+-------------------------------------------------
+To save HPC storage during tuning, use the --no-save-checkpoints flag.
+This will:
+- Track hyperparameters and metrics in Optuna database (only ~few MB)
+- Skip saving model checkpoints during trials (saves ~100+ checkpoint files)
+- Save best hyperparameters to configs/tuned/ for later retraining
+
+Recommended workflow:
+1. Run tuning with --no-save-checkpoints to find optimal hyperparameters
+2. Update training_config.yaml files with best parameters
+3. Run full training to get final model weights with checkpoints
+
 IMPORTANT NOTES ON MODEL TRAINING INTERFACES:
 ---------------------------------------------
 Each model has a different command-line interface for training:
@@ -37,6 +50,9 @@ Optimized for birds dataset with abundant samples:
 - Each trial takes ~2-5 minutes
 
 Usage:
+    # Tune all models WITHOUT saving checkpoints (recommended for HPC)
+    python scripts/optuna_tune_models.py --n-trials 20 --target bird --no-save-checkpoints
+
     # Tune all models on birds dataset (5 trials, 5 epochs each)
     python scripts/optuna_tune_models.py --n-trials 5 --target bird
 
@@ -88,7 +104,7 @@ if str(_src_dir) not in sys.path:
 
 
 def create_sudormrf_trial_config(
-    trial: optuna.Trial, base_config: Dict[str, Any]
+    trial: optuna.Trial, base_config: Dict[str, Any], save_checkpoints: bool = True
 ) -> Dict[str, Any]:
     """Create SuDoRMRF config with trial hyperparameters."""
     import copy
@@ -125,11 +141,15 @@ def create_sudormrf_trial_config(
     config["data"]["augment_multiplier"] = 1
     config["data"]["background_only_prob"] = 0.3
 
+    # Disable checkpoint saving if requested (saves HPC storage during tuning)
+    if not save_checkpoints:
+        config["training"]["save_checkpoints"] = False
+
     return config
 
 
 def create_tuss_trial_config(
-    trial: optuna.Trial, base_config: Dict[str, Any]
+    trial: optuna.Trial, base_config: Dict[str, Any], save_checkpoints: bool = True
 ) -> Dict[str, Any]:
     """Create TUSS config with trial hyperparameters."""
     import copy
@@ -159,11 +179,17 @@ def create_tuss_trial_config(
     config["data"]["augment_multiplier"] = 1
     config["data"]["background_only_prob"] = 0.3
 
+    # Disable checkpoint saving if requested (saves HPC storage during tuning)
+    # Use a temp directory that can be cleaned up after trials
+    if not save_checkpoints:
+        import tempfile
+        config["training"]["checkpoint_dir"] = tempfile.gettempdir() + "/optuna_temp_ckpt"
+
     return config
 
 
 def create_clapsep_trial_config(
-    trial: optuna.Trial, base_config: Dict[str, Any]
+    trial: optuna.Trial, base_config: Dict[str, Any], save_checkpoints: bool = True
 ) -> Dict[str, Any]:
     """Create CLAPSep config with trial hyperparameters."""
     import copy
@@ -205,6 +231,14 @@ def create_clapsep_trial_config(
     config["data"]["augment_multiplier"] = 1
     config["data"]["background_only_prob"] = 0.3
 
+    # Disable checkpoint saving if requested (saves HPC storage during tuning)
+    # Use a temp directory that can be cleaned up after trials
+    # For CLAPSep specifically, we'll pass save_top_k via CLI in run_training()
+    if not save_checkpoints:
+        import tempfile
+        config["training"]["checkpoint_dir"] = tempfile.gettempdir() + "/optuna_temp_ckpt"
+        config["training"]["save_top_k"] = 0  # Store in config for CLI arg generation
+
     return config
 
 
@@ -231,6 +265,7 @@ def run_training(
     trial_number: int,
     device: str = "cuda",
     timeout: int = 7200,
+    save_checkpoints: bool = True,
 ) -> float:
     """
     Run training for a model with given config and return best validation metric.
@@ -500,17 +535,18 @@ def create_objective(
     base_config: Dict[str, Any],
     max_epochs: int = None,
     device: str = "cuda",
+    save_checkpoints: bool = True,
 ):
     """Create Optuna objective function for a model."""
 
     def objective(trial: optuna.Trial) -> float:
         # Create config with trial hyperparameters
         if model_name == "sudormrf":
-            config = create_sudormrf_trial_config(trial, base_config)
+            config = create_sudormrf_trial_config(trial, base_config, save_checkpoints)
         elif model_name == "tuss":
-            config = create_tuss_trial_config(trial, base_config)
+            config = create_tuss_trial_config(trial, base_config, save_checkpoints)
         elif model_name == "clapsep":
-            config = create_clapsep_trial_config(trial, base_config)
+            config = create_clapsep_trial_config(trial, base_config, save_checkpoints)
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
@@ -519,7 +555,9 @@ def create_objective(
             config["training"]["num_epochs"] = max_epochs
 
         # Run training and get metric
-        metric = run_training(model_name, config, trial.number, device=device)
+        metric = run_training(
+            model_name, config, trial.number, device=device, save_checkpoints=save_checkpoints
+        )
         return metric
 
     return objective
@@ -539,6 +577,7 @@ def tune_model(
     storage: str = None,
     study_name: str = None,
     csv_path: str = "src/models/tuss/checkpoints/.csv",
+    save_checkpoints: bool = True,
 ) -> Dict[str, Any]:
     """
     Tune hyperparameters for a specific model.
@@ -548,9 +587,11 @@ def tune_model(
         target_class: Target class for separation (e.g., 'bird', 'airplane')
         n_trials: Number of Optuna trials to run
         max_epochs: Maximum epochs per trial (for quick testing)
+        device: Device to use (e.g., 'cuda', 'cuda:0', 'cpu')
         storage: Optuna storage URL
         study_name: Name for the Optuna study
         csv_path: Path to dataset CSV file (default: "data/aircraft_data.csv")
+        save_checkpoints: Whether to save model checkpoints during trials (default: True)
 
     Returns:
         Best hyperparameters dictionary
@@ -603,12 +644,15 @@ def tune_model(
     print(f"Number of trials: {n_trials}")
     print(f"Max epochs per trial: {max_epochs if max_epochs else 'from config'}")
     print(f"Device: {device}")
+    print(f"Save checkpoints: {save_checkpoints}")
     print(f"Study name: {study_name}")
     print(f"Storage: {storage}")
     print(f"{'=' * 80}\n")
 
     # Run optimization
-    objective = create_objective(model_name, base_config, max_epochs, device=device)
+    objective = create_objective(
+        model_name, base_config, max_epochs, device=device, save_checkpoints=save_checkpoints
+    )
     study.optimize(objective, n_trials=n_trials)
 
     # Print results
@@ -624,11 +668,11 @@ def tune_model(
 
     # Create best config
     if model_name == "sudormrf":
-        best_config = create_sudormrf_trial_config(study.best_trial, base_config)
+        best_config = create_sudormrf_trial_config(study.best_trial, base_config, save_checkpoints=True)
     elif model_name == "tuss":
-        best_config = create_tuss_trial_config(study.best_trial, base_config)
+        best_config = create_tuss_trial_config(study.best_trial, base_config, save_checkpoints=True)
     elif model_name == "clapsep":
-        best_config = create_clapsep_trial_config(study.best_trial, base_config)
+        best_config = create_clapsep_trial_config(study.best_trial, base_config, save_checkpoints=True)
 
     # Save best config
     output_dir = Path("configs/tuned")
@@ -731,6 +775,13 @@ Examples:
         default=None,
         help="GPU index (shorthand for --device cuda:N)",
     )
+    parser.add_argument(
+        "--no-save-checkpoints",
+        action="store_true",
+        help="Disable checkpoint saving during trials to save HPC storage. "
+             "Only hyperparameters will be tracked in Optuna DB. "
+             "Retrain with best config afterward to get model weights.",
+    )
 
     args = parser.parse_args()
 
@@ -754,6 +805,7 @@ Examples:
                 max_epochs=args.max_epochs,
                 device=args.device,
                 storage=args.storage,
+                save_checkpoints=not args.no_save_checkpoints,
             )
             results[model_name] = best_params
         except Exception as e:

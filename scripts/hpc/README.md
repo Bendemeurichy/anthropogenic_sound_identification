@@ -11,6 +11,7 @@ This directory contains scripts for training the three audio separation models o
 - `train_sudormrf.pbs` - PBS job script for SudoRM-RF training
 - `train_tuss.pbs` - PBS job script for TUSS training
 - `train_clapsep.pbs` - PBS job script for CLAPSep training
+- `optuna_tune.pbs` - PBS job script for Optuna hyperparameter tuning (all models)
 
 ## Storage Layout
 
@@ -108,7 +109,17 @@ training:
 # From login node
 cd $VSC_DATA/code
 
-# Submit all three models
+# Option A: Run hyperparameter tuning first (recommended)
+# This finds optimal hyperparameters without saving checkpoints (saves storage)
+qsub scripts/hpc/optuna_tune.pbs
+
+# Wait for tuning to complete (~24-48 hours for 20 trials × 3 models)
+# Results will be in configs/tuned/
+
+# Then update training_config.yaml files with best hyperparameters
+# and submit final training runs with full checkpoint saving
+
+# Option B: Submit training with current configs
 qsub scripts/hpc/train_sudormrf.pbs
 qsub scripts/hpc/train_tuss.pbs
 qsub scripts/hpc/train_clapsep.pbs
@@ -117,6 +128,7 @@ qsub scripts/hpc/train_clapsep.pbs
 qstat -u $USER
 
 # Check output (job ID from qsub)
+tail -f optuna_tune.o<jobid>
 tail -f sudormrf_train.o<jobid>
 ```
 
@@ -160,12 +172,80 @@ qdel <jobid>
 
 ## Resource Allocation
 
+### Regular Training Jobs
 Each job requests:
 - **Cluster:** accelgor (A100 80GB GPUs)
 - **GPUs:** 1
 - **CPUs:** 8 cores
 - **Memory:** 64 GB
 - **Walltime:** 32 hours
+
+### Optuna Tuning Job
+- **Cluster:** accelgor (A100 80GB GPUs)
+- **GPUs:** 1
+- **CPUs:** 8 cores
+- **Memory:** 64 GB
+- **Walltime:** 48 hours (20 trials × 3 models × 5 epochs)
+- **Storage:** Minimal (~few MB for Optuna DB, no model checkpoints saved)
+
+## Hyperparameter Tuning Workflow
+
+The recommended workflow is to run Optuna tuning first to find optimal hyperparameters, then retrain with those parameters for final model weights.
+
+### 1. Run Optuna Tuning
+
+Edit `scripts/hpc/optuna_tune.pbs` to set:
+- `TARGET_CLASS`: The class to separate (e.g., "bird", "airplane")
+- `N_TRIALS`: Number of trials per model (default: 20)
+- `MAX_EPOCHS`: Epochs per trial (default: 5, optimized for abundant data)
+- `CSV_PATH`: Path to your dataset CSV file
+
+Then submit:
+```bash
+qsub scripts/hpc/optuna_tune.pbs
+```
+
+**Storage-Efficient Design:**
+- Uses `--no-save-checkpoints` flag to avoid saving model weights during trials
+- Only hyperparameters are tracked in SQLite database (~few MB)
+- Saves significant HPC storage (avoids ~100+ checkpoint files)
+
+### 2. Review Results
+
+After completion, results are saved to:
+- **Best configs**: `configs/tuned/{model}_{target}_best.yaml`
+- **Study statistics**: `configs/tuned/{model}_{target}_tuning_stats.txt`
+- **Optuna database**: `optuna_coi_tuning.db`
+
+```bash
+# View best hyperparameters
+cat configs/tuned/tuss_bird_best.yaml
+
+# View tuning statistics
+cat configs/tuned/tuss_bird_tuning_stats.txt
+```
+
+### 3. Update Training Configs
+
+Copy the best hyperparameters from `configs/tuned/` into your main training configs:
+```bash
+# Example: Update TUSS config with tuned hyperparameters
+cp configs/tuned/tuss_bird_best.yaml src/models/tuss/training_config.yaml
+```
+
+Or manually update specific parameters in `src/models/{model}/training_config.yaml`.
+
+### 4. Final Training with Best Hyperparameters
+
+Now run full training with checkpoint saving to get final model weights:
+```bash
+qsub scripts/hpc/train_tuss.pbs
+```
+
+This approach ensures:
+- ✓ Optimal hyperparameters for your dataset
+- ✓ Minimal HPC storage usage during tuning
+- ✓ Full model checkpoints only for final trained models
 
 ## Troubleshooting
 

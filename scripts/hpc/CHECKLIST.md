@@ -83,7 +83,41 @@ training:
   checkpoint_dir: "<YOUR_VSC_DATA_PATH>/checkpoints/clapsep"
 ```
 
-### Step 6: Submit Training Jobs
+### Step 6: Submit Jobs
+
+**Option A: Run Hyperparameter Tuning First (Recommended)**
+
+This finds optimal hyperparameters without saving checkpoints (saves storage):
+
+```bash
+ssh login.hpc.ugent.be
+cd $VSC_DATA/code
+
+# Edit optuna_tune.pbs to set your dataset path and target class
+# Then submit tuning job
+qsub scripts/hpc/optuna_tune.pbs
+
+# Check status
+qstat -u $USER
+
+# Monitor progress
+tail -f optuna_tune.o<jobid>
+```
+
+Wait for completion (~24-48 hours for 20 trials × 3 models), then:
+
+```bash
+# Review best hyperparameters
+cat configs/tuned/tuss_bird_best.yaml
+cat configs/tuned/tuss_bird_tuning_stats.txt
+
+# Update training configs with best parameters
+# Then submit final training jobs
+qsub scripts/hpc/train_tuss.pbs
+```
+
+**Option B: Direct Training with Current Configs**
+
 ```bash
 ssh login.hpc.ugent.be
 cd $VSC_DATA/code
