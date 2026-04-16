@@ -623,6 +623,10 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         augment: bool = True,
         stereo: bool = False,
         background_only_prob: float = 0.0,
+        target_classes: Optional[List[str]] = None,
+        dataset_filter: Optional[str] = None,
+        coi_ratio: float = 0.25,
+        seed: int = 42,
     ):
         """
         Args:
@@ -636,6 +640,16 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
             augment: Whether to augment (training only)
             stereo: Whether to output stereo
             background_only_prob: Probability of background-only samples
+            target_classes: List of COI class labels (e.g., ["airplane", "plane"])
+                           If None, treats all label==1 as COI
+            dataset_filter: Optional dataset name filter (e.g., "aerosonicdb")
+                          Only samples from matching datasets will be used as COI
+            coi_ratio: Target ratio of COI samples in yielded data (default 0.25)
+            seed: Random seed for reproducibility (default 42)
+        """
+            dataset_filter: Optional dataset name filter (e.g., "aerosonicdb")
+                          Only samples from matching datasets will be used as COI
+            coi_ratio: Target ratio of COI samples in yielded data (default 0.25)
         """
         if not WEBDATASET_AVAILABLE:
             raise ImportError("webdataset is required. Install with: pip install webdataset")
@@ -650,9 +664,13 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         self.augment = augment and split == "train"
         self.stereo = stereo
         self.background_only_prob = background_only_prob
+        self.target_classes = target_classes or []
+        self.dataset_filter = dataset_filter
+        self.coi_ratio = coi_ratio
+        self.seed = seed
 
         self._resampler_cache = ResamplerCache(max_size=8)
-        self._rng = np.random.default_rng(42)
+        self._rng = np.random.default_rng(seed)  # Use provided seed
         
         # Try to load dataset size from manifest for __len__
         self._dataset_size = self._load_dataset_size()
@@ -729,10 +747,16 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         if self.shuffle:
             dataset = dataset.shuffle(1000)
 
-        # Collect COI and background samples separately
+        # Collect COI and background samples separately with filtering
         coi_buffer = []
         bg_buffer = []
         buffer_size = 100
+        # Use smaller min buffer for validation (may have fewer samples per split)
+        min_buffer_size = 5 if self.split in ["val", "test"] else 10
+        
+        coi_count = 0
+        bg_count = 0
+        yielded_count = 0
 
         for sample in dataset:
             result = self._decode_sample(sample)
@@ -740,25 +764,130 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
                 continue
 
             waveform, metadata = result
-            label = metadata.get("label", 0)
-
-            if label == 1:  # COI
+            
+            # Classify sample as COI or valid background
+            is_coi = self._is_coi_sample(metadata)
+            is_valid_bg = self._is_valid_background(metadata)
+            
+            if is_coi:  # Pure COI
                 coi_buffer.append((waveform, metadata))
-                if len(coi_buffer) >= buffer_size and len(bg_buffer) > 0:
-                    # Yield a mixed sample
-                    yield self._create_mixture(coi_buffer.pop(0), bg_buffer)
-            else:  # Background
+                coi_count += 1
+                
+                # Keep COI buffer bounded
+                if len(coi_buffer) > buffer_size:
+                    coi_buffer.pop(0)
+                    
+                # Yield mixed samples once we have sufficient background samples
+                # Note: We yield every COI sample (coi_ratio is achieved by 
+                # sampling backgrounds accordingly in the file-based approach,
+                # but here we stream all COI samples)
+                if len(bg_buffer) >= min_buffer_size:
+                    mix = self._create_mixture(coi_buffer.pop(0), bg_buffer)
+                    yielded_count += 1
+                    yield mix
+                    
+            elif is_valid_bg:  # Valid background (no COI labels, not empty)
                 bg_buffer.append((waveform, metadata))
+                bg_count += 1
+                
                 if len(bg_buffer) > buffer_size:
                     bg_buffer.pop(0)  # Keep buffer bounded
 
                 # Occasionally yield background-only sample
+                # The file-based approach includes all sampled backgrounds in training,
+                # but here we only yield background-only with a probability
                 if (
                     self.background_only_prob > 0
                     and self._rng.random() < self.background_only_prob
-                    and len(bg_buffer) > 0
+                    and len(bg_buffer) >= min_buffer_size
                 ):
-                    yield self._create_background_only(bg_buffer)
+                    bg_only = self._create_background_only(bg_buffer)
+                    yielded_count += 1
+                    yield bg_only
+            # else: Mixed sample or invalid - skip completely
+        
+        # IMPORTANT: Yield remaining COI samples in buffer after streaming completes
+        # This ensures we don't drop COI samples at the end due to insufficient backgrounds
+        while len(coi_buffer) > 0 and len(bg_buffer) > 0:
+            mix = self._create_mixture(coi_buffer.pop(0), bg_buffer)
+            yielded_count += 1
+            yield mix
+
+    def _is_coi_sample(self, metadata: Dict) -> bool:
+        """
+        Determine if a sample is pure COI based on target_classes.
+        
+        Follows the logic from sampler.py:get_coi():
+        - If target_classes is empty, use label==1
+        - Otherwise, check if ALL labels in the sample are in target_classes (pure COI)
+        - Mixed samples (COI + other) are rejected as background
+        
+        Args:
+            metadata: Sample metadata dict
+            
+        Returns:
+            True if sample is pure COI, False otherwise
+        """
+        # Apply dataset filter if specified
+        if self.dataset_filter:
+            sample_dataset = metadata.get("dataset", "")
+            if not sample_dataset or self.dataset_filter.lower() not in sample_dataset.lower():
+                return False
+        
+        # If no target_classes specified, use binary label
+        if not self.target_classes:
+            return metadata.get("label") == 1
+        
+        # Check if sample labels match target_classes (pure COI only)
+        sample_labels = metadata.get("label", [])
+        
+        # Handle different label formats
+        if isinstance(sample_labels, str):
+            sample_labels = [sample_labels]
+        elif not isinstance(sample_labels, list):
+            return False
+        
+        if len(sample_labels) == 0:
+            return False
+        
+        # Pure COI: ALL labels must be in target_classes
+        return all(label in self.target_classes for label in sample_labels)
+    
+    def _is_valid_background(self, metadata: Dict) -> bool:
+        """
+        Determine if a sample is valid for background pool.
+        
+        Follows the logic from sampler.py:sample_non_coi():
+        - Exclude recordings with ANY COI label (including mixed)
+        - Exclude recordings with no labels (None/empty)
+        
+        Args:
+            metadata: Sample metadata dict
+            
+        Returns:
+            True if sample is valid background, False otherwise
+        """
+        if not self.target_classes:
+            # No target classes: accept non-COI samples
+            return metadata.get("label") != 1
+        
+        sample_labels = metadata.get("label", [])
+        
+        # Exclude None/empty labels (unknown content)
+        if sample_labels is None:
+            return False
+        
+        # Handle different label formats
+        if isinstance(sample_labels, str):
+            sample_labels = [sample_labels]
+        elif not isinstance(sample_labels, list):
+            return False
+        
+        if len(sample_labels) == 0:
+            return False
+        
+        # Exclude if ANY label is in target_classes (prevents mixed samples)
+        return not any(label in self.target_classes for label in sample_labels)
 
     def _decode_sample(
         self, sample: Dict
