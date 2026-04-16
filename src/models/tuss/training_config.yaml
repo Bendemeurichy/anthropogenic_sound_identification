@@ -60,6 +60,14 @@ data:
   # augmentations / offsets), effectively multiplying dataset size
   augment_multiplier: 1
 
+  # WebDataset configuration for HPC compressed data loading
+  # Set use_webdataset: true to load from pre-compressed tar shards
+  # instead of individual audio files (much faster on HPC scratch storage)
+  use_webdataset: false
+  # Path to WebDataset tar shards directory (e.g., $VSC_SCRATCH/webdataset_shards)
+  # Only used when use_webdataset is true
+  webdataset_path: ""
+
 model:
   # Path to the pretrained TUSS checkpoint directory (relative to train.py).
   # Set to null to train from scratch using the architecture fields below.

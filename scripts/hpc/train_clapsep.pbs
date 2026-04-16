@@ -44,8 +44,15 @@ echo "=============================================="
 echo ""
 
 # Run training
-# NOTE: Adjust paths below as needed for your setup
-# The checkpoint directory is set to $VSC_DATA for persistent storage
+# NOTE: Update the paths below with your actual $VSC_DATA and $VSC_SCRATCH paths
+# 
+# For WebDataset mode (recommended for HPC):
+#   1. Set use_webdataset: true in training config OR add --use-webdataset flag
+#   2. Set webdataset_path to $VSC_SCRATCH/webdataset_shards
+#
+# For file-based mode:
+#   - Keep --df-path pointing to your metadata CSV
+#   - Ensure audio files are accessible at the paths in the CSV
 python -u src/models/clapsep/train_coi.py \
     --df-path data/aircraft_data.csv \
     --clap-checkpoint src/models/clapsep/checkpoint/CLAPSep/model/music_audioset_epoch_15_esc_90.14.pt \
