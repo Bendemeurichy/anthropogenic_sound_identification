@@ -1,13 +1,26 @@
 """Main entry point for training"""
 
 import argparse
+import io
 import sys
 from pathlib import Path
 
 import pandas as pd
 
+# Fix for Windows encoding issues with Unicode characters when using pythonw
+# Under pythonw there is no console and sys.stdout/stderr are None.
+# Wrap only when the underlying buffer actually exists.
+if sys.stdout is not None and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", line_buffering=True
+    )
+if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", line_buffering=True
+    )
+
 # Add parent directories to path for imports
-sys.path.append(str(Path(__file__).parent.parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from config import TrainingConfig
 from train import train_plane_classifier
