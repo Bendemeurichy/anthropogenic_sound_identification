@@ -1,47 +1,58 @@
 # =============================================================================
-# HPC Requirements for Audio Separation Models
+# HPC Requirements for Audio Separation Models - MINIMAL
 # =============================================================================
-# Install with: pip install -r requirements_hpc.txt
+# Stripped down to ONLY essential packages for training the 3 separation models
+# 
+# Size comparison (your local venv):
+#   - TensorFlow:     1.8 GB  ❌ EXCLUDED (only for classifier, not trained on HPC)
+#   - Torch:          1.7 GB  ✅ REQUIRED
+#   - Transformers:    53 MB  ✅ REQUIRED (CLAPSep)
+#   - Torchvision:     16 MB  ❌ EXCLUDED (not used)
+#   - Plotly:          47 MB  ❌ EXCLUDED (visualization only)
+#   - Faiss:           85 MB  ❌ EXCLUDED (not used in training)
+#   - Jupyter/etc:     ?      ❌ EXCLUDED (notebook tools)
+#   - BirdNet:         ?      ❌ EXCLUDED (separate tool)
 #
-# PyTorch with CUDA 12.1 (matches accelgor A100 GPUs)
+# Expected venv size: ~5-6 GB (down from 11 GB)
 # =============================================================================
 
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch>=2.2.0
 torchaudio>=2.2.0
-torchvision>=0.17.0
 
 # WebDataset for efficient data loading
 webdataset>=0.2.86
 
-# Audio processing
+# Audio processing (core)
 librosa>=0.10.0
 soundfile>=0.12.0
 resampy>=0.4.0
+
+# Model-specific requirements
+# CLAPSep
 torchlibrosa>=0.1.0
-
-# Deep learning utilities
 pytorch-lightning>=2.0.0
-torchmetrics>=1.0.0
-einops>=0.6.0
-
-# CLAPSep specific
 laion-clap>=1.1.4
 loralib>=0.1.2
-transformers>=4.30.0
+transformers==4.30.2
 
-# Training utilities
+# SudoRM-RF
+thop>=0.1.1
+progress>=1.6
+
+# TUSS
+einops>=0.6.0
+
+# Training utilities (essential only)
 tqdm>=4.65.0
 pandas>=2.0.0
 numpy>=1.24.0
 scipy>=1.10.0
-matplotlib>=3.7.0
 pyyaml>=6.0
 
-# Logging/monitoring
+# Monitoring (comment out if not using Comet.ml)
 comet-ml>=3.30.0
-python-dotenv>=1.0.0
 
-# Other utilities
+# Utilities
 psutil>=5.9.0
-joblib>=1.2.0
+pytorch-warmup>=0.2.0
