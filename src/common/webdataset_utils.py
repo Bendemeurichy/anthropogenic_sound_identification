@@ -653,6 +653,65 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
 
         self._resampler_cache = ResamplerCache(max_size=8)
         self._rng = np.random.default_rng(42)
+        
+        # Try to load dataset size from manifest for __len__
+        self._dataset_size = self._load_dataset_size()
+
+    def _load_dataset_size(self) -> Optional[int]:
+        """
+        Load dataset size from manifest.json if available.
+        
+        Returns:
+            Number of samples in the dataset, or None if not available
+        """
+        if not self.tar_paths:
+            return None
+        
+        # Extract webdataset directory from first tar path
+        # Format: /path/to/shards/train-{000000..000099}.tar -> /path/to/shards
+        first_path = self.tar_paths[0]
+        if '{' in first_path:
+            # Brace expansion pattern - extract directory
+            webdataset_dir = Path(first_path.split('{')[0]).parent
+        else:
+            # Single tar file - extract directory
+            webdataset_dir = Path(first_path).parent
+        
+        manifest_path = webdataset_dir / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        
+        try:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            
+            split_info = manifest.get("splits", {}).get(self.split, {})
+            num_samples = split_info.get("num_samples")
+            
+            if num_samples:
+                # Estimate based on COI ratio (typically 25% COI in the dataset)
+                # Since we create mixtures, the effective dataset size is approximately
+                # the number of COI samples (each mixed with background)
+                coi_ratio = split_info.get("coi_ratio", 0.25)
+                estimated_size = int(num_samples * coi_ratio)
+                return estimated_size
+            
+            return None
+        except (json.JSONDecodeError, KeyError, IOError):
+            return None
+
+    def __len__(self) -> int:
+        """
+        Return an estimate of dataset length.
+        
+        For IterableDatasets, this is an approximation used for progress bars
+        and learning rate scheduling. The actual number of yielded samples may differ.
+        """
+        if self._dataset_size is not None:
+            return self._dataset_size
+        
+        # Fallback: return a reasonable default (1000 samples per shard)
+        return len(self.tar_paths) * 1000
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         """
