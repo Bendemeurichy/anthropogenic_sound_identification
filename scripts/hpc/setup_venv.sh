@@ -6,7 +6,7 @@
 #
 #   module swap cluster/donphan
 #   qsub -I
-#   cd $VSC_DATA/code
+#   cd $VSC_DATA/anthropogenic_sound_identification
 #   bash scripts/hpc/setup_venv.sh
 #
 # Note: donphan uses RHEL 9, same as accelgor, so the venv will work on both.
@@ -72,10 +72,6 @@ echo "  This may take 15-25 minutes for large packages like PyTorch..."
 pip install --no-cache-dir -r scripts/hpc/requirements_hpc.txt
 
 echo ""
-echo "Installing project in editable mode..."
-pip install --no-cache-dir -e .
-
-echo ""
 echo "=============================================="
 echo "Setup complete!"
 echo "=============================================="
@@ -85,6 +81,7 @@ echo ""
 echo "To activate in future sessions:"
 echo "  module load Python/3.11.3-GCCcore-12.3.0"
 echo "  source \$VSC_DATA/venv/bin/activate"
+echo "  export PYTHONPATH=\"\$VSC_DATA/anthropogenic_sound_identification:\$PYTHONPATH\""
 echo ""
 echo "Creating checkpoint directories..."
 mkdir -p "$VSC_DATA/checkpoints/sudormrf"

@@ -19,8 +19,11 @@ module swap cluster/accelgor
 module load Python/3.11.3-GCCcore-12.3.0
 source $VSC_DATA/venv/bin/activate
 
+# Add project to Python path
+export PYTHONPATH="$VSC_DATA/anthropogenic_sound_identification:$PYTHONPATH"
+
 # Navigate to project directory
-cd $VSC_DATA/code
+cd $VSC_DATA/anthropogenic_sound_identification
 
 # Print job information
 echo "=============================================="
