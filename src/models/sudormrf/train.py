@@ -1961,7 +1961,41 @@ def main():
     print(f"  Model: {config.model.type} ({config.model.num_blocks} blocks)")
     print(f"  Device: {config.training.device}")
 
-    # Load dataset metadata
+    # ------------------------------------------------------------------ #
+    # Check if using WebDataset mode                                       #
+    # ------------------------------------------------------------------ #
+    use_webdataset = getattr(config.data, "use_webdataset", False)
+    webdataset_path = getattr(config.data, "webdataset_path", "")
+
+    if use_webdataset:
+        # WebDataset mode: Skip CSV loading, go straight to training
+        if not webdataset_path:
+            raise ValueError(
+                "webdataset_path must be set when use_webdataset=True. "
+                "Add webdataset_path to your training_config.yaml"
+            )
+        
+        print("\n" + "=" * 70)
+        print("WebDataset Mode Enabled")
+        print("=" * 70)
+        print(f"  WebDataset path: {webdataset_path}")
+        print("  Skipping CSV dataset creation and metadata loading")
+        print("  Data will be loaded directly from tar shards")
+        print("=" * 70 + "\n")
+        
+        # Set dummy df_path (not used in WebDataset mode but needed for validation)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        checkpoint_dir = Path(config.training.checkpoint_dir) / timestamp
+        checkpoint_dir.mkdir(exist_ok=True, parents=True)
+        config.data.df_path = str(checkpoint_dir / "webdataset_placeholder.csv")
+        
+        # Save config and start training
+        train(config, timestamp=timestamp)
+        return
+
+    # ------------------------------------------------------------------ #
+    # CSV-based mode: Load dataset metadata                               #
+    # ------------------------------------------------------------------ #
     print("\nLoading dataset metadata...")
     project_root = Path(__file__).parent.parent.parent.parent
     datasets_path = str(project_root / "data")
