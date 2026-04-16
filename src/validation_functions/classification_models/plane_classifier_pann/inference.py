@@ -11,7 +11,7 @@ import torchaudio
 import argparse
 
 # Add parent directory to path for imports
-sys.path.append(str(Path(__file__).parent.parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent.parent))
 
 from model_loader import load_trained_model
 from config import TrainingConfig

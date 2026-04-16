@@ -8,7 +8,7 @@ import torch
 import numpy as np
 
 # Add parent directories to path for imports
-sys.path.append(str(Path(__file__).parent.parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent.parent))
 
 from config import TrainingConfig
 from dataset import create_dataloaders
