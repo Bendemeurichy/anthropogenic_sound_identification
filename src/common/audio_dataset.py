@@ -141,7 +141,22 @@ class AudioClassificationDataset(Dataset):
                 expanded_rows.append(row.to_dict())
                 continue
             
-            duration = float(end) - float(start)
+            # Try to convert to float, handling non-numeric values like "unknown"
+            try:
+                start_float = float(start)
+            except (ValueError, TypeError):
+                # Invalid start time, keep row as-is (will use full file)
+                expanded_rows.append(row.to_dict())
+                continue
+            
+            try:
+                end_float = float(end)
+            except (ValueError, TypeError):
+                # Invalid end time, keep row as-is (will use full file)
+                expanded_rows.append(row.to_dict())
+                continue
+            
+            duration = end_float - start_float
             
             # If shorter than or equal to target, keep as-is
             if duration <= self.audio_duration:
@@ -150,8 +165,8 @@ class AudioClassificationDataset(Dataset):
                 # Split into multiple clips
                 n_clips = int(np.ceil(duration / self.audio_duration))
                 for i in range(n_clips):
-                    new_start = float(start) + i * self.audio_duration
-                    new_end = min(float(start) + (i + 1) * self.audio_duration, float(end))
+                    new_start = start_float + i * self.audio_duration
+                    new_end = min(start_float + (i + 1) * self.audio_duration, end_float)
                     
                     # Include if meets minimum length
                     if new_end - new_start >= min_clip_length:
