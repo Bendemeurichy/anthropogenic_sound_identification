@@ -12,10 +12,10 @@ from torch.utils.data import DataLoader
 from typing import Tuple
 
 # Add parent directories to path for imports
-sys.path.append(str(Path(__file__).parent.parent.parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from src.common.audio_dataset import AudioClassificationDataset
-from .config import TrainingConfig, DataLoaderConfig
+from common.audio_dataset import AudioClassificationDataset
+from config import TrainingConfig, DataLoaderConfig
 
 
 class PANNDataset(AudioClassificationDataset):
@@ -151,7 +151,7 @@ def create_dataloaders(
 if __name__ == "__main__":
     # Test dataset creation
     import torch
-    from .config import TrainingConfig
+    from config import TrainingConfig
     
     # Create dummy data
     dummy_df = pd.DataFrame({

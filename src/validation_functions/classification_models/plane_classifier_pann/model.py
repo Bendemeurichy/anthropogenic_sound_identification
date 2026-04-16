@@ -16,7 +16,7 @@ from torchlibrosa.stft import Spectrogram, LogmelFilterBank
 from torchlibrosa.augmentation import SpecAugmentation
 from typing import Optional, List
 
-from .config import ModelConfig
+from config import ModelConfig
 
 
 def init_layer(layer):

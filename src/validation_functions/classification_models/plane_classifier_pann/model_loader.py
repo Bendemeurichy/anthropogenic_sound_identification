@@ -14,8 +14,8 @@ from tqdm import tqdm
 from typing import Optional
 import os
 
-from .model import Cnn14, PlaneClassifierPANN
-from .config import ModelConfig, TrainingConfig
+from model import Cnn14, PlaneClassifierPANN
+from config import ModelConfig, TrainingConfig
 
 
 def download_pretrained_weights(

@@ -12,9 +12,9 @@ from tqdm import tqdm
 import json
 import time
 
-from .model import PlaneClassifierPANN
-from .model_loader import save_checkpoint
-from .config import TrainingConfig
+from model import PlaneClassifierPANN
+from model_loader import save_checkpoint
+from config import TrainingConfig
 
 
 class BootstrapPRAUCCallback:
