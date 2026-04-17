@@ -44,7 +44,7 @@ def main(optimize_hyperparams=False, n_trials=20):
     # 1. Load all dataset metadata
     print("Loading dataset metadata...")
     # Use absolute path from project root
-    project_root = Path(__file__).parent.parent.parent.parent
+    project_root = Path(__file__).parent.parent.parent.parent.parent
     datasets_path = str(project_root / "data")
     audio_base_path = str(project_root.parent / "datasets")
 
