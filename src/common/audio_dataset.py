@@ -113,6 +113,9 @@ class AudioClassificationDataset(Dataset):
             self.df = self._split_long_annotations(df, min_clip_length)
         else:
             self.df = df.copy().reset_index(drop=True)
+            # Ensure time columns are numeric even when not splitting
+            self.df[start_time_col] = pd.to_numeric(self.df[start_time_col], errors='coerce')
+            self.df[end_time_col] = pd.to_numeric(self.df[end_time_col], errors='coerce')
         
         # Initialize resampler cache for efficient resampling
         self.resampler_cache = ResamplerCache(max_size=8)
@@ -175,7 +178,14 @@ class AudioClassificationDataset(Dataset):
                         new_row[self.end_time_col] = new_end
                         expanded_rows.append(new_row)
         
-        return pd.DataFrame(expanded_rows).reset_index(drop=True)
+        # Create DataFrame and explicitly ensure correct dtypes
+        result_df = pd.DataFrame(expanded_rows).reset_index(drop=True)
+        
+        # Convert time columns to float, handling any remaining non-numeric values
+        result_df[self.start_time_col] = pd.to_numeric(result_df[self.start_time_col], errors='coerce')
+        result_df[self.end_time_col] = pd.to_numeric(result_df[self.end_time_col], errors='coerce')
+        
+        return result_df
     
     def __len__(self) -> int:
         return len(self.df)
@@ -196,9 +206,27 @@ class AudioClassificationDataset(Dataset):
         
         # Load audio file
         filepath = row[self.filename_col]
-        start_time = row[self.start_time_col]
-        end_time = row[self.end_time_col]
+        start_time_raw = row[self.start_time_col]
+        end_time_raw = row[self.end_time_col]
         label = int(row[self.label_col])
+        
+        # Convert times to float, handling any type issues
+        # This is a safety check in case dtype conversion failed earlier
+        if pd.notna(start_time_raw):
+            try:
+                start_time = float(start_time_raw)
+            except (ValueError, TypeError):
+                start_time = float('nan')
+        else:
+            start_time = float('nan')
+        
+        if pd.notna(end_time_raw):
+            try:
+                end_time = float(end_time_raw)
+            except (ValueError, TypeError):
+                end_time = float('nan')
+        else:
+            end_time = float('nan')
         
         # Load waveform
         waveform = self._load_audio_segment(filepath, start_time, end_time)
@@ -223,6 +251,8 @@ class AudioClassificationDataset(Dataset):
         Returns:
             Waveform tensor of shape (target_samples,)
         """
+        import math
+        
         # Load audio file
         try:
             waveform, sample_rate = torchaudio.load(filepath)
@@ -236,7 +266,7 @@ class AudioClassificationDataset(Dataset):
         waveform = waveform.squeeze(0)  # Remove channel dimension
         
         # Extract segment
-        if pd.notna(start_time) and pd.notna(end_time):
+        if not math.isnan(start_time) and not math.isnan(end_time):
             start_sample = int(start_time * sample_rate)
             end_sample = int(end_time * sample_rate)
             
