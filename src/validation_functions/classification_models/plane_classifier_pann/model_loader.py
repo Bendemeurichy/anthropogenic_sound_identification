@@ -111,7 +111,7 @@ def load_pretrained_cnn14(
     
     # Load pretrained weights
     print(f"Loading pretrained weights from {weights_path}")
-    checkpoint = torch.load(weights_path, map_location=device)
+    checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
     
     # Handle different checkpoint formats
     if 'model' in checkpoint:
@@ -214,7 +214,7 @@ def load_trained_model(
     
     # Load checkpoint
     print(f"Loading checkpoint from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Load model state
     if 'model_state_dict' in checkpoint:

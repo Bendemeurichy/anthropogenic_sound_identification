@@ -422,7 +422,7 @@ def train_phase(
     
     # Load best model
     best_checkpoint = checkpoint_dir / f"best_model_{phase_name}.pth"
-    checkpoint = torch.load(best_checkpoint, map_location=device)
+    checkpoint = torch.load(best_checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"Loaded best model from {best_checkpoint}")
     
