@@ -20,15 +20,7 @@ if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
     )
 
 # Add necessary directories to sys.path for imports
-_current_dir = Path(__file__).resolve().parent
-if str(_current_dir) not in sys.path:
-    sys.path.insert(0, str(_current_dir))
-_src_dir = _current_dir.parent.parent.parent
-if str(_src_dir) not in sys.path:
-    sys.path.append(str(_src_dir))
-_code_dir = _src_dir.parent
-if str(_code_dir) not in sys.path:
-    sys.path.append(str(_code_dir))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent.parent))
 
 from config import TrainingConfig
 from train import train_plane_classifier
