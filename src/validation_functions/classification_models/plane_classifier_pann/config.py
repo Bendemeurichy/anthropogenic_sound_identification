@@ -14,13 +14,15 @@ class TrainingConfig:
     end_time_column: str = "end_time"
     label_column: str = "label"
     split_column: str = "split"
-    batch_size: int = 32  # Smaller than YAMNet due to larger embeddings (2048 vs 1024)
+    batch_size: int = 16  # Smaller than YAMNet due to larger embeddings (2048 vs 1024)
     sample_rate: int = 32000  # PANN native sample rate (vs YAMNet's 16kHz)
     audio_duration: float = 10.0  # PANN works better with longer clips (vs YAMNet's 5s)
     split_long: bool = True  # Split long annotations into multiple clips
     min_clip_length: float = 0.5  # Minimum clip length in seconds
-    shuffle_buffer: int = 10000  # Not used in PyTorch DataLoader, kept for compatibility
-    num_workers: int = 4  # Number of data loading workers
+    shuffle_buffer: int = (
+        10000  # Not used in PyTorch DataLoader, kept for compatibility
+    )
+    num_workers: int = 1  # Number of data loading workers
     pin_memory: bool = True  # Pin memory for faster GPU transfer
 
     # Training parameters - Phase 1 (frozen backbone)
@@ -50,7 +52,7 @@ class TrainingConfig:
     # Augmentation (training only)
     use_augmentation: bool = True
     aug_time_stretch_prob: float = 0.5
-    aug_time_stretch_range: tuple = (0.8, 1.2)
+    aug_time_stretch_range: tuple = (0.95, 1.05)
     aug_noise_prob: float = 0.5
     aug_noise_stddev: float = 0.005
     aug_gain_prob: float = 0.5
@@ -65,7 +67,7 @@ class TrainingConfig:
 
     # Bootstrap CI for validation metrics
     bootstrap_enabled: bool = True
-    bootstrap_n_iterations: int = 1000
+    bootstrap_n_iterations: int = 100
     bootstrap_confidence_level: float = 0.95
     bootstrap_log_frequency: int = 1  # Log bootstrap CI every N epochs
 

@@ -93,6 +93,37 @@ def create_high_quality_resampler(
     )
 
 
+def create_low_quality_resampler(
+    orig_sr: int,
+    target_sr: int,
+    method: str = "linear",
+    lowpass_filter_width: int = 16,
+    rolloff: float = 0.8,
+) -> torchaudio.transforms.Resample:
+    """
+    Create a low-quality audio resampler for augmentations.
+
+    Uses simpler methods to avoid memory issues during data augmentation.
+
+    Args:
+        orig_sr: Original sample rate (Hz)
+        target_sr: Target sample rate (Hz)
+        method: Resampling method ('linear', 'cubic', etc.)
+        lowpass_filter_width: Filter kernel half-width (default: 16)
+        rolloff: Cutoff frequency as fraction of Nyquist (default: 0.8)
+
+    Returns:
+        Configured Resample transform
+    """
+    return torchaudio.transforms.Resample(
+        orig_freq=orig_sr,
+        new_freq=target_sr,
+        resampling_method=method,
+        lowpass_filter_width=lowpass_filter_width,
+        rolloff=rolloff,
+    )
+
+
 class ResamplerCache:
     """
     Cache of high-quality audio resamplers for efficient multi-rate audio loading.
@@ -113,7 +144,9 @@ class ResamplerCache:
         self._cache: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
         self._max_size = max_size
 
-    def get_resampler(self, orig_sr: int, target_sr: int) -> torchaudio.transforms.Resample:
+    def get_resampler(
+        self, orig_sr: int, target_sr: int
+    ) -> torchaudio.transforms.Resample:
         """
         Get or create a high-quality resampler for the given sample rate pair.
 
