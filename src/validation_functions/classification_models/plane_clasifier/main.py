@@ -19,8 +19,16 @@ if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
         sys.stderr.buffer, encoding="utf-8", line_buffering=True
     )
 
-# Add parent directories to path for imports
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+# Add necessary directories to sys.path for imports
+_current_dir = Path(__file__).resolve().parent
+if str(_current_dir) not in sys.path:
+    sys.path.insert(0, str(_current_dir))
+_src_dir = _current_dir.parent.parent.parent
+if str(_src_dir) not in sys.path:
+    sys.path.append(str(_src_dir))
+_code_dir = _src_dir.parent
+if str(_code_dir) not in sys.path:
+    sys.path.append(str(_code_dir))
 
 from config import TrainingConfig
 from train import train_plane_classifier
@@ -61,25 +69,18 @@ def main(optimize_hyperparams=False, n_trials=20):
     # You'll need to check what plane-related labels exist in your datasets
     # Common airplane labels in AudioSet: "Aircraft", "Airplane", "Fixed-wing aircraft"
     # In ESC-50: "airplane"
-    # target_classes = [
-    #     "airplane",
-    #     "Aircraft",
-    #     "Fixed-wing aircraft, airplane",
-    #     "Aircraft engine",
-    #     "Fixed-wing_aircraft_and_airplane",
-    #     "Helicopter",
-    #     "helicopter",
-    #     "Propeller airscrew",
-    # ]
     target_classes = [
-        "Rail transport",
-        "Train",
-        "Subway, metro, underground",
-        "Railroad car, train wagon",
-        "Train wheels squealing",
-        "trian",
-        "Rail_transport",
-        "Subway_and_metro_and_underground",
+        "airplane",
+        "Aircraft",
+        "Fixed-wing aircraft, airplane",
+        "Aircraft engine",
+        "Fixed-wing_aircraft_and_airplane",
+        "Helicopter",
+        "helicopter",
+        "Propeller, airscrew",
+        "Propeller airscrew",
+        "Turboprop, small aircraft",
+        "Jet aircraft",
     ]
 
     print(f"\nTarget classes: {target_classes}")

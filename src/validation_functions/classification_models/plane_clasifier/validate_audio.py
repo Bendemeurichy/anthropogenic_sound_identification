@@ -9,8 +9,16 @@ from pathlib import Path
 import pandas as pd
 import argparse
 
-# Add parent directories to path for imports
-sys.path.append(str(Path(__file__).parent))
+# Add necessary directories to sys.path for imports
+_current_dir = Path(__file__).resolve().parent
+if str(_current_dir) not in sys.path:
+    sys.path.insert(0, str(_current_dir))
+_src_dir = _current_dir.parent.parent.parent
+if str(_src_dir) not in sys.path:
+    sys.path.append(str(_src_dir))
+_code_dir = _src_dir.parent
+if str(_code_dir) not in sys.path:
+    sys.path.append(str(_code_dir))
 
 from helpers import validate_audio_file
 
