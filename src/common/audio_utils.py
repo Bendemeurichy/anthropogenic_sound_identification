@@ -96,7 +96,7 @@ def create_high_quality_resampler(
 def create_low_quality_resampler(
     orig_sr: int,
     target_sr: int,
-    method: str = "linear",
+    method: str = "sinc_interp_hann",
     lowpass_filter_width: int = 16,
     rolloff: float = 0.8,
 ) -> torchaudio.transforms.Resample:
@@ -108,7 +108,7 @@ def create_low_quality_resampler(
     Args:
         orig_sr: Original sample rate (Hz)
         target_sr: Target sample rate (Hz)
-        method: Resampling method ('linear', 'cubic', etc.)
+        method: Resampling method ('sinc_interp_hann', etc.)
         lowpass_filter_width: Filter kernel half-width (default: 16)
         rolloff: Cutoff frequency as fraction of Nyquist (default: 0.8)
 

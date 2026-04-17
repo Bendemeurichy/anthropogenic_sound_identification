@@ -46,7 +46,7 @@ from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from typing import Optional, Dict, Tuple, Callable
 
-from .audio_utils import ResamplerCache, create_low_quality_resampler
+from .audio_utils import ResamplerCache, create_low_quality_resampler, create_high_quality_resampler
 
 
 class AudioClassificationDataset(Dataset):
@@ -383,13 +383,24 @@ class AudioClassificationDataset(Dataset):
         # Calculate stretched length
         stretched_len = int(len(waveform) * stretch_factor)
 
-        # Use low-quality resampling for time stretching to avoid memory issues
+        # Use high-quality resampling for time stretching to avoid memory issues
         if stretched_len > 0 and stretched_len != len(waveform):
             target_sr = int(self.target_sample_rate * stretch_factor)
-            resampler = create_low_quality_resampler(
-                self.target_sample_rate, target_sr, method="sinc_fastest"
-            )
-            stretched = resampler(waveform)
+            
+            # CRITICAL OOM FIX: 
+            # torchaudio computes resampling kernels based on the greatest common divisor (GCD) 
+            # between orig_sr and target_sr. If they are coprime (e.g. 32000 and 32137), 
+            # the kernel becomes absolutely massive (gigabytes of RAM) and causes an immediate OOM.
+            # Rounding to the nearest 100 ensures a large GCD (at least 100) and tiny filter kernels.
+            target_sr = int(round(target_sr / 100.0) * 100)
+            
+            if target_sr != self.target_sample_rate:
+                resampler = create_high_quality_resampler(
+                    self.target_sample_rate, target_sr
+                )
+                stretched = resampler(waveform)
+            else:
+                stretched = waveform
 
             # Normalize back to target length
             stretched = self._normalize_length(stretched)
