@@ -74,13 +74,13 @@ class KerasAudioDataLoader:
                 lbl = row[self.config.label_column]
                 sp = row[self.config.split_column]
 
-                # If start/end are NaN we cannot split reliably; keep as-is
-                if pd.isna(s) or pd.isna(e):
+                # If start/end are NaN or "unknown" we cannot split reliably; keep as-is
+                if pd.isna(s) or pd.isna(e) or s == "unknown" or e == "unknown":
                     expanded_rows.append(
                         {
                             self.config.filename_column: str(fname),
-                            self.config.start_time_column: s,
-                            self.config.end_time_column: e,
+                            self.config.start_time_column: np.nan,
+                            self.config.end_time_column: np.nan,
                             self.config.label_column: int(lbl),
                             self.config.split_column: sp,
                         }

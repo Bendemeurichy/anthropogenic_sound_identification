@@ -53,6 +53,9 @@ def main(optimize_hyperparams=False, n_trials=20):
 
     _, classification_metadata = split_seperation_classification(all_metadata)
 
+    # Omit birdset dataset (tensorflow can't handle flacs easily)
+    classification_metadata = classification_metadata[classification_metadata["dataset"] != "birdset"]
+
     print(f"Loaded {len(all_metadata)} total samples from all datasets")
     print(f"Datasets included: {all_metadata['dataset'].unique()}")
     print(f"\nColumns: {list(all_metadata.columns)}")

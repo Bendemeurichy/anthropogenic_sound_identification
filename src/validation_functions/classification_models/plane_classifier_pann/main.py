@@ -92,6 +92,9 @@ def main():
     all_metadata = load_metadata_datasets(datasets_path, audio_base_path)
     _, classification_metadata = split_seperation_classification(all_metadata)
     
+    # Omit birdset dataset (PANN might not handle flacs easily without extra config)
+    classification_metadata = classification_metadata[classification_metadata["dataset"] != "birdset"]
+    
     print(f"Loaded {len(all_metadata)} total samples from all datasets")
     print(f"Datasets included: {all_metadata['dataset'].unique()}")
     print(f"Classification samples: {len(classification_metadata)}")
