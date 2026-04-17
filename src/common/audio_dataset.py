@@ -387,7 +387,7 @@ class AudioClassificationDataset(Dataset):
         if stretched_len > 0 and stretched_len != len(waveform):
             target_sr = int(self.target_sample_rate * stretch_factor)
             resampler = create_low_quality_resampler(
-                self.target_sample_rate, target_sr, method="linear"
+                self.target_sample_rate, target_sr, method="sinc_fastest"
             )
             stretched = resampler(waveform)
 
