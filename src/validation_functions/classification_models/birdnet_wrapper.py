@@ -24,11 +24,8 @@ class BirdNETClassifierWrapper:
     BirdNET can identify 6,522 bird species from audio. This wrapper provides binary
     detection: either detect ANY bird species or detect specific target species.
     
-    The model returns predictions for 3-second chunks by default, so input waveforms
-    should ideally be at least 3 seconds long.
-    
     Attributes:
-        sample_rate: Expected sample rate (48000 Hz for BirdNET 2.4)
+        sample_rate: Native sample rate (48000 Hz for BirdNET 2.4)
         device: Device for model inference
         model: Loaded BirdNET acoustic model
         threshold: Classification threshold for binary decision
@@ -93,8 +90,7 @@ class BirdNETClassifierWrapper:
     def sample_rate(self) -> int:
         """Expected sample rate in Hz for input waveforms.
         
-        BirdNET v2.4 models expect 48kHz audio. Older versions may use different rates.
-        The model handles resampling internally if needed.
+        BirdNET v2.4 models expect 48kHz audio.
         
         Returns:
             48000 (BirdNET v2.4's native sample rate)
@@ -110,9 +106,8 @@ class BirdNETClassifierWrapper:
         - If detect_any_bird=False: positive only if target_species detected above threshold
         
         Args:
-            waveform: Audio tensor (1D) at 48000 Hz (or will be resampled internally).
-                     Should be normalized to [-1, 1] range.
-                     Recommended length: at least 3 seconds (144000 samples at 48kHz).
+            waveform: Audio tensor (1D) at 48000 Hz.
+                      Should be normalized to [-1, 1] range.
         
         Returns:
             A tuple of (prediction, confidence) where:
@@ -133,58 +128,23 @@ class BirdNETClassifierWrapper:
             >>> pred, conf = wrapper2(waveform)
         """
         try:
-            # Convert torch tensor to numpy if needed
             if isinstance(waveform, torch.Tensor):
                 wav_np = waveform.detach().cpu().numpy()
             else:
                 wav_np = np.asarray(waveform)
             
-            # Ensure correct dtype
             if wav_np.dtype != np.float32:
-                wav_np = wav_np.astype(np.float32)
-                
-            import tempfile
-            import os
-            import soundfile as sf
-            
-            # The birdnet library predict() method only accepts file paths.
-            # We must write the numpy array to a temporary WAV file.
-            fd, tmp_path = tempfile.mkstemp(suffix=".wav")
-            os.close(fd)
-            try:
-                sf.write(tmp_path, wav_np, self._sample_rate)
-                
-                if self.detect_any_bird and self.target_species is None:
-                    # Detect all species
-                    predictions = self.model.predict(tmp_path)
-                else:
-                    # Detect specific species or filter by target_species
-                    predictions = self.model.predict(
-                        tmp_path,
-                        custom_species_list=self.target_species
-                    )
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            
-            # Convert to DataFrame to extract confidences
-            if hasattr(predictions, 'to_dataframe'):
-                df = predictions.to_dataframe()
-                if len(df) > 0 and 'confidence' in df.columns:
-                    confidences = df['confidence'].values
-                    max_conf = float(np.max(confidences))
-                else:
-                    max_conf = 0.0
+                wav_np = wav_np.astype(np.float32, copy=False)
+
+            if self.detect_any_bird and self.target_species is None:
+                predictions = self.model.predict_arrays((wav_np, self._sample_rate))
             else:
-                # Fallback if the API changes
-                if predictions is not None and len(predictions) > 0:
-                    try:
-                        confidences = predictions['confidence']
-                        max_conf = float(np.max(confidences))
-                    except:
-                        max_conf = 0.0
-                else:
-                    max_conf = 0.0
+                predictions = self.model.predict_arrays(
+                    (wav_np, self._sample_rate),
+                    custom_species_list=self.target_species,
+                )
+
+            max_conf = self._extract_max_confidence(predictions)
             
             # Apply threshold for binary classification
             pred = 1 if max_conf >= self.threshold else 0
@@ -197,3 +157,32 @@ class BirdNETClassifierWrapper:
                 file=sys.stderr
             )
             return 0, 0.0
+
+    @staticmethod
+    def _extract_max_confidence(predictions) -> float:
+        """Extract the maximum confidence score from a BirdNET result object."""
+        if predictions is None:
+            return 0.0
+
+        if hasattr(predictions, "species_probs") and hasattr(
+            predictions, "species_masked"
+        ):
+            probs = np.asarray(predictions.species_probs)
+            masked = np.asarray(predictions.species_masked)
+            valid = probs[~masked]
+            return float(np.max(valid)) if valid.size > 0 else 0.0
+
+        if hasattr(predictions, "to_dataframe"):
+            df = predictions.to_dataframe()
+            if len(df) > 0 and "confidence" in df.columns:
+                return float(df["confidence"].max())
+            return 0.0
+
+        try:
+            if predictions is not None and len(predictions) > 0:
+                confidences = predictions["confidence"]
+                return float(np.max(confidences))
+        except Exception:
+            pass
+
+        return 0.0

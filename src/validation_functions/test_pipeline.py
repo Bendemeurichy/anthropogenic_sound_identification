@@ -1366,7 +1366,7 @@ class ValidationPipeline:
         """Classify using the BirdNET model.
 
         Resamples *waveform* from ``self.sample_rate`` to BirdNET's required
-        sample rate internally.
+        sample rate using the shared high-quality Kaiser-window sinc resampler.
 
         Returns:
             ``(prediction, confidence)`` – 1/0 and the max confidence score across
@@ -1377,10 +1377,9 @@ class ValidationPipeline:
                 "BirdNET model is not loaded. Call load_models(use_birdnet=True)."
             )
         
-        # Resample if needed
         wav = waveform.detach().cpu()
         birdnet_sr = self.birdnet_model.sample_rate
-        
+
         if self.sample_rate != birdnet_sr:
             key = (self.sample_rate, birdnet_sr)
             if key not in self._resamplers:
@@ -1388,7 +1387,7 @@ class ValidationPipeline:
                     self.sample_rate, birdnet_sr
                 )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
-        
+
         # Call the wrapper using unified interface
         return self.birdnet_model(wav)
 
@@ -2114,11 +2113,23 @@ class ValidationPipeline:
         # ------------------------------------------------------------------
         classifiers = []
         if self.classifier is not None:
-            classifiers.append(("cnn", self._classify))
+            # Determine correct name based on the class of the primary classifier wrapper
+            primary_name = "cnn"
+            if hasattr(self.classifier, "model") and hasattr(self.classifier.model, "__module__"):
+                mod = self.classifier.model.__module__.lower()
+                if "birdnet" in mod:
+                    primary_name = "birdnet"
+                elif "ast" in mod:
+                    primary_name = "ast"
+                elif "pann" in mod:
+                    primary_name = "pann"
+            classifiers.append((primary_name, self._classify))
         if self.pann_model is not None:
             classifiers.append(("pann", self._classify_pann))
         if self.ast_model is not None:
             classifiers.append(("ast", self._classify_ast))
+        if self.birdnet_model is not None:
+            classifiers.append(("birdnet", self._classify_birdnet))
 
         if not classifiers:
             print(
@@ -2314,6 +2325,8 @@ class ValidationPipeline:
                     results_dict["positive_labels"] = AST_POSITIVE_LABELS
                 elif cls_name == "cnn":
                     results_dict["positive_class"] = CNN_POSITIVE_CLASS
+                elif cls_name == "birdnet":
+                    results_dict["positive_class"] = "any_bird"
                 tag = f"{split}_{only_dataset}" if only_dataset else split
                 out_file = Path(cls_output_dir) / f"results_{tag}_{ts}.json"
                 with open(out_file, "w") as f:
