@@ -35,8 +35,13 @@ class ASTFinetunedWrapper:
         )
         self.model.eval()
         
+        from transformers import ASTFeatureExtractor
+        self.feature_extractor = ASTFeatureExtractor.from_pretrained(
+            "MIT/ast-finetuned-audioset-10-10-0.4593"
+        )
+        
         # AST works at 16kHz
-        self._sample_rate = self.model.feature_extractor.sampling_rate
+        self._sample_rate = self.feature_extractor.sampling_rate
         self._segment_length = 10.0
         self._segment_samples = int(self._sample_rate * self._segment_length)
         
@@ -65,10 +70,16 @@ class ASTFinetunedWrapper:
         else:
             waveforms = waveforms[:, :self._segment_samples]
         
-        waveforms = waveforms.to(self.device)
+        # Extract features using ASTFeatureExtractor
+        inputs = self.feature_extractor(
+            waveforms.cpu().numpy(), 
+            sampling_rate=self._sample_rate, 
+            return_tensors="pt"
+        )
+        input_values = inputs.input_values.to(self.device)
         
         self.model.eval()
-        logits = self.model(waveforms)  # (B, 1)
+        logits = self.model(input_values)  # (B, 1)
         confidences = torch.sigmoid(logits).squeeze(-1)  # (B,)
         
         predictions = (confidences >= self.threshold).long()
