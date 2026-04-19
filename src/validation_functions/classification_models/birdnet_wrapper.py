@@ -132,49 +132,59 @@ class BirdNETClassifierWrapper:
             ... )
             >>> pred, conf = wrapper2(waveform)
         """
-        # Convert torch tensor to numpy if needed
-        if isinstance(waveform, torch.Tensor):
-            wav_np = waveform.detach().cpu().numpy()
-        else:
-            wav_np = np.asarray(waveform)
-        
-        # Ensure correct dtype
-        if wav_np.dtype != np.float32:
-            wav_np = wav_np.astype(np.float32)
-        
-        # Run BirdNET prediction
-        # The model.predict() method expects audio as numpy array
-        # and returns a DataFrame with columns: ['start_time', 'end_time', 'species_name', 'confidence']
         try:
-            if self.detect_any_bird and self.target_species is None:
-                # Detect all species
-                predictions = self.model.predict(wav_np)
+            # Convert torch tensor to numpy if needed
+            if isinstance(waveform, torch.Tensor):
+                wav_np = waveform.detach().cpu().numpy()
             else:
-                # Detect specific species or filter by target_species
-                predictions = self.model.predict(
-                    wav_np,
-                    custom_species_list=self.target_species
-                )
+                wav_np = np.asarray(waveform)
             
-            # Get maximum confidence across all predictions
-            if predictions is not None and len(predictions) > 0:
-                # predictions is a pandas DataFrame or similar structure
-                if hasattr(predictions, 'confidence'):
-                    # It's a DataFrame
-                    confidences = predictions['confidence'].values
-                    max_conf = float(np.max(confidences)) if len(confidences) > 0 else 0.0
-                elif hasattr(predictions, '__getitem__'):
-                    # Try to access as dict-like or array-like
-                    try:
-                        confidences = predictions['confidence']
-                        max_conf = float(np.max(confidences)) if len(confidences) > 0 else 0.0
-                    except (KeyError, TypeError):
-                        # Fallback: assume it's an array of confidence values
-                        max_conf = float(np.max(predictions)) if len(predictions) > 0 else 0.0
+            # Ensure correct dtype
+            if wav_np.dtype != np.float32:
+                wav_np = wav_np.astype(np.float32)
+                
+            import tempfile
+            import os
+            import soundfile as sf
+            
+            # The birdnet library predict() method only accepts file paths.
+            # We must write the numpy array to a temporary WAV file.
+            fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            try:
+                sf.write(tmp_path, wav_np, self._sample_rate)
+                
+                if self.detect_any_bird and self.target_species is None:
+                    # Detect all species
+                    predictions = self.model.predict(tmp_path)
+                else:
+                    # Detect specific species or filter by target_species
+                    predictions = self.model.predict(
+                        tmp_path,
+                        custom_species_list=self.target_species
+                    )
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            
+            # Convert to DataFrame to extract confidences
+            if hasattr(predictions, 'to_dataframe'):
+                df = predictions.to_dataframe()
+                if len(df) > 0 and 'confidence' in df.columns:
+                    confidences = df['confidence'].values
+                    max_conf = float(np.max(confidences))
                 else:
                     max_conf = 0.0
             else:
-                max_conf = 0.0
+                # Fallback if the API changes
+                if predictions is not None and len(predictions) > 0:
+                    try:
+                        confidences = predictions['confidence']
+                        max_conf = float(np.max(confidences))
+                    except:
+                        max_conf = 0.0
+                else:
+                    max_conf = 0.0
             
             # Apply threshold for binary classification
             pred = 1 if max_conf >= self.threshold else 0

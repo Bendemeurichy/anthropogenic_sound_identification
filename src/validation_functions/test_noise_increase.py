@@ -543,6 +543,7 @@ def main() -> None:
         pipeline.load_models(
             sep_checkpoint=SEP_CHECKPOINT,
             cls_weights=None,  # No classifier needed
+            classifier_type="birdnet", # Required to get correct COI synonyms (e.g. BIRD_SYNONYMS)
             use_clapsep=False,
             use_tuss=False,
             use_pann=False,

@@ -2476,7 +2476,8 @@ def main():
     pipeline = ValidationPipeline(base_path=BASE_PATH)
     pipeline.load_models(
         sep_checkpoint=SEP_CHECKPOINT,
-        cls_weights=CLS_WEIGHTS,
+        cls_weights=None, # Not needed for birdnet
+        classifier_type="birdnet",
         use_clapsep=False,
         use_tuss=False,
     )
