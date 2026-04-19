@@ -10,7 +10,8 @@ Supported classifiers:
 - "pann": PANN AudioTagging (PyTorch-based AudioSet classifier)
 - "pann_finetuned": Fine-tuned PANN CNN14 (PyTorch-based, trained specifically for plane detection)
 - "ast": Audio Spectrogram Transformer (HuggingFace transformer for AudioSet)
-- "birdnet": BirdNET (acoustic bird species classifier)
+- "bird_mae": Bird-MAE-Base (HuggingFace masked autoencoder for BirdSet)
+- "audioprotopnet": AudioProtoPNet-20-BirdSet-XCL (HuggingFace prototypical network for BirdSet)
 
 Example usage:
     >>> from Classifier import create_classifier
@@ -63,6 +64,20 @@ class AudioClassifier(Protocol):
         """
         ...
     
+    def predict_batch(self, waveforms: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Classify a batch of audio waveforms.
+        
+        Args:
+            waveforms: Audio tensor of shape (B, T) at self.sample_rate Hz.
+                      The tensor should be in the range [-1, 1].
+        
+        Returns:
+            A tuple of (predictions, confidences) where:
+            - predictions: Binary class labels of shape (B,) containing 0 or 1
+            - confidences: Confidence scores of shape (B,) in range [0.0, 1.0]
+        """
+        ...
+    
     @property
     def sample_rate(self) -> int:
         """Expected sample rate in Hz for input waveforms.
@@ -90,7 +105,8 @@ def create_classifier(
             - "pann": PANN AudioTagging for AudioSet classification
             - "pann_finetuned": Fine-tuned PANN CNN14 for airplane detection
             - "ast": Audio Spectrogram Transformer for AudioSet
-            - "birdnet": BirdNET for bird species detection
+            - "bird_mae": Bird-MAE-Base model for bird detection
+            - "audioprotopnet": AudioProtoPNet-20-BirdSet-XCL model for bird detection
         device: Device for model inference. Examples: "cpu", "cuda", "cuda:0", "cuda:1"
         threshold: Classification threshold in range [0.0, 1.0]. Predictions with
                   confidence >= threshold are classified as positive (1).
@@ -116,13 +132,9 @@ def create_classifier(
             positive_labels (List[str], optional): AudioSet labels for positive class.
                 Default: Same as PANN
         
-        BirdNET classifier:
-            model_version (str, optional): BirdNET version, default "2.4"
-            backend (str, optional): "tf" (TensorFlow) or "tflite", default "tf"
-            target_species (List[str], optional): List of bird species to detect.
-                If None, detects any bird species.
-            detect_any_bird (bool, optional): If True (default), return positive for
-                any bird species. If False, only return positive for target_species.
+        Bird-MAE / AudioProtoPNet classifier:
+            model_id (str, optional): HuggingFace model ID. Defaults to "DBD-research-group/Bird-MAE-Base" or "DBD-research-group/AudioProtoPNet-20-BirdSet-XCL".
+            threshold (float, optional): Classification threshold (default: 0.5)
     
     Returns:
         An AudioClassifier instance that can be called with a waveform tensor.
@@ -147,11 +159,10 @@ def create_classifier(
         ...     threshold=0.7
         ... )
         >>> 
-        >>> # Create BirdNET for any bird detection
+        >>> # Create Bird-MAE for any bird detection
         >>> bird_clf = create_classifier(
-        ...     "birdnet",
-        ...     device="cpu",
-        ...     detect_any_bird=True
+        ...     "bird_mae",
+        ...     device="cuda:0"
         ... )
         >>> 
         >>> # All have the same interface
@@ -212,10 +223,23 @@ def create_classifier(
             **kwargs
         )
     
-    elif classifier_type == "birdnet":
-        from .birdnet_wrapper import BirdNETClassifierWrapper
+    elif classifier_type == "bird_mae":
+        from .birdmae_wrapper import BirdMaeClassifierWrapper
         
-        return BirdNETClassifierWrapper(
+        model_id = kwargs.pop("model_id", "DBD-research-group/Bird-MAE-Base")
+        return BirdMaeClassifierWrapper(
+            model_id=model_id,
+            device=device,
+            threshold=threshold,
+            **kwargs
+        )
+    
+    elif classifier_type == "audioprotopnet":
+        from .audioprotopnet_wrapper import AudioProtoPNetClassifierWrapper
+        
+        model_id = kwargs.pop("model_id", "DBD-research-group/AudioProtoPNet-20-BirdSet-XCL")
+        return AudioProtoPNetClassifierWrapper(
+            model_id=model_id,
             device=device,
             threshold=threshold,
             **kwargs
@@ -224,5 +248,5 @@ def create_classifier(
     else:
         raise ValueError(
             f"Unknown classifier_type: {classifier_type!r}. "
-            f"Must be one of: 'plane', 'pann', 'pann_finetuned', 'ast', 'birdnet'"
+            f"Must be one of: 'plane', 'pann', 'pann_finetuned', 'ast', 'bird_mae', 'audioprotopnet'"
         )

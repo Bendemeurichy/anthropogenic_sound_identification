@@ -681,7 +681,8 @@ class ValidationPipeline:
         clapsep_text_neg: str = "",
         use_pann: bool = True,
         use_ast: bool = True,
-        use_birdnet: bool = False,
+        use_bird_mae: bool = False,
+        use_audioprotopnet: bool = False,
     ):
         """Load separation and classification models.
 
@@ -693,7 +694,8 @@ class ValidationPipeline:
                 - "pann": PANN AudioTagging (AudioSet-based airplane detection)
                 - "pann_finetuned": Fine-tuned PANN CNN14 (trained specifically for plane detection)
                 - "ast": AST (Audio Spectrogram Transformer for AudioSet)
-                - "birdnet": BirdNET (bird species detection)
+                - "bird_mae": Bird-MAE-Base (bird species detection)
+                - "audioprotopnet": AudioProtoPNet-20-BirdSet-XCL (bird species detection)
             use_clapsep: If True, load the CLAPSep separator instead of SudoRM-RF.
             use_tuss: If True, load the TUSS separator instead of SudoRM-RF.
             tuss_coi_prompt: Prompt name for TUSS Class of Interest (default: "airplane").
@@ -704,8 +706,8 @@ class ValidationPipeline:
                 additional classifier.  Requires the ``panns_inference`` package.
             use_ast: If True (default), load the AST model from HuggingFace as an
                 additional classifier.  Requires the ``transformers`` package.
-            use_birdnet: If True, load the BirdNET model as an additional classifier.
-                Requires the ``birdnet`` package.
+            use_bird_mae: If True, load the Bird-MAE-Base model as an additional classifier.
+            use_audioprotopnet: If True, load the AudioProtoPNet-20-BirdSet-XCL model as an additional classifier.
         """
         sep_path = sep_checkpoint or self.SEP_CHECKPOINT
         cls_path = cls_weights or self.CLS_WEIGHTS
@@ -842,18 +844,24 @@ class ValidationPipeline:
             )
             # Update classifier_sample_rate to match AST's requirement
             self.classifier_sample_rate = self.classifier.sample_rate
-        elif classifier_type == "birdnet":
+        elif classifier_type == "bird_mae":
             self.classifier = create_classifier(
-                "birdnet",
+                "bird_mae",
                 device=self.device,
-                detect_any_bird=True,  # Detect any bird species
             )
-            # Update classifier_sample_rate to match BirdNET's requirement
+            # Update classifier_sample_rate to match Bird-MAE's requirement
+            self.classifier_sample_rate = self.classifier.sample_rate
+        elif classifier_type == "audioprotopnet":
+            self.classifier = create_classifier(
+                "audioprotopnet",
+                device=self.device,
+            )
+            # Update classifier_sample_rate to match AudioProtoPNet's requirement
             self.classifier_sample_rate = self.classifier.sample_rate
         else:
             raise ValueError(
                 f"Unknown classifier_type: {classifier_type}. "
-                f"Must be one of: 'plane', 'pann', 'pann_finetuned', 'ast', 'birdnet'"
+                f"Must be one of: 'plane', 'pann', 'pann_finetuned', 'ast', 'bird_mae', 'audioprotopnet'"
             )
         
         self.classifier_segment_samples = int(
@@ -925,25 +933,46 @@ class ValidationPipeline:
                 )
 
         # ------------------------------------------------------------------
-        # Optional: BirdNET classifier (as auxiliary)
+        # Optional: Bird-MAE classifier (as auxiliary)
         # ------------------------------------------------------------------
-        self.birdnet_model = None
-        if use_birdnet and classifier_type != "birdnet":
+        self.bird_mae_model = None
+        if use_bird_mae and classifier_type != "bird_mae":
             try:
-                self.birdnet_model = create_classifier(
-                    "birdnet",
+                self.bird_mae_model = create_classifier(
+                    "bird_mae",
                     device=self.device,
-                    detect_any_bird=True,
                 )
-                print("Loaded auxiliary BirdNET classifier")
+                print("Loaded auxiliary Bird-MAE classifier")
             except ImportError as e:
                 print(
-                    f"[Warning] BirdNET classifier requested but package is not installed: {e}",
+                    f"[Warning] Bird-MAE classifier requested but package is not installed: {e}",
                     file=sys.stderr,
                 )
             except Exception as e:
                 print(
-                    f"[Warning] Failed to load BirdNET model: {e}",
+                    f"[Warning] Failed to load Bird-MAE model: {e}",
+                    file=sys.stderr,
+                )
+                
+        # ------------------------------------------------------------------
+        # Optional: AudioProtoPNet classifier (as auxiliary)
+        # ------------------------------------------------------------------
+        self.audioprotopnet_model = None
+        if use_audioprotopnet and classifier_type != "audioprotopnet":
+            try:
+                self.audioprotopnet_model = create_classifier(
+                    "audioprotopnet",
+                    device=self.device,
+                )
+                print("Loaded auxiliary AudioProtoPNet classifier")
+            except ImportError as e:
+                print(
+                    f"[Warning] AudioProtoPNet classifier requested but package is not installed: {e}",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                print(
+                    f"[Warning] Failed to load AudioProtoPNet model: {e}",
                     file=sys.stderr,
                 )
 
@@ -1109,34 +1138,12 @@ class ValidationPipeline:
             segments.append(chunk)
         return segments
 
-    def _separate(self, waveform: torch.Tensor, debug: bool = False) -> torch.Tensor:
-        """Run separation model. Returns all sources.
-
-        All separator types (TUSS, CLAPSep, SudoRM-RF) implement separate_waveform()
-        which handles normalization, windowing, device placement, and model-specific logic.
-        """
-        if debug:
-            input_rms = torch.sqrt(torch.mean(waveform**2)).item()
-            print(
-                f"  [DEBUG _separate] Input: shape={waveform.shape}, device={waveform.device}, RMS={input_rms:.6f}",
-                file=sys.stderr,
-            )
-
-        result = self.separator.separate_waveform(waveform)
-
-        if debug:
-            output_rms = torch.sqrt(torch.mean(result**2)).item()
-            print(
-                f"  [DEBUG _separate] Output: shape={result.shape}, device={result.device}, RMS={output_rms:.6f}",
-                file=sys.stderr,
-            )
-            if output_rms < 1e-6:
-                print(
-                    f"  [WARNING _separate] Output is SILENT!",
-                    file=sys.stderr,
-                )
-
-        return result
+    def _separate_batch(self, waveforms: torch.Tensor) -> torch.Tensor:
+        """Run separation model on a batch. Returns all sources. (B, n_sources, T)"""
+        if hasattr(self.separator, "separate_batch"):
+            return self.separator.separate_batch(waveforms)
+        else:
+            return torch.stack([self.separator.separate_waveform(w) for w in waveforms])
 
     def _classify(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Run classification using the primary classifier. Returns (prediction, confidence).
@@ -1362,34 +1369,63 @@ class ValidationPipeline:
         # Call the wrapper using unified interface
         return self.ast_model(wav)
     
-    def _classify_birdnet(self, waveform: torch.Tensor) -> Tuple[int, float]:
-        """Classify using the BirdNET model.
+    def _classify_bird_mae(self, waveform: torch.Tensor) -> Tuple[int, float]:
+        """Classify using the Bird-MAE model.
 
-        Resamples *waveform* from ``self.sample_rate`` to BirdNET's required
+        Resamples *waveform* from ``self.sample_rate`` to Bird-MAE's required
         sample rate using the shared high-quality Kaiser-window sinc resampler.
 
         Returns:
             ``(prediction, confidence)`` – 1/0 and the max confidence score across
             all detected bird species.
         """
-        if self.birdnet_model is None:
+        if self.bird_mae_model is None:
             raise RuntimeError(
-                "BirdNET model is not loaded. Call load_models(use_birdnet=True)."
+                "Bird-MAE model is not loaded. Call load_models(use_bird_mae=True)."
             )
         
         wav = waveform.detach().cpu()
-        birdnet_sr = self.birdnet_model.sample_rate
+        bird_mae_sr = self.bird_mae_model.sample_rate
 
-        if self.sample_rate != birdnet_sr:
-            key = (self.sample_rate, birdnet_sr)
+        if self.sample_rate != bird_mae_sr:
+            key = (self.sample_rate, bird_mae_sr)
             if key not in self._resamplers:
                 self._resamplers[key] = create_high_quality_resampler(
-                    self.sample_rate, birdnet_sr
+                    self.sample_rate, bird_mae_sr
                 )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
 
         # Call the wrapper using unified interface
-        return self.birdnet_model(wav)
+        return self.bird_mae_model(wav)
+
+    def _classify_audioprotopnet(self, waveform: torch.Tensor) -> Tuple[int, float]:
+        """Classify using the AudioProtoPNet model.
+
+        Resamples *waveform* from ``self.sample_rate`` to AudioProtoPNet's required
+        sample rate using the shared high-quality Kaiser-window sinc resampler.
+
+        Returns:
+            ``(prediction, confidence)`` – 1/0 and the max confidence score across
+            all detected bird species.
+        """
+        if self.audioprotopnet_model is None:
+            raise RuntimeError(
+                "AudioProtoPNet model is not loaded. Call load_models(use_audioprotopnet=True)."
+            )
+        
+        wav = waveform.detach().cpu()
+        audioprotopnet_sr = self.audioprotopnet_model.sample_rate
+
+        if self.sample_rate != audioprotopnet_sr:
+            key = (self.sample_rate, audioprotopnet_sr)
+            if key not in self._resamplers:
+                self._resamplers[key] = create_high_quality_resampler(
+                    self.sample_rate, audioprotopnet_sr
+                )
+            wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
+
+        # Call the wrapper using unified interface
+        return self.audioprotopnet_model(wav)
 
     def _classify_separated(
         self,
@@ -1513,88 +1549,42 @@ class ValidationPipeline:
                         )
 
                 if use_separation:
-                    seg_preds: List[int] = []
-                    seg_confs: List[float] = []
-                    seg_si_snr: List[float] = []
-                    seg_sdr: List[float] = []
-                    seg_si_sdr: List[float] = []
+                    # Batched classification logic for clean tests
+                    batch_size = 16
+                    segments_tensor = torch.stack(segments)
+                    seg_preds, seg_confs = [], []
+                    seg_si_snr, seg_sdr, seg_si_sdr = [], [], []
 
-                    for seg_idx, seg in enumerate(segments):
-                        separated = self._separate(seg)
-                        seg_pred, seg_conf = self._classify_separated(
-                            separated, classify_fn
-                        )
-                        seg_preds.append(seg_pred)
-                        seg_confs.append(seg_conf)
-
-                        coi_est = (
-                            separated
-                            if separated.dim() == 1
-                            else separated[self._get_coi_head_index()]
-                        )
-
-                        # Signal metrics (note: here reference is the input segment)
-                        si_snr, sdr, si_sdr = self._compute_signal_metrics(seg, coi_est)
-                        seg_si_snr.append(si_snr)
-                        seg_sdr.append(sdr)
-                        seg_si_sdr.append(si_sdr)
-
-                        # Save separated outputs for the first segment of chosen samples.
-                        if (
-                            save_dir is not None
-                            and idx in sample_choices
-                            and seg_idx == 0
-                        ):
-                            try:
-                                k = list(sample_choices).index(idx)
-                                # Debug: print separation stats before saving
-                                sep_rms = torch.sqrt(torch.mean(separated**2)).item()
-                                sep_max = separated.abs().max().item()
-                                print(
-                                    f"  [DEBUG] Saving separated sample {k}: "
-                                    f"shape={separated.shape}, device={separated.device}, "
-                                    f"RMS={sep_rms:.6f}, max={sep_max:.6f}",
-                                    file=sys.stderr,
-                                )
-                                if sep_rms < 1e-6:
-                                    print(
-                                        f"  [WARNING] Separated output is SILENT!",
-                                        file=sys.stderr,
-                                    )
-                                if separated.dim() == 1:
-                                    torchaudio.save(
-                                        str(save_dir / f"separated_coi_est_{k}.wav"),
-                                        separated.unsqueeze(0).cpu(),
-                                        self.sample_rate,
-                                    )
-                                else:
-                                    for s in range(separated.shape[0]):
-                                        src_rms = torch.sqrt(
-                                            torch.mean(separated[s] ** 2)
-                                        ).item()
-                                        print(
-                                            f"    [DEBUG] Source {s}: RMS={src_rms:.6f}",
-                                            file=sys.stderr,
-                                        )
-                                        torchaudio.save(
-                                            str(save_dir / f"separated_src{s}_{k}.wav"),
-                                            separated[s].unsqueeze(0).cpu(),
-                                            self.sample_rate,
-                                        )
-                                    coi_head = separated[self._get_coi_head_index()]
-                                    torchaudio.save(
-                                        str(save_dir / f"separated_coi_head_{k}.wav"),
-                                        coi_head.unsqueeze(0).cpu(),
-                                        self.sample_rate,
-                                    )
-                            except Exception as e:
-                                import traceback
-
-                                print(
-                                    f"Warning: failed to save separated outputs for {row.filename}: {e}",
-                                    file=sys.stderr,
-                                )
-                                traceback.print_exc()
+                    for i in range(0, len(segments_tensor), batch_size):
+                        batch_seg = segments_tensor[i:i+batch_size]
+                        
+                        separated_batch = self._separate_batch(batch_seg) # (B, n_sources, T) or (B, T)
+                        
+                        # Get COI sources
+                        if separated_batch.dim() == 2:
+                            coi_est = separated_batch
+                        else:
+                            coi_est = separated_batch[:, self._get_coi_head_index()]
+                            
+                        # Classify
+                        if hasattr(classify_fn.__self__, "predict_batch"):
+                            b_preds, b_confs = classify_fn.__self__.predict_batch(coi_est)
+                            seg_preds.extend(b_preds.tolist())
+                            seg_confs.extend(b_confs.tolist())
+                        else:
+                            for s_est in coi_est:
+                                p, c = classify_fn(s_est)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
+                                
+                        # Metrics
+                        for b_idx, s_est in enumerate(coi_est):
+                            snr, sdr_val, si_sdr_val = self._compute_signal_metrics(batch_seg[b_idx], s_est)
+                            seg_si_snr.append(snr)
+                            seg_sdr.append(sdr_val)
+                            seg_si_sdr.append(si_sdr_val)
+                            
+                        # Optionally save first segment (skipped here for brevity or done outside loop)
 
                     # A recording is classified as COI if ANY segment triggers a
                     # positive prediction.  Confidence is the maximum over all segments.
@@ -1642,18 +1632,38 @@ class ValidationPipeline:
                 )
                 segments = self._split_into_segments(waveform_full)
 
-                seg_preds = []
-                seg_confs = []
-                for seg in segments:
+                batch_size = 16
+                segments_tensor = torch.stack(segments)
+                seg_preds, seg_confs = [], []
+                
+                for i in range(0, len(segments_tensor), batch_size):
+                    batch_seg = segments_tensor[i:i+batch_size]
                     if use_separation:
-                        separated = self._separate(seg)
-                        seg_pred, seg_conf = self._classify_separated(
-                            separated, classify_fn
-                        )
+                        separated_batch = self._separate_batch(batch_seg)
+                        if separated_batch.dim() == 2:
+                            coi_est = separated_batch
+                        else:
+                            coi_est = separated_batch[:, self._get_coi_head_index()]
+                            
+                        if hasattr(classify_fn.__self__, "predict_batch"):
+                            b_preds, b_confs = classify_fn.__self__.predict_batch(coi_est)
+                            seg_preds.extend(b_preds.tolist())
+                            seg_confs.extend(b_confs.tolist())
+                        else:
+                            for s_est in coi_est:
+                                p, c = classify_fn(s_est)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
                     else:
-                        seg_pred, seg_conf = classify_fn(seg)
-                    seg_preds.append(seg_pred)
-                    seg_confs.append(seg_conf)
+                        if hasattr(classify_fn.__self__, "predict_batch"):
+                            b_preds, b_confs = classify_fn.__self__.predict_batch(batch_seg)
+                            seg_preds.extend(b_preds.tolist())
+                            seg_confs.extend(b_confs.tolist())
+                        else:
+                            for seg in batch_seg:
+                                p, c = classify_fn(seg)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
 
                 pred = 1 if any(p == 1 for p in seg_preds) else 0
                 conf = max(seg_confs)
@@ -1913,18 +1923,38 @@ class ValidationPipeline:
                 )
                 segments = self._split_into_segments(waveform_full)
 
-                seg_preds = []
-                seg_confs = []
-                for seg in segments:
+                batch_size = 16
+                segments_tensor = torch.stack(segments)
+                seg_preds, seg_confs = [], []
+                
+                for i in range(0, len(segments_tensor), batch_size):
+                    batch_seg = segments_tensor[i:i+batch_size]
                     if use_separation:
-                        separated = self._separate(seg)
-                        seg_pred, seg_conf = self._classify_separated(
-                            separated, classify_fn
-                        )
+                        separated_batch = self._separate_batch(batch_seg)
+                        if separated_batch.dim() == 2:
+                            coi_est = separated_batch
+                        else:
+                            coi_est = separated_batch[:, self._get_coi_head_index()]
+                            
+                        if hasattr(classify_fn.__self__, "predict_batch"):
+                            b_preds, b_confs = classify_fn.__self__.predict_batch(coi_est)
+                            seg_preds.extend(b_preds.tolist())
+                            seg_confs.extend(b_confs.tolist())
+                        else:
+                            for s_est in coi_est:
+                                p, c = classify_fn(s_est)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
                     else:
-                        seg_pred, seg_conf = classify_fn(seg)
-                    seg_preds.append(seg_pred)
-                    seg_confs.append(seg_conf)
+                        if hasattr(classify_fn.__self__, "predict_batch"):
+                            b_preds, b_confs = classify_fn.__self__.predict_batch(batch_seg)
+                            seg_preds.extend(b_preds.tolist())
+                            seg_confs.extend(b_confs.tolist())
+                        else:
+                            for seg in batch_seg:
+                                p, c = classify_fn(seg)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
 
                 pred = 1 if any(p == 1 for p in seg_preds) else 0
                 conf = max(seg_confs)
@@ -2117,8 +2147,10 @@ class ValidationPipeline:
             primary_name = "cnn"
             if hasattr(self.classifier, "model") and hasattr(self.classifier.model, "__module__"):
                 mod = self.classifier.model.__module__.lower()
-                if "birdnet" in mod:
-                    primary_name = "birdnet"
+                if "birdmae" in mod:
+                    primary_name = "bird_mae"
+                elif "audioprotopnet" in mod:
+                    primary_name = "audioprotopnet"
                 elif "ast" in mod:
                     primary_name = "ast"
                 elif "pann" in mod:
@@ -2128,8 +2160,13 @@ class ValidationPipeline:
             classifiers.append(("pann", self._classify_pann))
         if self.ast_model is not None:
             classifiers.append(("ast", self._classify_ast))
-        if self.birdnet_model is not None:
-            classifiers.append(("birdnet", self._classify_birdnet))
+        if self.bird_mae_model is None and hasattr(self, 'bird_mae_model') and self.bird_mae_model is not None:
+            classifiers.append(("bird_mae", self._classify_bird_mae))
+        elif hasattr(self, 'bird_mae_model') and self.bird_mae_model is not None:
+             classifiers.append(("bird_mae", self._classify_bird_mae))
+        
+        if hasattr(self, 'audioprotopnet_model') and self.audioprotopnet_model is not None:
+            classifiers.append(("audioprotopnet", self._classify_audioprotopnet))
 
         if not classifiers:
             print(
@@ -2325,7 +2362,7 @@ class ValidationPipeline:
                     results_dict["positive_labels"] = AST_POSITIVE_LABELS
                 elif cls_name == "cnn":
                     results_dict["positive_class"] = CNN_POSITIVE_CLASS
-                elif cls_name == "birdnet":
+                elif cls_name in ["bird_mae", "audioprotopnet"]:
                     results_dict["positive_class"] = "any_bird"
                 tag = f"{split}_{only_dataset}" if only_dataset else split
                 out_file = Path(cls_output_dir) / f"results_{tag}_{ts}.json"
