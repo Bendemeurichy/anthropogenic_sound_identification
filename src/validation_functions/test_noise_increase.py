@@ -114,6 +114,15 @@ def _safe_float(x, default=0.0) -> float:
         return float(default)
 
 
+def _coi_source_from_separated(
+    pipeline: ValidationPipeline, separated: torch.Tensor
+) -> torch.Tensor:
+    """Extract the COI source from a separator output tensor."""
+    if separated.dim() == 1:
+        return separated
+    return separated[pipeline._get_coi_head_index()]
+
+
 def _extract_coi_df(df: pd.DataFrame, coi_synonyms: set = None) -> pd.DataFrame:
     """Keep rows considered COI in a robust way.
     
@@ -223,25 +232,8 @@ def _compute_clean_baseline_energy(
         coi_segments = pipeline._split_into_segments(coi_full)
         
         for seg_idx, coi_seg in enumerate(coi_segments):
-            # RMS-based preprocessing: normalize to target RMS (0.1), then scale to fit
-            # [-1, 1] range with headroom. This matches _create_mixture_rms() preprocessing.
-            eps = 1e-8
-            target_rms = 0.1
-            
-            signal_rms = torch.sqrt(torch.mean(coi_seg ** 2)) + eps
-            # Normalize to target RMS (same as done in _create_mixture_rms)
-            coi_normalized = coi_seg * (target_rms / signal_rms)
-            
-            # Scale to fit [-1, 1] with 0.95 headroom (matches _create_mixture_rms line 1115-1117)
-            peak = torch.max(torch.abs(coi_normalized))
-            if peak > 0.95:
-                scale_factor = 0.95 / (peak + eps)
-                coi_preprocessed = coi_normalized * scale_factor
-            else:
-                coi_preprocessed = coi_normalized
-            
-            # Safety clipping (should rarely trigger, matches _create_mixture_rms line 1120)
-            coi_preprocessed = torch.clamp(coi_preprocessed, -1.0, 1.0)
+            # Use the same preprocessing as the RMS mixer in test_pipeline.py.
+            coi_preprocessed = pipeline._prepare_rms_mixing_input(coi_seg)
             
             # Compute energy on original clean signal
             orig_metrics = compute_energy_metrics(coi_preprocessed, pipeline.sample_rate)
@@ -249,8 +241,9 @@ def _compute_clean_baseline_energy(
             # Separate clean signal (even though there's no noise to remove)
             separated = pipeline._separate(coi_preprocessed)
             
-            # Compute energy on separated clean signal
-            sep_metrics = compute_energy_metrics(separated, pipeline.sample_rate)
+            # Compute energy on the COI output only.
+            coi_est = _coi_source_from_separated(pipeline, separated)
+            sep_metrics = compute_energy_metrics(coi_est, pipeline.sample_rate)
             
             # Calculate energy preservation
             rms_delta = sep_metrics["rms_db"] - orig_metrics["rms_db"]
@@ -395,8 +388,9 @@ def run_noise_increase_experiment(
                 # Separate noisy mixture
                 separated = pipeline._separate(mixture)
                 
-                # Compute energy on separated noisy signal
-                sep_noisy_metrics = compute_energy_metrics(separated, pipeline.sample_rate)
+                # Compute energy on the COI output only.
+                coi_est = _coi_source_from_separated(pipeline, separated)
+                sep_noisy_metrics = compute_energy_metrics(coi_est, pipeline.sample_rate)
                 
                 # Calculate energy degradation from clean baseline
                 noisy_rms_delta = sep_noisy_metrics["rms_db"] - baseline.original_clean_rms_db
@@ -535,19 +529,15 @@ def main() -> None:
             use_tuss=True,
             tuss_coi_prompt=TUSS_COI_PROMPT,
             tuss_bg_prompt=TUSS_BG_PROMPT,
-            use_pann=False,
-            use_ast=False,
         )
     else:
         print("Using SudoRM-RF model")
         pipeline.load_models(
             sep_checkpoint=SEP_CHECKPOINT,
             cls_weights=None,  # No classifier needed
-            classifier_type="birdnet", # Required to get correct COI synonyms (e.g. BIRD_SYNONYMS)
+            classifier_type="plane", # Default classifier to get correct COI synonyms
             use_clapsep=False,
             use_tuss=False,
-            use_pann=False,
-            use_ast=False,
         )
 
     print("Loading metadata CSV...")

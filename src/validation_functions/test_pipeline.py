@@ -81,37 +81,7 @@ from src.validation_functions.classification_models.Classifier import (
 from src.common.audio_utils import create_high_quality_resampler
 
 
-# ---------------------------------------------------------------------------
-# Optional auxiliary classifiers — probed lazily; actual imports happen inside
-# load_models / _classify_pann / _classify_ast to avoid hard top-level deps.
-# ---------------------------------------------------------------------------
-def _probe_pann() -> bool:
-    """Return True if the panns_inference package is importable."""
-    try:
-        import panns_inference  # noqa: F401
 
-        return True
-    except Exception as _err:
-        print(f"[Warning] PANN classifier unavailable: {_err}", file=sys.stderr)
-        return False
-
-
-def _probe_ast() -> bool:
-    """Return True if the transformers package (for AST) is importable."""
-    try:
-        import transformers  # noqa: F401
-
-        return True
-    except Exception as _err:
-        print(f"[Warning] AST classifier unavailable: {_err}", file=sys.stderr)
-        return False
-
-
-# Temporarily turn of pann and ast for testing
-# _pann_available: bool = _probe_pann()
-# _ast_available: bool = _probe_ast()
-_pann_available: bool = False
-_ast_available: bool = False
 
 
 try:
@@ -218,25 +188,7 @@ def _filter_contaminated_backgrounds(
     return df_bg[~contaminated_mask].reset_index(drop=True), n_contaminated
 
 
-# AudioSet label names that PANN should treat as the positive class.
-# Unrecognised names are silently ignored at inference time.
-PANN_POSITIVE_LABELS: List[str] = [
-    "Fixed-wing aircraft, airplane",
-    "Aircraft",
-    "Aircraft engine",
-    "Jet engine",
-    "Propeller, airscrew",
-]
 
-# AudioSet label names that AST should treat as the positive class.
-# Unrecognised names are silently ignored at inference time.
-AST_POSITIVE_LABELS: List[str] = [
-    "Fixed-wing aircraft, airplane",
-    "Aircraft",
-    "Aircraft engine",
-    "Jet engine",
-    "Propeller, airscrew",
-]
 
 
 # ============================================================================
@@ -654,7 +606,6 @@ class ValidationPipeline:
         self.classifier = None
         self._resamplers = {}
 
-        # Optional auxiliary AudioSet classifiers
         self.pann_model = None
         self.ast_extractor = None
         self.ast_model = None
@@ -679,8 +630,7 @@ class ValidationPipeline:
         tuss_bg_prompt: str = "background",
         clapsep_text_pos: str = "train passing",
         clapsep_text_neg: str = "",
-        use_pann: bool = True,
-        use_ast: bool = True,
+        use_ast_finetuned: bool = True,
         use_bird_mae: bool = False,
         use_audioprotopnet: bool = False,
     ):
@@ -691,9 +641,8 @@ class ValidationPipeline:
             cls_weights: Path to the CNN classifier weights (required for classifier_type="plane").
             classifier_type: Type of primary classifier to use. One of:
                 - "plane": PlaneClassifier (custom CNN for airplane detection)
-                - "pann": PANN AudioTagging (AudioSet-based airplane detection)
                 - "pann_finetuned": Fine-tuned PANN CNN14 (trained specifically for plane detection)
-                - "ast": AST (Audio Spectrogram Transformer for AudioSet)
+                - "ast_finetuned": Fine-tuned AST (trained specifically for plane detection)
                 - "bird_mae": Bird-MAE-Base (bird species detection)
                 - "audioprotopnet": AudioProtoPNet-20-BirdSet-XCL (bird species detection)
             use_clapsep: If True, load the CLAPSep separator instead of SudoRM-RF.
@@ -702,10 +651,8 @@ class ValidationPipeline:
             tuss_bg_prompt: Prompt name for TUSS background (default: "background").
             clapsep_text_pos: Positive text prompt for CLAPSep.
             clapsep_text_neg: Negative text prompt for CLAPSep.
-            use_pann: If True (default), load the PANN AudioTagging model as an
-                additional classifier.  Requires the ``panns_inference`` package.
-            use_ast: If True (default), load the AST model from HuggingFace as an
-                additional classifier.  Requires the ``transformers`` package.
+            use_ast_finetuned: If True (default), load the fine-tuned AST model as an
+                additional classifier.
             use_bird_mae: If True, load the Bird-MAE-Base model as an additional classifier.
             use_audioprotopnet: If True, load the AudioProtoPNet-20-BirdSet-XCL model as an additional classifier.
         """
@@ -815,13 +762,17 @@ class ValidationPipeline:
                 config=config,
                 device=self.device,
             )
-        elif classifier_type == "pann":
-            self.classifier = create_classifier(
-                "pann",
-                device=self.device,
-                positive_labels=PANN_POSITIVE_LABELS,
+        elif classifier_type == "ast_finetuned":
+            cls_path = cls_weights or (
+                PROJECT_ROOT 
+                / "src/validation_functions/classification_models/plane_classifier_ast/checkpoints/final_model.pth"
             )
-            # Update classifier_sample_rate to match PANN's requirement
+            print(f"  from {cls_path}")
+            self.classifier = create_classifier(
+                "ast_finetuned",
+                checkpoint_path=str(cls_path),
+                device=self.device,
+            )
             self.classifier_sample_rate = self.classifier.sample_rate
         elif classifier_type == "pann_finetuned":
             cls_path = cls_weights or (
@@ -835,14 +786,6 @@ class ValidationPipeline:
                 device=self.device,
             )
             # Update classifier_sample_rate to match PANN's requirement (32kHz)
-            self.classifier_sample_rate = self.classifier.sample_rate
-        elif classifier_type == "ast":
-            self.classifier = create_classifier(
-                "ast",
-                device=self.device,
-                positive_labels=AST_POSITIVE_LABELS,
-            )
-            # Update classifier_sample_rate to match AST's requirement
             self.classifier_sample_rate = self.classifier.sample_rate
         elif classifier_type == "bird_mae":
             self.classifier = create_classifier(
@@ -861,7 +804,7 @@ class ValidationPipeline:
         else:
             raise ValueError(
                 f"Unknown classifier_type: {classifier_type}. "
-                f"Must be one of: 'plane', 'pann', 'pann_finetuned', 'ast', 'bird_mae', 'audioprotopnet'"
+                f"Must be one of: 'plane', 'pann_finetuned', 'ast_finetuned', 'bird_mae', 'audioprotopnet'"
             )
         
         self.classifier_segment_samples = int(
@@ -881,56 +824,24 @@ class ValidationPipeline:
             print(f"  Using custom COI synonyms: {len(self.coi_synonyms)} terms")
 
         # ------------------------------------------------------------------
-        # Optional: PANN AudioTagging classifier (as auxiliary)
+        # Optional: AST (Audio Spectrogram Transformer) fine-tuned classifier (as auxiliary)
         # ------------------------------------------------------------------
-        if use_pann and classifier_type not in ("pann", "pann_finetuned"):
-            if _pann_available:
-                try:
-                    self.pann_model = create_classifier(
-                        "pann",
-                        device=self.device,
-                        positive_labels=PANN_POSITIVE_LABELS,
-                    )
-                    print("Loaded auxiliary PANN classifier")
-                except Exception as e:
-                    print(
-                        f"[Warning] Failed to load PANN model: {e}",
-                        file=sys.stderr,
-                    )
-                    self.pann_model = None
-            else:
+        self.ast_finetuned_model = None
+        if use_ast_finetuned and classifier_type != "ast_finetuned":
+            try:
+                cls_path = PROJECT_ROOT / "src/validation_functions/classification_models/plane_classifier_ast/checkpoints/final_model.pth"
+                self.ast_finetuned_model = create_classifier(
+                    "ast_finetuned",
+                    checkpoint_path=str(cls_path),
+                    device=self.device,
+                )
+                print("Loaded auxiliary AST fine-tuned classifier")
+            except Exception as e:
                 print(
-                    "[Warning] PANN classifier requested but panns_inference is not installed – skipping.",
+                    f"[Warning] Failed to load AST fine-tuned model: {e}",
                     file=sys.stderr,
                 )
-
-        # ------------------------------------------------------------------
-        # Optional: AST (Audio Spectrogram Transformer) classifier (as auxiliary)
-        # ------------------------------------------------------------------
-        if use_ast and classifier_type != "ast":
-            if _ast_available:
-                try:
-                    self.ast_model = create_classifier(
-                        "ast",
-                        device=self.device,
-                        positive_labels=AST_POSITIVE_LABELS,
-                    )
-                    # For backward compatibility, also store the extractor reference
-                    # (though it's now internal to the wrapper)
-                    self.ast_extractor = None  # Not needed with new interface
-                    print("Loaded auxiliary AST classifier")
-                except Exception as e:
-                    print(
-                        f"[Warning] Failed to load AST model: {e}",
-                        file=sys.stderr,
-                    )
-                    self.ast_model = None
-                    self.ast_extractor = None
-            else:
-                print(
-                    "[Warning] AST classifier requested but transformers is not installed – skipping.",
-                    file=sys.stderr,
-                )
+                self.ast_finetuned_model = None
 
         # ------------------------------------------------------------------
         # Optional: Bird-MAE classifier (as auxiliary)
@@ -1138,6 +1049,10 @@ class ValidationPipeline:
             segments.append(chunk)
         return segments
 
+    def _separate(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Run separation model on a single waveform. Returns all sources."""
+        return self.separator.separate_waveform(waveform)
+
     def _separate_batch(self, waveforms: torch.Tensor) -> torch.Tensor:
         """Run separation model on a batch. Returns all sources. (B, n_sources, T)"""
         if hasattr(self.separator, "separate_batch"):
@@ -1218,6 +1133,19 @@ class ValidationPipeline:
 
         return source + noise * scale, actual_snr_db
 
+    def _prepare_rms_mixing_input(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Normalize a waveform for RMS-based mixing.
+
+        This matches the source/noise preprocessing used by
+        ``_create_mixture_rms`` so callers can generate consistent clean
+        references and saved examples.
+        """
+        eps = 1e-8
+        target_rms = 0.1
+
+        signal_rms = torch.sqrt(torch.mean(waveform**2)) + eps
+        return waveform * (target_rms / signal_rms)
+
     def _create_mixture_rms(
         self, source: torch.Tensor, noise: torch.Tensor, snr_db: float
     ) -> Tuple[torch.Tensor, float]:
@@ -1246,13 +1174,8 @@ class ValidationPipeline:
         eps = 1e-8
 
         # Step 1: Normalize both to same RMS level (0.1 gives headroom)
-        target_rms = 0.1
-
-        source_rms = torch.sqrt(torch.mean(source**2)) + eps
-        noise_rms = torch.sqrt(torch.mean(noise**2)) + eps
-
-        source_normalized = source * (target_rms / source_rms)
-        noise_normalized = noise * (target_rms / noise_rms)
+        source_normalized = self._prepare_rms_mixing_input(source)
+        noise_normalized = self._prepare_rms_mixing_input(noise)
 
         # Step 2: Scale noise to achieve target SNR
         # SNR (dB) = 10 * log10(signal_power / noise_power)
@@ -1309,54 +1232,15 @@ class ValidationPipeline:
             return CLAPSEP_COI_HEAD
         return SUDORMRF_COI_HEAD
 
-    def _classify_pann(self, waveform: torch.Tensor) -> Tuple[int, float]:
-        """Classify using the PANN AudioTagging model.
-
-        Resamples *waveform* from ``self.sample_rate`` to the PANN's required
-        sample rate internally.
-
-        Returns:
-            ``(prediction, confidence)`` – 1/0 and the max sigmoid score across
-            all positive labels.
-        """
-        if self.pann_model is None:
+    def _classify_ast_finetuned(self, waveform: torch.Tensor) -> Tuple[int, float]:
+        """Classify using the fine-tuned AST model."""
+        if self.ast_finetuned_model is None:
             raise RuntimeError(
-                "PANN model is not loaded. Call load_models(use_pann=True)."
+                "Fine-tuned AST model is not loaded. Call load_models(use_ast_finetuned=True)."
             )
         
-        # Resample if needed
         wav = waveform.detach().cpu()
-        pann_sr = self.pann_model.sample_rate
-        
-        if self.sample_rate != pann_sr:
-            key = (self.sample_rate, pann_sr)
-            if key not in self._resamplers:
-                self._resamplers[key] = create_high_quality_resampler(
-                    self.sample_rate, pann_sr
-                )
-            wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
-        
-        # Call the wrapper using unified interface
-        return self.pann_model(wav)
-
-    def _classify_ast(self, waveform: torch.Tensor) -> Tuple[int, float]:
-        """Classify using the AST (Audio Spectrogram Transformer) model.
-
-        Resamples *waveform* from ``self.sample_rate`` to the AST's required
-        sample rate internally.
-
-        Returns:
-            ``(prediction, confidence)`` – 1/0 and the max sigmoid score across
-            all positive labels.
-        """
-        if self.ast_model is None:
-            raise RuntimeError(
-                "AST model is not loaded. Call load_models(use_ast=True)."
-            )
-        
-        # Resample if needed
-        wav = waveform.detach().cpu()
-        ast_sr = self.ast_model.sample_rate
+        ast_sr = self.ast_finetuned_model.sample_rate
         
         if self.sample_rate != ast_sr:
             key = (self.sample_rate, ast_sr)
@@ -1366,8 +1250,7 @@ class ValidationPipeline:
                 )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
         
-        # Call the wrapper using unified interface
-        return self.ast_model(wav)
+        return self.ast_finetuned_model(wav)
     
     def _classify_bird_mae(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Classify using the Bird-MAE model.
@@ -1567,15 +1450,10 @@ class ValidationPipeline:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
                             
                         # Classify
-                        if hasattr(classify_fn.__self__, "predict_batch"):
-                            b_preds, b_confs = classify_fn.__self__.predict_batch(coi_est)
-                            seg_preds.extend(b_preds.tolist())
-                            seg_confs.extend(b_confs.tolist())
-                        else:
-                            for s_est in coi_est:
-                                p, c = classify_fn(s_est)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
+                        for s_est in coi_est:
+                            p, c = classify_fn(s_est)
+                            seg_preds.append(p)
+                            seg_confs.append(c)
                                 
                         # Metrics
                         for b_idx, s_est in enumerate(coi_est):
@@ -1645,25 +1523,15 @@ class ValidationPipeline:
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
                             
-                        if hasattr(classify_fn.__self__, "predict_batch"):
-                            b_preds, b_confs = classify_fn.__self__.predict_batch(coi_est)
-                            seg_preds.extend(b_preds.tolist())
-                            seg_confs.extend(b_confs.tolist())
-                        else:
-                            for s_est in coi_est:
-                                p, c = classify_fn(s_est)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
+                        for s_est in coi_est:
+                            p, c = classify_fn(s_est)
+                            seg_preds.append(p)
+                            seg_confs.append(c)
                     else:
-                        if hasattr(classify_fn.__self__, "predict_batch"):
-                            b_preds, b_confs = classify_fn.__self__.predict_batch(batch_seg)
-                            seg_preds.extend(b_preds.tolist())
-                            seg_confs.extend(b_confs.tolist())
-                        else:
-                            for seg in batch_seg:
-                                p, c = classify_fn(seg)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
+                        for seg in batch_seg:
+                            p, c = classify_fn(seg)
+                            seg_preds.append(p)
+                            seg_confs.append(c)
 
                 pred = 1 if any(p == 1 for p in seg_preds) else 0
                 conf = max(seg_confs)
@@ -1783,18 +1651,16 @@ class ValidationPipeline:
                 for seg_idx, coi_seg in enumerate(coi_segments):
                     # Cycle through BG segments if fewer than COI segments.
                     bg_seg = bg_segments[seg_idx % len(bg_segments)]
-                    coi_n = self._normalize(coi_seg)
-                    bg_n = self._normalize(bg_seg)
+                    coi_n = self._prepare_rms_mixing_input(coi_seg)
+                    bg_n = self._prepare_rms_mixing_input(bg_seg)
                     snr = np.random.uniform(*snr_range)
-                    mixture, actual_snr = self._create_mixture(coi_n, bg_n, snr)
+                    mixture, actual_snr = self._create_mixture_rms(coi_seg, bg_seg, snr)
                     seg_snr_vals.append(actual_snr)
 
                     # Save first segment of chosen examples.
                     if save_dir is not None and idx in sample_choices and seg_idx == 0:
                         try:
                             k = list(sample_choices).index(idx)
-                            # coi_n and bg_n are already normalized (lines 1495-1496)
-                            # so we don't need to normalize them again.
                             torchaudio.save(
                                 str(save_dir / f"mixture_coi_clean_{k}.wav"),
                                 coi_n.unsqueeze(0).cpu(),
@@ -1805,12 +1671,9 @@ class ValidationPipeline:
                                 bg_n.unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
-                            # Peak-normalize the mixture independently so its
-                            # loudest sample sits at ±1 (the mix may sum above
-                            # the individual peaks).
                             torchaudio.save(
                                 str(save_dir / f"mixture_created_{k}.wav"),
-                                self._normalize(mixture).unsqueeze(0).cpu(),
+                                mixture.unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
                         except Exception:
@@ -1936,25 +1799,15 @@ class ValidationPipeline:
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
                             
-                        if hasattr(classify_fn.__self__, "predict_batch"):
-                            b_preds, b_confs = classify_fn.__self__.predict_batch(coi_est)
-                            seg_preds.extend(b_preds.tolist())
-                            seg_confs.extend(b_confs.tolist())
-                        else:
-                            for s_est in coi_est:
-                                p, c = classify_fn(s_est)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
+                        for s_est in coi_est:
+                            p, c = classify_fn(s_est)
+                            seg_preds.append(p)
+                            seg_confs.append(c)
                     else:
-                        if hasattr(classify_fn.__self__, "predict_batch"):
-                            b_preds, b_confs = classify_fn.__self__.predict_batch(batch_seg)
-                            seg_preds.extend(b_preds.tolist())
-                            seg_confs.extend(b_confs.tolist())
-                        else:
-                            for seg in batch_seg:
-                                p, c = classify_fn(seg)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
+                        for seg in batch_seg:
+                            p, c = classify_fn(seg)
+                            seg_preds.append(p)
+                            seg_confs.append(c)
 
                 pred = 1 if any(p == 1 for p in seg_preds) else 0
                 conf = max(seg_confs)
@@ -2152,20 +2005,16 @@ class ValidationPipeline:
                 elif "audioprotopnet" in mod:
                     primary_name = "audioprotopnet"
                 elif "ast" in mod:
-                    primary_name = "ast"
+                    primary_name = "ast_finetuned"
                 elif "pann" in mod:
-                    primary_name = "pann"
+                    primary_name = "pann_finetuned"
             classifiers.append((primary_name, self._classify))
-        if self.pann_model is not None:
-            classifiers.append(("pann", self._classify_pann))
-        if self.ast_model is not None:
-            classifiers.append(("ast", self._classify_ast))
-        if self.bird_mae_model is None and hasattr(self, 'bird_mae_model') and self.bird_mae_model is not None:
+        if self.ast_finetuned_model is not None:
+            classifiers.append(("ast_finetuned", self._classify_ast_finetuned))
+        if getattr(self, "bird_mae_model", None) is not None:
             classifiers.append(("bird_mae", self._classify_bird_mae))
-        elif hasattr(self, 'bird_mae_model') and self.bird_mae_model is not None:
-             classifiers.append(("bird_mae", self._classify_bird_mae))
         
-        if hasattr(self, 'audioprotopnet_model') and self.audioprotopnet_model is not None:
+        if getattr(self, "audioprotopnet_model", None) is not None:
             classifiers.append(("audioprotopnet", self._classify_audioprotopnet))
 
         if not classifiers:
@@ -2356,11 +2205,7 @@ class ValidationPipeline:
                     "classifier": str(self.cls_checkpoint_path),
                 }
                 # Include positive-label config for AudioSet classifiers.
-                if cls_name == "pann":
-                    results_dict["positive_labels"] = PANN_POSITIVE_LABELS
-                elif cls_name == "ast":
-                    results_dict["positive_labels"] = AST_POSITIVE_LABELS
-                elif cls_name == "cnn":
+                if cls_name == "ast_finetuned":
                     results_dict["positive_class"] = CNN_POSITIVE_CLASS
                 elif cls_name in ["bird_mae", "audioprotopnet"]:
                     results_dict["positive_class"] = "any_bird"
@@ -2527,7 +2372,7 @@ def main():
     pipeline.load_models(
         sep_checkpoint=SEP_CHECKPOINT,
         cls_weights=None, # Not needed for birdnet
-        classifier_type="birdnet",
+        classifier_type="bird_mae",
         use_clapsep=False,
         use_tuss=False,
     )

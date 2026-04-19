@@ -496,35 +496,6 @@ class TUSSInference:
         sources = output.cpu() * std.unsqueeze(2)  # (B, n_sources, T)
         
         return sources
-        """Separate a waveform tensor directly.
-
-        Args:
-            waveform: Input waveform tensor (T,) or (1, T)
-
-        Returns:
-            sources: (n_sources, T) tensor where:
-                     sources[COI_HEAD_INDEX, :] = COI audio
-                     sources[BACKGROUND_HEAD_INDEX, :] = Background audio
-        """
-        if waveform.dim() == 2:
-            if waveform.shape[0] > 1:
-                waveform = waveform.mean(dim=0)
-            else:
-                waveform = waveform.squeeze(0)
-
-        original_length = waveform.shape[0]
-
-        # Process in overlapping chunks for long audio
-        if waveform.shape[0] > self.segment_samples:
-            return self._separate_long(waveform, original_length)
-
-        # Pad if needed
-        if waveform.shape[0] < self.segment_samples:
-            waveform = torch.nn.functional.pad(
-                waveform, (0, self.segment_samples - waveform.shape[0])
-            )
-
-        return self._separate_segment(waveform)[:, :original_length]
 
     def _separate_segment(self, segment: torch.Tensor) -> torch.Tensor:
         """Separate a single segment.

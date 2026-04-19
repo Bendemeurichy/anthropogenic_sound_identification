@@ -131,15 +131,16 @@ def _extract_label_atoms(label: Any) -> List[str]:
             return []
 
         candidates = [text]
-        
+
         # Strip common numpy array string representations with dtype suffix
         # e.g., "[array(['...'], dtype=object)]" -> "[array(['...'])]"
         if ", dtype=" in text:
             # Remove everything from ", dtype=" to the end of the dtype declaration
             import re as _re
-            text_cleaned = _re.sub(r',\s*dtype\s*=\s*[^\])]+([\])])', r'\1', text)
+
+            text_cleaned = _re.sub(r",\s*dtype\s*=\s*[^\])]+([\])])", r"\1", text)
             candidates.append(text_cleaned)
-        
+
         if text.startswith("array(") and text.endswith(")"):
             candidates.append(text[6:-1])
         if text.startswith("np.array(") and text.endswith(")"):
@@ -159,10 +160,11 @@ def _extract_label_atoms(label: Any) -> List[str]:
 
         # Try to extract JSON from within the string if it contains a JSON array
         # This handles cases like: '[array(['["tag1", "tag2"]'], dtype=object)]'
-        json_match = re.search(r'\[\"[^\]]+\"\]', text)
+        json_match = re.search(r"\[\"[^\]]+\"\]", text)
         if json_match:
             try:
                 import json as _json
+
                 json_str = json_match.group(0)
                 parsed = _json.loads(json_str)
                 if isinstance(parsed, list):
@@ -285,24 +287,24 @@ def label_contains_coi(
 
 def get_coi_synonyms_for_classifier(classifier_type: str) -> Set[str]:
     """Get the appropriate COI synonym set for a given classifier type.
-    
+
     This function maps classifier types to their corresponding COI synonym sets,
     enabling the validation pipeline to use the correct labels for different tasks.
-    
+
     Args:
         classifier_type: Type of classifier being used. One of:
             - "plane": Custom plane classifier → AIRPLANE_SYNONYMS
-            - "pann": PANN AudioSet model → AIRPLANE_SYNONYMS
             - "pann_finetuned": Fine-tuned PANN → AIRPLANE_SYNONYMS
-            - "ast": Audio Spectrogram Transformer → AIRPLANE_SYNONYMS
-            - "birdnet": BirdNET classifier → BIRD_SYNONYMS
-            
+            - "ast_finetuned": Fine-tuned AST → AIRPLANE_SYNONYMS
+            - "bird_mae": Bird-MAE-Base → BIRD_SYNONYMS
+            - "audioprotopnet": AudioProtoPNet-20-BirdSet-XCL → BIRD_SYNONYMS
+
     Returns:
         Set of COI synonyms appropriate for the classifier type
-        
+
     Raises:
         ValueError: If classifier_type is not recognized
-        
+
     Examples:
         >>> get_coi_synonyms_for_classifier("plane")
         AIRPLANE_SYNONYMS
@@ -312,18 +314,18 @@ def get_coi_synonyms_for_classifier(classifier_type: str) -> Set[str]:
     # Map classifier types to their COI synonym sets
     classifier_to_synonyms = {
         "plane": AIRPLANE_SYNONYMS,
-        "pann": AIRPLANE_SYNONYMS,
+        "ast_finetuned": AIRPLANE_SYNONYMS,
         "pann_finetuned": AIRPLANE_SYNONYMS,
-        "ast": AIRPLANE_SYNONYMS,
-        "birdnet": BIRD_SYNONYMS,
+        "audioprotopnet": BIRD_SYNONYMS,
+        "bird_mae": BIRD_SYNONYMS,
     }
-    
+
     if classifier_type not in classifier_to_synonyms:
         raise ValueError(
             f"Unknown classifier_type: {classifier_type}. "
             f"Must be one of: {list(classifier_to_synonyms.keys())}"
         )
-    
+
     return classifier_to_synonyms[classifier_type]
 
 
@@ -359,7 +361,7 @@ def expand_target_classes_with_synonyms(
     """
     if coi_synonyms is None:
         coi_synonyms = COI_SYNONYMS
-    
+
     expanded = set()
     for tc in target_classes:
         if is_coi_label(tc, coi_synonyms):
@@ -379,7 +381,7 @@ def validate_synonym_set(synonym_set: Set[str], set_name: str = "COI_SYNONYMS"):
 
     Runs basic sanity checks on a synonym set.
     Raises AssertionError if validation fails.
-    
+
     Args:
         synonym_set: Set of synonyms to validate
         set_name: Name of the set for error messages
@@ -411,27 +413,27 @@ def validate_coi_config():
     validate_synonym_set(AIRPLANE_SYNONYMS, "AIRPLANE_SYNONYMS")
     validate_synonym_set(BIRD_SYNONYMS, "BIRD_SYNONYMS")
     validate_synonym_set(COI_SYNONYMS, "COI_SYNONYMS")
-    
+
     # Check that airplane and bird sets are disjoint (don't overlap)
     overlap = AIRPLANE_SYNONYMS & BIRD_SYNONYMS
     assert len(overlap) == 0, (
         f"AIRPLANE_SYNONYMS and BIRD_SYNONYMS should be disjoint, "
         f"but found overlapping terms: {overlap}"
     )
-    
+
     # Check that is_coi_label correctly rejects labels from other sets
     # When using airplane synonyms, bird labels should be rejected
     for bird_label in ["bird", "songbird", "avian"]:
         assert not is_coi_label(
             bird_label, AIRPLANE_SYNONYMS
         ), f"AIRPLANE_SYNONYMS incorrectly detected bird label '{bird_label}' as COI"
-    
+
     # When using bird synonyms, airplane labels should be rejected
     for plane_label in ["plane", "airplane", "aircraft"]:
         assert not is_coi_label(
             plane_label, BIRD_SYNONYMS
         ), f"BIRD_SYNONYMS incorrectly detected airplane label '{plane_label}' as COI"
-    
+
     # Check that is_coi_label rejects non-COI labels for both sets
     non_coi_labels = ["train", "car", "background", "wind", "rain", "traffic"]
     for label in non_coi_labels:

@@ -7,9 +7,8 @@ they return a binary prediction (0/1) and a confidence score (0.0-1.0).
 
 Supported classifiers:
 - "plane": PlaneClassifier (TensorFlow/YAMNet-based CNN for airplane detection)
-- "pann": PANN AudioTagging (PyTorch-based AudioSet classifier)
 - "pann_finetuned": Fine-tuned PANN CNN14 (PyTorch-based, trained specifically for plane detection)
-- "ast": Audio Spectrogram Transformer (HuggingFace transformer for AudioSet)
+- "ast_finetuned": Fine-tuned AST (HuggingFace transformer for AudioSet, trained specifically for plane detection)
 - "bird_mae": Bird-MAE-Base (HuggingFace masked autoencoder for BirdSet)
 - "audioprotopnet": AudioProtoPNet-20-BirdSet-XCL (HuggingFace prototypical network for BirdSet)
 
@@ -102,9 +101,8 @@ def create_classifier(
     Args:
         classifier_type: Type of classifier to create. One of:
             - "plane": Airplane detection using custom CNN (TensorFlow/YAMNet)
-            - "pann": PANN AudioTagging for AudioSet classification
             - "pann_finetuned": Fine-tuned PANN CNN14 for airplane detection
-            - "ast": Audio Spectrogram Transformer for AudioSet
+            - "ast_finetuned": Fine-tuned AST for airplane detection
             - "bird_mae": Bird-MAE-Base model for bird detection
             - "audioprotopnet": AudioProtoPNet-20-BirdSet-XCL model for bird detection
         device: Device for model inference. Examples: "cpu", "cuda", "cuda:0", "cuda:1"
@@ -119,18 +117,13 @@ def create_classifier(
             config (TrainingConfig, optional): Configuration object with sample_rate,
                                               audio_duration, etc.
         
-        PANN classifier:
-            positive_labels (List[str], optional): AudioSet labels for positive class.
-                Default: ["Fixed-wing aircraft, airplane", "Aircraft", "Jet aircraft",
-                         "Propeller, airscrew", "Turboprop, small aircraft"]
-        
         PANN fine-tuned classifier:
             checkpoint_path (str, required): Path to fine-tuned model checkpoint (.pth file)
             config (TrainingConfig, optional): Training configuration
         
-        AST classifier:
-            positive_labels (List[str], optional): AudioSet labels for positive class.
-                Default: Same as PANN
+        AST fine-tuned classifier:
+            checkpoint_path (str, required): Path to fine-tuned model checkpoint (.pth file)
+            config (TrainingConfig, optional): Training configuration
         
         Bird-MAE / AudioProtoPNet classifier:
             model_id (str, optional): HuggingFace model ID. Defaults to "DBD-research-group/Bird-MAE-Base" or "DBD-research-group/AudioProtoPNet-20-BirdSet-XCL".
@@ -151,11 +144,11 @@ def create_classifier(
         ...     device="cuda:0"
         ... )
         >>> 
-        >>> # Create PANN with custom labels
+        >>> # Create fine-tuned PANN
         >>> pann_clf = create_classifier(
-        ...     "pann",
+        ...     "pann_finetuned",
+        ...     checkpoint_path="models/pann.pth",
         ...     device="cuda:1",
-        ...     positive_labels=["Aircraft", "Jet aircraft"],
         ...     threshold=0.7
         ... )
         >>> 
@@ -189,15 +182,6 @@ def create_classifier(
             **kwargs
         )
     
-    elif classifier_type == "pann":
-        from .pann_wrapper import PANNClassifierWrapper
-        
-        return PANNClassifierWrapper(
-            device=device,
-            threshold=threshold,
-            **kwargs
-        )
-    
     elif classifier_type == "pann_finetuned":
         from .pann_finetuned_wrapper import PANNFinetunedWrapper
         
@@ -214,10 +198,17 @@ def create_classifier(
             **kwargs
         )
     
-    elif classifier_type == "ast":
-        from .ast_wrapper import ASTClassifierWrapper
+    elif classifier_type == "ast_finetuned":
+        from .ast_finetuned_wrapper import ASTFinetunedWrapper
         
-        return ASTClassifierWrapper(
+        checkpoint_path = kwargs.pop("checkpoint_path", None)
+        if checkpoint_path is None:
+            raise ValueError("'checkpoint_path' is required for ast_finetuned classifier")
+        
+        config = kwargs.pop("config", None)
+        return ASTFinetunedWrapper(
+            checkpoint_path=checkpoint_path,
+            config=config,
             device=device,
             threshold=threshold,
             **kwargs
@@ -226,7 +217,7 @@ def create_classifier(
     elif classifier_type == "bird_mae":
         from .birdmae_wrapper import BirdMaeClassifierWrapper
         
-        model_id = kwargs.pop("model_id", "DBD-research-group/Bird-MAE-Base")
+        model_id = kwargs.pop("model_id", "DBD-research-group/BirdMAE-XCL")
         return BirdMaeClassifierWrapper(
             model_id=model_id,
             device=device,
@@ -248,5 +239,5 @@ def create_classifier(
     else:
         raise ValueError(
             f"Unknown classifier_type: {classifier_type!r}. "
-            f"Must be one of: 'plane', 'pann', 'pann_finetuned', 'ast', 'bird_mae', 'audioprotopnet'"
+            f"Must be one of: 'plane', 'pann_finetuned', 'ast_finetuned', 'bird_mae', 'audioprotopnet'"
         )
