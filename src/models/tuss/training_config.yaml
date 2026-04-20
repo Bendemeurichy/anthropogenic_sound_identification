@@ -49,6 +49,8 @@ data:
   target_classes:
     # Class 0 → model.coi_prompts[0] = "airplane"
     - ["airplane", "Airplane", "plane"]
+    # Class 1 → model.coi_prompts[1] = "bird"
+    - ["bird", "Bird", "birds", "Birdsong"]
 
   # Probability that a training sample contains *only* background (no COI)
   background_only_prob: 0.3
@@ -82,6 +84,7 @@ model:
   # One prompt name per COI class.  Must match the length of target_classes.
   coi_prompts:
     - "airplane"
+    - "birds"
 
   # Prompt used for the background / residual stream
   bg_prompt: "background"
@@ -144,7 +147,7 @@ training:
   #   "cuda:0"  → first GPU  (explicit index)
   #   "cuda:1"  → second GPU
   #   "cpu"     → force CPU (slow, for debugging only)
-  device: "cuda:1"
+  device: "cuda"
   seed: 42
 
   checkpoint_dir: "checkpoints"
