@@ -60,6 +60,9 @@ data:
   # augmentations / offsets), effectively multiplying dataset size
   augment_multiplier: 1
 
+  # Probability of mixing a second target class into the mixture during training
+  multi_coi_prob: 0.3
+
   # WebDataset configuration for HPC compressed data loading
   # Set use_webdataset: true to load from pre-compressed tar shards
   # instead of individual audio files (much faster on HPC scratch storage)

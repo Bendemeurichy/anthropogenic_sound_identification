@@ -289,6 +289,7 @@ class DataConfig:
     background_only_prob: float = 0.15
     background_mix_n: int = 2
     augment_multiplier: int = 2
+    multi_coi_prob: float = 0.3
     # WebDataset configuration
     use_webdataset: bool = False
     webdataset_path: str = ""
@@ -544,6 +545,7 @@ class AudioDataset(Dataset):
         background_only_prob: float = 0.0,
         background_mix_n: int = 2,
         augment_multiplier: int = 1,
+        multi_coi_prob: float = 0.3,
     ):
         self.split = split
         self.sample_rate = sample_rate
@@ -557,6 +559,7 @@ class AudioDataset(Dataset):
         self.segment_stride_samples = int(
             (segment_stride or segment_length) * sample_rate
         )
+        self.multi_coi_prob = multi_coi_prob if split == "train" else 0.0
 
         self._rng = np.random.default_rng(42)
         self._resampler_cache = ResamplerCache(max_size=RESAMPLER_CACHE_MAX)
@@ -608,6 +611,12 @@ class AudioDataset(Dataset):
                 self.file_to_bounds[fname] = (st, et)
 
         self.coi_segments = self._compute_segments(split_df)
+        self.coi_segments_by_class: list[list[tuple[str, int, int, int]]] = [
+            [] for _ in range(n_coi_classes)
+        ]
+        for seg in self.coi_segments:
+            self.coi_segments_by_class[seg[3]].append(seg)
+            
         if self.split == "train":
             self.coi_segments_train = list(self.coi_segments)
 
@@ -807,6 +816,24 @@ class AudioDataset(Dataset):
                     torch.zeros(self.segment_samples) for _ in range(self.n_coi_classes)
                 ]
                 sources[class_idx] = coi_audio
+
+                if self.n_coi_classes > 1 and self._rng.random() < getattr(self, "multi_coi_prob", 0.0):
+                    available_classes = [
+                        c for c in range(self.n_coi_classes) 
+                        if c != class_idx and len(self.coi_segments_by_class[c]) > 0
+                    ]
+                    if available_classes:
+                        class_idx_2 = int(self._rng.choice(available_classes))
+                        seg_list = self.coi_segments_by_class[class_idx_2]
+                        seg_idx = int(self._rng.integers(len(seg_list)))
+                        filepath_2, base_offset_2, seg_frames_2, _ = seg_list[seg_idx]
+                        offset_2 = self._jittered_offset(base_offset_2, seg_frames_2, filepath_2)
+                        coi_audio_2 = self._load_audio(
+                            filepath_2, frame_offset=offset_2, num_frames=seg_frames_2
+                        )
+                        if self.augment:
+                            coi_audio_2 = AudioAugmentations.random_augment(coi_audio_2, self._rng)
+                        sources[class_idx_2] = coi_audio_2
             else:
                 # Background-only sample
                 idxs = self._rng.choice(
@@ -1326,6 +1353,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         ),
         background_mix_n=config.data.background_mix_n,
         augment_multiplier=config.data.augment_multiplier,
+        multi_coi_prob=getattr(config.data, "multi_coi_prob", 0.3),
     )
 
     num_workers = config.training.num_workers
