@@ -492,21 +492,20 @@ class TUSSInference:
             sources: (B, n_sources, T) tensor
         """
         B, T = waveforms.shape
-        
-        # Variance normalization
-        mean = waveforms.mean(dim=1, keepdim=True)
+
+        # Match training: variance normalization only (no mean subtraction)
         std = waveforms.std(dim=1, keepdim=True) + 1e-8
 
-        # Normalize input
-        x = ((waveforms - mean) / std).to(self.device)  # (B, T)
-        
+        # Normalize input by its standard deviation only
+        x = (waveforms / std).to(self.device)  # (B, T)
+
         prompts = [self.prompts_list] * B
-        
+
         output = self.model(x, prompts)  # (B, n_sources, T)
-        
+
         # Rescale outputs
         sources = output.cpu() * std.unsqueeze(2)  # (B, n_sources, T)
-        
+
         return sources
 
     def _separate_segment(self, segment: torch.Tensor) -> torch.Tensor:
@@ -521,12 +520,11 @@ class TUSSInference:
         Returns:
             sources: (n_sources, T) tensor [COI, background]
         """
-        # Variance normalization (matching TUSS training)
-        mean = segment.mean()
+        # Match training: variance normalization only (no mean subtraction)
         std = segment.std() + 1e-8
 
-        # Normalize input (zero-mean, unit-variance)
-        x = ((segment - mean) / std).unsqueeze(0).to(self.device)  # (1, T)
+        # Normalize input by its standard deviation only
+        x = (segment / std).unsqueeze(0).to(self.device)  # (1, T)
 
         # Build prompts list: [coi_prompts + [bg_prompt]]
         # TUSS model expects prompts as List[List[str]] where outer list is batch

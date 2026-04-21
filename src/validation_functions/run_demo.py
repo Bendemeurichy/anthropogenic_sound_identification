@@ -11,7 +11,7 @@ from validation_functions.demo_separation import plot_combined_spectrograms_from
 
 def main():
     ckpt_path = (
-        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/20260410_222544"
+        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/20260421_085947"
     )
     wav_path = "/home/bendm/Thesis/project/data/misclassifications/239_as_is_sep_cls_['plane',_'wind',_'biophony']_conf0.456_S4A04430_20180716_113000.wav"
 
@@ -24,7 +24,7 @@ def main():
     inferencer = TUSSInference.from_checkpoint(
         ckpt_path,
         device="cuda" if torch.cuda.is_available() else "cpu",
-        coi_prompt=["plane", "bird"],
+        coi_prompt=["airplane", "birds"],
         bg_prompt="background",
     )
 

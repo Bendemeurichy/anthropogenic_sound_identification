@@ -337,6 +337,8 @@ class TrainingConfig:
     resume_from: str = ""  # path to checkpoint .pt file to resume training
     seed: int = 42
     existing_prompt_lr_multiplier: float = 0.1  # LR multiplier for prompts that exist in checkpoint
+    stabilization_epochs: int = 0  # Number of epochs to freeze old prompts and backbone
+    backbone_lr_multiplier: float = 0.05  # LR multiplier for backbone when unfreezing
 
 
 @dataclass
@@ -616,15 +618,33 @@ class AudioDataset(Dataset):
         ]
         for seg in self.coi_segments:
             self.coi_segments_by_class[seg[3]].append(seg)
+
+        # Build a class-balanced training schedule so each COI class contributes
+        # the same number of samples per epoch.
+        self._balanced_train_schedule: list[tuple[str, int, int, int]] = []
+        if self.split == "train" and self.coi_segments_by_class:
+            max_class_len = max((len(cls) for cls in self.coi_segments_by_class), default=0)
+            if max_class_len > 0:
+                for class_idx, seg_list in enumerate(self.coi_segments_by_class):
+                    if not seg_list:
+                        continue
+                    for i in range(max_class_len):
+                        self._balanced_train_schedule.append(seg_list[i % len(seg_list)])
+
+                # Keep the schedule deterministic per epoch but still shuffled by DataLoader.
+                self._rng.shuffle(self._balanced_train_schedule)
             
         if self.split == "train":
             self.coi_segments_train = list(self.coi_segments)
 
         self._extra_background_count = 0
         if self.coi_files and self.background_only_prob > 0.0:
-            base = len(
-                self.coi_segments_train if split == "train" else self.coi_segments
-            )
+            if split == "train" and self._balanced_train_schedule:
+                base = len(self._balanced_train_schedule)
+            else:
+                base = len(
+                    self.coi_segments_train if split == "train" else self.coi_segments
+                )
             multiplier = self.augment_multiplier if split == "train" else 1
             self._extra_background_count = int(
                 self.background_only_prob * base * multiplier + 0.5
@@ -641,6 +661,8 @@ class AudioDataset(Dataset):
 
     def set_epoch(self, epoch: int):
         self._rng = np.random.default_rng(42 + epoch)
+        if self._balanced_train_schedule:
+            self._rng.shuffle(self._balanced_train_schedule)
 
     def _compute_segments(
         self, split_df: pd.DataFrame
@@ -689,11 +711,14 @@ class AudioDataset(Dataset):
 
     def __len__(self):
         if self.split == "train":
-            base = (
-                len(self.coi_segments_train) * self.augment_multiplier
-                if self.coi_segments_train
-                else 0
-            )
+            if self._balanced_train_schedule:
+                base = len(self._balanced_train_schedule) * self.augment_multiplier
+            else:
+                base = (
+                    len(self.coi_segments_train) * self.augment_multiplier
+                    if self.coi_segments_train
+                    else 0
+                )
             return base + self._extra_background_count
         return len(self.coi_segments) + self._extra_background_count
 
@@ -796,13 +821,14 @@ class AudioDataset(Dataset):
         background = None
 
         if self.split == "train":
-            coi_count = len(self.coi_segments_train)
+            schedule = self._balanced_train_schedule or self.coi_segments_train
+            coi_count = len(schedule)
             effective_coi_count = coi_count * self.augment_multiplier
 
             if coi_count > 0 and idx < effective_coi_count:
                 actual_idx = idx % coi_count
                 augment_variant = idx // coi_count
-                filepath, base_offset, seg_frames, class_idx = self.coi_segments_train[
+                filepath, base_offset, seg_frames, class_idx = schedule[
                     actual_idx
                 ]
                 offset = self._jittered_offset(base_offset, seg_frames, filepath)
@@ -1663,7 +1689,28 @@ def validate_prompts_against_checkpoint(
     if not checkpoint_path:
         return [], config_prompts + [bg_prompt]
     
-    checkpoint_prompts = get_prompts_from_checkpoint(checkpoint_path)
+    try:
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        old_coi_prompts = ckpt.get("coi_prompts", [])
+        old_bg_prompt = ckpt.get("bg_prompt", bg_prompt)
+        
+        if old_coi_prompts:
+            # Strict validation: Check prefix matches
+            if len(config_prompts) < len(old_coi_prompts):
+                raise ValueError(f"Config has fewer COI prompts ({len(config_prompts)}) than checkpoint ({len(old_coi_prompts)}).")
+            for i, p in enumerate(old_coi_prompts):
+                if config_prompts[i] != p:
+                    raise ValueError(f"Prompt order mismatch! Checkpoint prompt {i} is '{p}', but config prompt {i} is '{config_prompts[i]}'. You must append new prompts at the end.")
+            
+            if bg_prompt != old_bg_prompt:
+                raise ValueError(f"Background prompt mismatch! Checkpoint uses '{old_bg_prompt}', config uses '{bg_prompt}'.")
+                
+        checkpoint_prompts = set(old_coi_prompts + [old_bg_prompt]) if old_coi_prompts else get_prompts_from_checkpoint(checkpoint_path)
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise e
+        print(f"⚠ Warning: Could not read strict prompts from checkpoint, falling back: {e}")
+        checkpoint_prompts = get_prompts_from_checkpoint(checkpoint_path)
     
     if not checkpoint_prompts:
         # Checkpoint doesn't have prompts or couldn't be read
@@ -1903,7 +1950,7 @@ def train(config: Config, timestamp: str | None = None):
     if param_groups['continuing_prompts']:
         optimizer_param_groups.append({
             'params': param_groups['continuing_prompts'],
-            'lr': base_lr * existing_lr_mult,
+            'lr': base_lr,
             'name': 'continuing_prompts'
         })
 
@@ -1920,7 +1967,7 @@ def train(config: Config, timestamp: str | None = None):
 
     # If no parameter groups (shouldn't happen), fall back to old behavior
     if not optimizer_param_groups:
-        optimizer_param_groups = [{'params': filter(lambda p: p.requires_grad, model.parameters())}]
+        optimizer_param_groups = [{'params': filter(lambda p: p.requires_grad, model.parameters()), 'name': 'default'}]
 
     optimizer = optim.AdamW(optimizer_param_groups, weight_decay=weight_decay)
 
@@ -1929,14 +1976,39 @@ def train(config: Config, timestamp: str | None = None):
         1, len(train_loader) // max(1, config.training.grad_accum_steps)
     )
     total_steps = steps_per_epoch * config.training.num_epochs
+    stabilization_epochs = getattr(config.training, "stabilization_epochs", 0)
+    stabilization_steps = steps_per_epoch * stabilization_epochs
 
-    def lr_lambda(current_step: int) -> float:
+    def base_lr_lambda(current_step: int) -> float:
         if current_step < warmup_steps:
             return current_step / max(1, warmup_steps)
         progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
         return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    def get_stabilization_lambda(multiplier: float):
+        def _lambda(current_step: int) -> float:
+            if current_step < stabilization_steps:
+                return 0.0
+            # Apply multiplier on top of base schedule
+            return base_lr_lambda(current_step) * multiplier
+        return _lambda
+
+    lambdas = []
+    for group in optimizer_param_groups:
+        name = group.get('name', '')
+        if name == 'new_prompts':
+            lambdas.append(base_lr_lambda)
+        elif name == 'continuing_prompts':
+            lambdas.append(get_stabilization_lambda(existing_lr_mult))
+        elif name == 'backbone':
+            # Note: you may want to configure backbone LR independently.
+            # Defaulting to backbone_lr_multiplier (or 0.05).
+            mult = getattr(config.training, "backbone_lr_multiplier", 0.05)
+            lambdas.append(get_stabilization_lambda(mult))
+        else:
+            lambdas.append(base_lr_lambda)
+
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambdas)
 
     use_amp = config.training.use_amp and str(config.training.device).startswith("cuda")
     # GradScaler is only needed for fp16; bf16 has sufficient dynamic range.

@@ -48,9 +48,36 @@ data:
   # -----------------------------------------------------------------------
   target_classes:
     # Class 0 → model.coi_prompts[0] = "airplane"
-    - ["airplane", "Airplane", "plane"]
-    # Class 1 → model.coi_prompts[1] = "bird"
-    - ["bird", "Bird", "birds", "Birdsong"]
+    # Comprehensive coverage: 30 airplane/aircraft labels from webdataset
+    - [
+        "aeroplane", "air-plane", "aircraft", "aircrafts", "airplane",
+        "airplane-landing", "airplanes", "ariplane", "aviation", "fighter-aircraft",
+        "fighter-jet", "fighter-plane", "jet", "jet-aircraft", "jet-engine",
+        "jet-fighter", "jet-planes", "jetliner", "jets", "light-aircraft",
+        "passenger-plane", "passengerplane", "plane", "planes", "propeller",
+        "propeller-aircarft", "propeller-noise", "propeller-plane", "rotor-plane", "turboprop",
+      ]
+    # Class 1 → model.coi_prompts[1] = "birds"
+    # Comprehensive coverage: 81 bird labels from webdataset (includes species)
+    - [
+        "barred-owls", "bird", "bird-call", "bird-calls", "bird-chirping",
+        "bird-chorus", "bird-song", "birds", "birdsong", "blackbird",
+        "blackbirds", "carolina-wren", "chaffinch", "chirping_birds", "collared-dove",
+        "crow", "crows", "dawn-birds", "dove", "doves",
+        "duck", "duck-decoy", "ducks", "geese", "goose",
+        "great-black-backed-gull", "grey-shrikethrush", "gull", "gulls", "hen",
+        "hens", "herring-gull", "hummingbird", "magpie", "magpie-warble",
+        "mourning-dove", "night-birds", "nightbird", "nightingale", "northern-pygmy-owl",
+        "ocean-birds", "owl", "owl-calls", "owlete-nightjar", "owls",
+        "pigeon", "pigeons", "raven", "ravens", "robin",
+        "rooster", "roosters", "sea-gull", "seabird", "seabirds",
+        "seagull", "seagulls", "shore-bird", "songbird", "sparrows",
+        "starling", "starlings", "swallow", "swallows", "swan",
+        "swans", "tawny-owl", "tern", "terns", "thrush",
+        "tits", "turkey", "turtle-dove", "turtledove", "warbler",
+        "water-birds", "waterfowl", "woodpecker", "wren", "zebra-finch",
+        "zebrafinch",
+      ]
 
   # Probability that a training sample contains *only* background (no COI)
   background_only_prob: 0.3
@@ -132,6 +159,14 @@ training:
   # When resuming from a checkpoint, prompts that already exist will train at
   # lr × existing_prompt_lr_multiplier, while new prompts train at full lr.
   existing_prompt_lr_multiplier: 0.1
+
+  # Stabilization phase settings for adding new classes
+  # Keep old prompts and backbone frozen (LR=0) for this many epochs
+  stabilization_epochs: 5
+
+  # After stabilization_epochs, if the backbone is not frozen (freeze_backbone=false),
+  # it will train at lr * backbone_lr_multiplier
+  backbone_lr_multiplier: 0.05
 
   # Loss weights
   coi_weight: 2.0 # up-weight COI streams relative to background

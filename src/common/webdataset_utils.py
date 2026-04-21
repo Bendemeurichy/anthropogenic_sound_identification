@@ -832,7 +832,11 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         
         # If no target_classes specified, use binary label
         if not self.target_classes:
-            return metadata.get("label") == 1
+            label_value = metadata.get("label")
+            # Handle both numeric labels (1/0) and string labels
+            if isinstance(label_value, (int, float)):
+                return label_value == 1
+            return False
         
         # Check if sample labels match target_classes (pure COI only)
         sample_labels = metadata.get("label", [])
@@ -840,14 +844,32 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         # Handle different label formats
         if isinstance(sample_labels, str):
             sample_labels = [sample_labels]
+        elif isinstance(sample_labels, (int, float)):
+            # Numeric label - cannot match string target_classes
+            return False
         elif not isinstance(sample_labels, list):
             return False
         
         if len(sample_labels) == 0:
             return False
         
-        # Pure COI: ALL labels must be in target_classes
-        return all(label in self.target_classes for label in sample_labels)
+        # Flatten target_classes to get all COI labels across all classes
+        # target_classes is list of lists: [[airplane labels], [bird labels], ...]
+        all_coi_labels = []
+        if self.target_classes and isinstance(self.target_classes[0], list):
+            # List of lists format
+            for class_group in self.target_classes:
+                all_coi_labels.extend(class_group)
+        else:
+            # Flat list format (single class)
+            all_coi_labels = self.target_classes
+        
+        # Convert to lowercase for case-insensitive matching
+        all_coi_labels_lower = [lbl.lower() for lbl in all_coi_labels]
+        sample_labels_lower = [lbl.lower() for lbl in sample_labels]
+        
+        # Pure COI: ALL labels must be in the flattened target_classes
+        return all(label in all_coi_labels_lower for label in sample_labels_lower)
     
     def _is_valid_background(self, metadata: Dict) -> bool:
         """
@@ -864,8 +886,12 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
             True if sample is valid background, False otherwise
         """
         if not self.target_classes:
-            # No target classes: accept non-COI samples
-            return metadata.get("label") != 1
+            # No target classes: accept non-COI samples (label != 1)
+            label_value = metadata.get("label")
+            if isinstance(label_value, (int, float)):
+                return label_value != 1
+            # String labels with no target_classes - cannot determine, reject
+            return False
         
         sample_labels = metadata.get("label", [])
         
@@ -876,14 +902,32 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         # Handle different label formats
         if isinstance(sample_labels, str):
             sample_labels = [sample_labels]
+        elif isinstance(sample_labels, (int, float)):
+            # Numeric label - cannot match string target_classes
+            # Treat as non-COI if it's not 1
+            return sample_labels != 1
         elif not isinstance(sample_labels, list):
             return False
         
         if len(sample_labels) == 0:
             return False
         
+        # Flatten target_classes to get all COI labels
+        all_coi_labels = []
+        if self.target_classes and isinstance(self.target_classes[0], list):
+            # List of lists format
+            for class_group in self.target_classes:
+                all_coi_labels.extend(class_group)
+        else:
+            # Flat list format
+            all_coi_labels = self.target_classes
+        
+        # Convert to lowercase for case-insensitive matching
+        all_coi_labels_lower = [lbl.lower() for lbl in all_coi_labels]
+        sample_labels_lower = [lbl.lower() for lbl in sample_labels]
+        
         # Exclude if ANY label is in target_classes (prevents mixed samples)
-        return not any(label in self.target_classes for label in sample_labels)
+        return not any(label in all_coi_labels_lower for label in sample_labels_lower)
 
     def _decode_sample(
         self, sample: Dict
@@ -945,6 +989,70 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
             return torch.zeros(2, self.segment_samples)
         return torch.zeros(self.segment_samples)
 
+    def _infer_coi_class_from_label(self, metadata: Dict) -> int:
+        """
+        Infer the COI class index from the label field using target_classes mapping.
+        
+        This is critical when webdataset metadata doesn't have coi_class field set.
+        The webdataset typically has string labels (e.g., "chirping_birds", "airplane"),
+        and we need to map these to COI class indices using target_classes.
+        
+        Args:
+            metadata: Sample metadata dict with 'label' field
+            
+        Returns:
+            COI class index (0 to n_coi_classes-1), or 0 if cannot infer
+        """
+        # Check if coi_class is already set and valid
+        existing_class = metadata.get("coi_class")
+        if existing_class is not None and 0 <= existing_class < self.n_coi_classes:
+            return existing_class
+        
+        # Need target_classes to infer from labels
+        if not self.target_classes:
+            # No mapping available - default to class 0
+            return 0
+        
+        # Infer from label field
+        sample_labels = metadata.get("label", [])
+        
+        # Handle different label formats (string, int, or list)
+        if isinstance(sample_labels, str):
+            sample_labels = [sample_labels]
+        elif isinstance(sample_labels, (int, float)):
+            # Numeric label - cannot infer class from string matching
+            return 0
+        elif not isinstance(sample_labels, list):
+            return 0  # Unknown format - fallback to class 0
+        
+        if len(sample_labels) == 0:
+            return 0  # Empty labels - fallback to class 0
+        
+        # target_classes is a list of lists: [[airplane labels], [bird labels], ...]
+        # Each inner list contains string labels that belong to that COI class
+        target_classes_groups = self.target_classes
+        
+        # Handle case where target_classes might be a flat list (single class)
+        # Check if first element is a list to determine structure
+        if target_classes_groups and not isinstance(target_classes_groups[0], list):
+            target_classes_groups = [target_classes_groups]
+        
+        # Match sample labels against each target class group
+        # Return the index of the FIRST matching class
+        for class_idx, class_labels in enumerate(target_classes_groups):
+            # Convert all class labels to lowercase for case-insensitive matching
+            class_labels_lower = [lbl.lower() for lbl in class_labels]
+            sample_labels_lower = [lbl.lower() for lbl in sample_labels]
+            
+            # Check if ANY sample label matches ANY label in this class group
+            if any(sample_lbl in class_labels_lower for sample_lbl in sample_labels_lower):
+                return class_idx
+        
+        # No match found - this sample doesn't belong to any configured COI class
+        # This should not happen for true COI samples (caught by _is_coi_sample earlier)
+        # But as a safety fallback, return class 0
+        return 0
+    
     def _create_mixture(
         self,
         coi_sample: Tuple[torch.Tensor, Dict],
@@ -961,9 +1069,11 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         sources = []
 
         if self.n_coi_classes > 1:
-            # Multi-class COI
+            # Multi-class COI - infer the correct class from label if coi_class is missing
+            coi_class_idx = self._infer_coi_class_from_label(coi_metadata)
+            
             for i in range(self.n_coi_classes):
-                if coi_metadata.get("coi_class", 0) == i:
+                if i == coi_class_idx:
                     sources.append(coi_waveform)
                 else:
                     sources.append(self._create_empty_source())
