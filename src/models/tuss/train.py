@@ -37,6 +37,7 @@ import torchaudio
 import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+import os
 
 # Under pythonw there is no console and sys.stdout/stderr are None.
 # Wrap only when the underlying buffer actually exists.
@@ -336,7 +337,9 @@ class TrainingConfig:
     validate_every_n_epochs: int = 1
     resume_from: str = ""  # path to checkpoint .pt file to resume training
     seed: int = 42
-    existing_prompt_lr_multiplier: float = 0.1  # LR multiplier for prompts that exist in checkpoint
+    existing_prompt_lr_multiplier: float = (
+        0.1  # LR multiplier for prompts that exist in checkpoint
+    )
     stabilization_epochs: int = 0  # Number of epochs to freeze old prompts and backbone
     backbone_lr_multiplier: float = 0.05  # LR multiplier for backbone when unfreezing
 
@@ -623,17 +626,21 @@ class AudioDataset(Dataset):
         # the same number of samples per epoch.
         self._balanced_train_schedule: list[tuple[str, int, int, int]] = []
         if self.split == "train" and self.coi_segments_by_class:
-            max_class_len = max((len(cls) for cls in self.coi_segments_by_class), default=0)
+            max_class_len = max(
+                (len(cls) for cls in self.coi_segments_by_class), default=0
+            )
             if max_class_len > 0:
                 for class_idx, seg_list in enumerate(self.coi_segments_by_class):
                     if not seg_list:
                         continue
                     for i in range(max_class_len):
-                        self._balanced_train_schedule.append(seg_list[i % len(seg_list)])
+                        self._balanced_train_schedule.append(
+                            seg_list[i % len(seg_list)]
+                        )
 
                 # Keep the schedule deterministic per epoch but still shuffled by DataLoader.
                 self._rng.shuffle(self._balanced_train_schedule)
-            
+
         if self.split == "train":
             self.coi_segments_train = list(self.coi_segments)
 
@@ -828,9 +835,7 @@ class AudioDataset(Dataset):
             if coi_count > 0 and idx < effective_coi_count:
                 actual_idx = idx % coi_count
                 augment_variant = idx // coi_count
-                filepath, base_offset, seg_frames, class_idx = schedule[
-                    actual_idx
-                ]
+                filepath, base_offset, seg_frames, class_idx = schedule[actual_idx]
                 offset = self._jittered_offset(base_offset, seg_frames, filepath)
                 coi_audio = self._load_audio(
                     filepath, frame_offset=offset, num_frames=seg_frames
@@ -843,9 +848,12 @@ class AudioDataset(Dataset):
                 ]
                 sources[class_idx] = coi_audio
 
-                if self.n_coi_classes > 1 and self._rng.random() < getattr(self, "multi_coi_prob", 0.0):
+                if self.n_coi_classes > 1 and self._rng.random() < getattr(
+                    self, "multi_coi_prob", 0.0
+                ):
                     available_classes = [
-                        c for c in range(self.n_coi_classes) 
+                        c
+                        for c in range(self.n_coi_classes)
                         if c != class_idx and len(self.coi_segments_by_class[c]) > 0
                     ]
                     if available_classes:
@@ -853,12 +861,16 @@ class AudioDataset(Dataset):
                         seg_list = self.coi_segments_by_class[class_idx_2]
                         seg_idx = int(self._rng.integers(len(seg_list)))
                         filepath_2, base_offset_2, seg_frames_2, _ = seg_list[seg_idx]
-                        offset_2 = self._jittered_offset(base_offset_2, seg_frames_2, filepath_2)
+                        offset_2 = self._jittered_offset(
+                            base_offset_2, seg_frames_2, filepath_2
+                        )
                         coi_audio_2 = self._load_audio(
                             filepath_2, frame_offset=offset_2, num_frames=seg_frames_2
                         )
                         if self.augment:
-                            coi_audio_2 = AudioAugmentations.random_augment(coi_audio_2, self._rng)
+                            coi_audio_2 = AudioAugmentations.random_augment(
+                                coi_audio_2, self._rng
+                            )
                         sources[class_idx_2] = coi_audio_2
             else:
                 # Background-only sample
@@ -1289,35 +1301,45 @@ def validate_epoch(
 
 def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioDataset]:
     """Create dataloader for specified split.
-    
+
     Supports both file-based and WebDataset loading modes based on config.
     """
     # Check if we should use WebDataset
     use_webdataset = getattr(config.data, "use_webdataset", False)
-    webdataset_path = getattr(config.data, "webdataset_path", "")
-    
+    raw_webdataset_path = str(getattr(config.data, "webdataset_path", "") or "")
+    webdataset_path = os.path.expanduser(
+        os.path.expandvars(raw_webdataset_path)
+    ).strip()
+
     if use_webdataset:
         if not webdataset_path:
             raise ValueError("webdataset_path must be set when use_webdataset=True")
-        
+
         from src.common.webdataset_utils import COIWebDatasetWrapper
         from src.label_loading.metadata_loader import get_webdataset_paths
-        
+
         print(f"Using WebDataset loading from: {webdataset_path}")
-        
+
         n_coi = len(config.model.coi_prompts)
-        tar_paths = get_webdataset_paths(webdataset_path, split)
-        
+        _tar_pattern = get_webdataset_paths(webdataset_path, split)
+        tar_paths = sorted(str(p) for p in Path(webdataset_path).glob(f"{split}-*.tar"))
+        if not tar_paths:
+            raise FileNotFoundError(
+                f"No {split} shards found in resolved WebDataset directory: "
+                f"{webdataset_path} (pattern from manifest: {_tar_pattern})"
+            )
+        print(f"  Resolved {len(tar_paths)} {split} shard(s)")
+
         # Get target_classes for filtering
         target_classes = getattr(config.data, "target_classes", [])
         if not target_classes:
             print("  Warning: No target_classes specified, using all label==1 as COI")
         else:
             print(f"  Filtering COI by labels: {target_classes}")
-        
+
         # Get seed for reproducibility
         seed = getattr(config.training, "seed", 42)
-        
+
         dataset = COIWebDatasetWrapper(
             tar_paths=tar_paths,
             split=split,
@@ -1335,11 +1357,17 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
             dataset_filter=None,  # Could be added to config if needed
             coi_ratio=0.25,  # Could be added to config if needed
             seed=seed,
+            multi_coi_prob=(
+                getattr(config.data, "multi_coi_prob", 0.0) if split == "train" else 0.0
+            ),
+            balance_classes=(
+                getattr(config.data, "balance_classes", True) if split == "train" else False
+            ),
         )
-        
+
         num_workers = config.training.num_workers
         pin_memory = config.training.pin_memory and torch.cuda.is_available()
-        
+
         # WebDataset is an IterableDataset - different DataLoader settings
         loader = DataLoader(
             dataset,
@@ -1349,9 +1377,9 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
             # No shuffle for IterableDataset - handled internally
             # No drop_last for IterableDataset
         )
-        
+
         return loader, dataset
-    
+
     # File-based mode (original behavior)
     header_cols = pd.read_csv(config.data.df_path, nrows=0).columns.tolist()
     usecols = ["filename", "label", "split", "coi_class"]
@@ -1384,7 +1412,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
 
     num_workers = config.training.num_workers
     pin_memory = config.training.pin_memory and torch.cuda.is_available()
-    
+
     loader = DataLoader(
         dataset,
         batch_size=config.training.batch_size,
@@ -1405,21 +1433,20 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
 
 
 def create_model(
-    config: Config, 
-    resume_ckpt_path: str | None = None
+    config: Config, resume_ckpt_path: str | None = None
 ) -> tuple[torch.nn.Module, dict[str, list]]:
     """Build SeparationModel, load pretrained weights, inject new prompt vectors.
-    
+
     Args:
         config: Training configuration.
         resume_ckpt_path: Path to a fine-tuned checkpoint (.pt file) to resume from.
             When provided, existing prompts from the checkpoint are preserved and
             only NEW prompts (not in the checkpoint) are injected.
-    
+
     Returns:
         Tuple of:
             - model: The created separation model
-            - param_groups: Dict with keys 'new_prompts', 'continuing_prompts', 
+            - param_groups: Dict with keys 'new_prompts', 'continuing_prompts',
                            'frozen_prompts', 'backbone' mapping to parameter lists
     """
     pretrained_path = config.model.pretrained_path
@@ -1429,20 +1456,24 @@ def create_model(
     # Track which prompts already exist in a checkpoint we're resuming from
     existing_prompts_in_ckpt = set()
     resume_state_dict = None
-    
+
     if resume_ckpt_path and Path(resume_ckpt_path).is_file():
         print(f"Preparing to resume from fine-tuned checkpoint: {resume_ckpt_path}")
-        resume_ckpt = torch.load(resume_ckpt_path, map_location="cpu", weights_only=False)
+        resume_ckpt = torch.load(
+            resume_ckpt_path, map_location="cpu", weights_only=False
+        )
         resume_state_dict = resume_ckpt.get("model_state_dict", {})
-        
+
         # Extract existing prompt names from checkpoint
         for key in resume_state_dict.keys():
             if key.startswith("separator.prompts."):
                 prompt_name = key.replace("separator.prompts.", "", 1)
                 existing_prompts_in_ckpt.add(prompt_name)
-        
+
         if existing_prompts_in_ckpt:
-            print(f"  Found {len(existing_prompts_in_ckpt)} existing prompts in checkpoint: {sorted(existing_prompts_in_ckpt)}")
+            print(
+                f"  Found {len(existing_prompts_in_ckpt)} existing prompts in checkpoint: {sorted(existing_prompts_in_ckpt)}"
+            )
 
     if pretrained_path is not None and Path(pretrained_path).exists():
         hparams_file = Path(pretrained_path) / "hparams.yaml"
@@ -1529,7 +1560,7 @@ def create_model(
         if prompt_name in existing_prompts_in_ckpt:
             print(f"  Prompt '{prompt_name}' exists in checkpoint – will be loaded")
             continue
-            
+
         if prompt_name not in prompts_dict:
             init_val = _get_init_vector(init_from)
             # Small noise so each new COI prompt starts from a slightly
@@ -1540,14 +1571,18 @@ def create_model(
             print(f"  Injected NEW prompt '{prompt_name}' (init from '{init_from}')")
         else:
             print(f"  Prompt '{prompt_name}' already exists – keeping pretrained value")
-    
+
     # Now load the resume checkpoint weights (if provided)
     # This will load existing prompts but leave newly injected ones untouched
     if resume_state_dict is not None:
-        print(f"Loading checkpoint weights (newly injected prompts will be preserved)...")
+        print(
+            f"Loading checkpoint weights (newly injected prompts will be preserved)..."
+        )
         missing, unexpected = model.load_state_dict(resume_state_dict, strict=False)
         if newly_injected:
-            print(f"  ✓ {len(newly_injected)} new prompt(s) preserved: {newly_injected}")
+            print(
+                f"  ✓ {len(newly_injected)} new prompt(s) preserved: {newly_injected}"
+            )
         expected_missing = [f"separator.prompts.{p}" for p in newly_injected]
         unexpected_missing = [k for k in missing if k not in expected_missing]
         if unexpected_missing:
@@ -1589,50 +1624,48 @@ def create_model(
     # Collect parameter groups for differential learning rates            #
     # ------------------------------------------------------------------ #
     param_groups = {
-        'new_prompts': [],
-        'continuing_prompts': [],
-        'frozen_prompts': [],
-        'backbone': []
+        "new_prompts": [],
+        "continuing_prompts": [],
+        "frozen_prompts": [],
+        "backbone": [],
     }
-    
+
     if resume_ckpt_path:
         checkpoint_prompts = get_prompts_from_checkpoint(resume_ckpt_path)
         new_p, continuing_p, frozen_p = classify_prompts_by_training_strategy(
-            config.model.coi_prompts,
-            config.model.bg_prompt,
-            checkpoint_prompts
+            config.model.coi_prompts, config.model.bg_prompt, checkpoint_prompts
         )
-        
+
         # Collect parameters for each prompt category
         prompts_dict = model.separator.prompts
-        
+
         for prompt_name in new_p:
             if prompt_name in prompts_dict:
-                param_groups['new_prompts'].append(prompts_dict[prompt_name])
-        
+                param_groups["new_prompts"].append(prompts_dict[prompt_name])
+
         for prompt_name in continuing_p:
             if prompt_name in prompts_dict:
-                param_groups['continuing_prompts'].append(prompts_dict[prompt_name])
-        
+                param_groups["continuing_prompts"].append(prompts_dict[prompt_name])
+
         for prompt_name in frozen_p:
             if prompt_name in prompts_dict:
                 prompts_dict[prompt_name].requires_grad_(False)
-                param_groups['frozen_prompts'].append(prompts_dict[prompt_name])
-        
+                param_groups["frozen_prompts"].append(prompts_dict[prompt_name])
+
         # Collect backbone parameters (everything except prompts)
         for name, param in model.named_parameters():
-            if 'prompts' not in name and param.requires_grad:
-                param_groups['backbone'].append(param)
+            if "prompts" not in name and param.requires_grad:
+                param_groups["backbone"].append(param)
     else:
         # No checkpoint: all config prompts are "new", no frozen prompts
         prompts_dict = model.separator.prompts
         for prompt_name in config.model.coi_prompts + [config.model.bg_prompt]:
             if prompt_name in prompts_dict:
-                param_groups['new_prompts'].append(prompts_dict[prompt_name])
-        
+                param_groups["new_prompts"].append(prompts_dict[prompt_name])
+
         for name, param in model.named_parameters():
-            if 'prompts' not in name and param.requires_grad:
-                param_groups['backbone'].append(param)
+            if "prompts" not in name and param.requires_grad:
+                param_groups["backbone"].append(param)
 
     return model, param_groups
 
@@ -1644,17 +1677,17 @@ def create_model(
 
 def get_prompts_from_checkpoint(checkpoint_path: str | Path) -> set[str]:
     """Extract prompt names from a checkpoint file.
-    
+
     Returns:
         Set of prompt names found in the checkpoint's model state.
     """
     if not checkpoint_path or not Path(checkpoint_path).is_file():
         return set()
-    
+
     try:
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         model_state = ckpt.get("model_state_dict", {})
-        
+
         prompts = set()
         prompt_prefix = "separator.prompts."
         for key in model_state.keys():
@@ -1662,7 +1695,7 @@ def get_prompts_from_checkpoint(checkpoint_path: str | Path) -> set[str]:
                 # Extract just the prompt name (use replace with count=1 to be explicit)
                 prompt_name = key.replace(prompt_prefix, "", 1)
                 prompts.add(prompt_name)
-        
+
         return prompts
     except Exception as e:
         print(f"⚠ Warning: Could not read prompts from checkpoint: {e}")
@@ -1675,12 +1708,12 @@ def validate_prompts_against_checkpoint(
     checkpoint_path: str | None,
 ) -> tuple[list[str], list[str]]:
     """Validate config prompts against an existing checkpoint.
-    
+
     Args:
         config_prompts: COI prompts from config
         bg_prompt: Background prompt from config
         checkpoint_path: Path to checkpoint to resume from
-        
+
     Returns:
         Tuple of:
             - existing_prompts: List of prompts that already exist in checkpoint
@@ -1688,46 +1721,58 @@ def validate_prompts_against_checkpoint(
     """
     if not checkpoint_path:
         return [], config_prompts + [bg_prompt]
-    
+
     try:
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         old_coi_prompts = ckpt.get("coi_prompts", [])
         old_bg_prompt = ckpt.get("bg_prompt", bg_prompt)
-        
+
         if old_coi_prompts:
             # Strict validation: Check prefix matches
             if len(config_prompts) < len(old_coi_prompts):
-                raise ValueError(f"Config has fewer COI prompts ({len(config_prompts)}) than checkpoint ({len(old_coi_prompts)}).")
+                raise ValueError(
+                    f"Config has fewer COI prompts ({len(config_prompts)}) than checkpoint ({len(old_coi_prompts)})."
+                )
             for i, p in enumerate(old_coi_prompts):
                 if config_prompts[i] != p:
-                    raise ValueError(f"Prompt order mismatch! Checkpoint prompt {i} is '{p}', but config prompt {i} is '{config_prompts[i]}'. You must append new prompts at the end.")
-            
+                    raise ValueError(
+                        f"Prompt order mismatch! Checkpoint prompt {i} is '{p}', but config prompt {i} is '{config_prompts[i]}'. You must append new prompts at the end."
+                    )
+
             if bg_prompt != old_bg_prompt:
-                raise ValueError(f"Background prompt mismatch! Checkpoint uses '{old_bg_prompt}', config uses '{bg_prompt}'.")
-                
-        checkpoint_prompts = set(old_coi_prompts + [old_bg_prompt]) if old_coi_prompts else get_prompts_from_checkpoint(checkpoint_path)
+                raise ValueError(
+                    f"Background prompt mismatch! Checkpoint uses '{old_bg_prompt}', config uses '{bg_prompt}'."
+                )
+
+        checkpoint_prompts = (
+            set(old_coi_prompts + [old_bg_prompt])
+            if old_coi_prompts
+            else get_prompts_from_checkpoint(checkpoint_path)
+        )
     except Exception as e:
         if isinstance(e, ValueError):
             raise e
-        print(f"⚠ Warning: Could not read strict prompts from checkpoint, falling back: {e}")
+        print(
+            f"⚠ Warning: Could not read strict prompts from checkpoint, falling back: {e}"
+        )
         checkpoint_prompts = get_prompts_from_checkpoint(checkpoint_path)
-    
+
     if not checkpoint_prompts:
         # Checkpoint doesn't have prompts or couldn't be read
         return [], config_prompts + [bg_prompt]
-    
+
     all_config_prompts = set(config_prompts + [bg_prompt])
     existing = sorted(all_config_prompts & checkpoint_prompts)
     new = sorted(all_config_prompts - checkpoint_prompts)
     frozen = sorted(checkpoint_prompts - all_config_prompts)
-    
-    print("\n" + "="*70)
+
+    print("\n" + "=" * 70)
     print("PROMPT VALIDATION")
-    print("="*70)
+    print("=" * 70)
     print(f"Checkpoint: {checkpoint_path}")
     print(f"Prompts in checkpoint: {sorted(checkpoint_prompts)}")
     print(f"Prompts in config: {sorted(all_config_prompts)}")
-    
+
     if existing:
         print(f"\n✓ Already exist in checkpoint ({len(existing)}): {existing}")
         print(f"  → Will CONTINUE training at REDUCED LR (fine-tune further)")
@@ -1737,10 +1782,12 @@ def validate_prompts_against_checkpoint(
     if frozen:
         print(f"\n❄️  Prompts in checkpoint but not in config ({len(frozen)}): {frozen}")
         print(f"  → Will be FROZEN (no training)")
-    
+
     if not new and existing:
         print(f"\n📌 Training mode: CONTINUE FINE-TUNING")
-        print(f"   All prompts exist in checkpoint - will continue training with more data")
+        print(
+            f"   All prompts exist in checkpoint - will continue training with more data"
+        )
     elif new and existing:
         print(f"\n📌 Training mode: EXTEND (add new classes)")
         print(f"   Existing prompts will continue fine-tuning")
@@ -1748,8 +1795,8 @@ def validate_prompts_against_checkpoint(
     elif new and not existing:
         print(f"\n📌 Training mode: FRESH START")
         print(f"   All prompts are new - training from base model")
-    
-    print("="*70 + "\n")
+
+    print("=" * 70 + "\n")
     return existing, new
 
 
@@ -1759,12 +1806,12 @@ def classify_prompts_by_training_strategy(
     checkpoint_prompts: set[str],
 ) -> tuple[list[str], list[str], list[str]]:
     """Classify prompts into three training strategies.
-    
+
     Args:
         config_prompts: COI prompts from training config
         bg_prompt: Background prompt from config
         checkpoint_prompts: Prompts found in checkpoint
-    
+
     Returns:
         Tuple of:
             - new_prompts: In config but not checkpoint (train at full LR)
@@ -1772,11 +1819,11 @@ def classify_prompts_by_training_strategy(
             - frozen_prompts: In checkpoint but not config (freeze, no training)
     """
     all_config = set(config_prompts + [bg_prompt])
-    
+
     new_prompts = sorted(all_config - checkpoint_prompts)
     continuing_prompts = sorted(all_config & checkpoint_prompts)
     frozen_prompts = sorted(checkpoint_prompts - all_config)
-    
+
     return new_prompts, continuing_prompts, frozen_prompts
 
 
@@ -1801,12 +1848,12 @@ def set_seed(seed: int = 42):
 
 def train(config: Config, timestamp: str | None = None):
     """Main training function.
-    
+
     Supports three training modes:
     1. Fresh start: No resume_from, trains all prompts from base model
     2. Continue fine-tuning: Resume with same prompts, continue training
     3. Extend: Resume and add NEW prompts to existing checkpoint
-    
+
     Args:
         config: Training configuration
         timestamp: Optional timestamp string for checkpoint directory naming
@@ -1843,23 +1890,27 @@ def train(config: Config, timestamp: str | None = None):
 
     # Validate prompts against checkpoint if resuming
     resume_path = getattr(config.training, "resume_from", "") or ""
-    
+
     if resume_path:
         existing, new = validate_prompts_against_checkpoint(
             config.model.coi_prompts,
             config.model.bg_prompt,
             resume_path,
         )
-        
+
         if existing and not new:
             print("ℹ️  Continuing fine-tuning on existing prompts with more training")
         elif new and existing:
-            print(f"ℹ️  Extending model: keeping {len(existing)} existing + adding {len(new)} new prompts")
+            print(
+                f"ℹ️  Extending model: keeping {len(existing)} existing + adding {len(new)} new prompts"
+            )
         elif new and not existing:
             print("ℹ️  Starting fresh with new prompts")
 
     print("\nCreating model …")
-    model, param_groups = create_model(config, resume_ckpt_path=resume_path if resume_path else None)
+    model, param_groups = create_model(
+        config, resume_ckpt_path=resume_path if resume_path else None
+    )
 
     n_coi = len(config.model.coi_prompts)
     n_src = n_coi + 1  # COI classes + background
@@ -1870,46 +1921,61 @@ def train(config: Config, timestamp: str | None = None):
     # Pre-allocate a large template; we slice to [:B] at runtime.
     _MAX_BATCH = 256
     prompts_template = [list(all_prompts)] * _MAX_BATCH
-    
+
     print(f"\n📋 Model will use {n_src} outputs: {all_prompts}")
-    
+
     # Print parameter group information
-    if param_groups['new_prompts'] or param_groups['continuing_prompts'] or param_groups['frozen_prompts']:
-        print("\n" + "="*70)
+    if (
+        param_groups["new_prompts"]
+        or param_groups["continuing_prompts"]
+        or param_groups["frozen_prompts"]
+    ):
+        print("\n" + "=" * 70)
         print("PARAMETER GROUPS")
-        print("="*70)
-        
-        if param_groups['new_prompts']:
-            names = [name for name, p in model.separator.prompts.items() 
-                    if any(p is param for param in param_groups['new_prompts'])]
-            n_params = sum(p.numel() for p in param_groups['new_prompts'])
+        print("=" * 70)
+
+        if param_groups["new_prompts"]:
+            names = [
+                name
+                for name, p in model.separator.prompts.items()
+                if any(p is param for param in param_groups["new_prompts"])
+            ]
+            n_params = sum(p.numel() for p in param_groups["new_prompts"])
             print(f"\n🆕 New prompts (full LR: {config.training.lr:.1e}):")
             print(f"   {', '.join(names)}")
             print(f"   Total: {n_params:,} parameters")
-        
-        if param_groups['continuing_prompts']:
-            names = [name for name, p in model.separator.prompts.items() 
-                    if any(p is param for param in param_groups['continuing_prompts'])]
-            n_params = sum(p.numel() for p in param_groups['continuing_prompts'])
-            reduced_lr = config.training.lr * config.training.existing_prompt_lr_multiplier
+
+        if param_groups["continuing_prompts"]:
+            names = [
+                name
+                for name, p in model.separator.prompts.items()
+                if any(p is param for param in param_groups["continuing_prompts"])
+            ]
+            n_params = sum(p.numel() for p in param_groups["continuing_prompts"])
+            reduced_lr = (
+                config.training.lr * config.training.existing_prompt_lr_multiplier
+            )
             print(f"\n🔄 Continuing prompts (reduced LR: {reduced_lr:.1e}):")
             print(f"   {', '.join(names)}")
             print(f"   Total: {n_params:,} parameters")
-        
-        if param_groups['frozen_prompts']:
-            names = [name for name, p in model.separator.prompts.items() 
-                    if any(p is param for param in param_groups['frozen_prompts'])]
-            n_params = sum(p.numel() for p in param_groups['frozen_prompts'])
+
+        if param_groups["frozen_prompts"]:
+            names = [
+                name
+                for name, p in model.separator.prompts.items()
+                if any(p is param for param in param_groups["frozen_prompts"])
+            ]
+            n_params = sum(p.numel() for p in param_groups["frozen_prompts"])
             print(f"\n❄️  Frozen prompts (no training):")
             print(f"   {', '.join(names)}")
             print(f"   Total: {n_params:,} parameters")
-        
-        if param_groups['backbone']:
-            n_params = sum(p.numel() for p in param_groups['backbone'])
+
+        if param_groups["backbone"]:
+            n_params = sum(p.numel() for p in param_groups["backbone"])
             print(f"\n🏗️  Backbone (LR: {config.training.lr:.1e}):")
             print(f"   Total: {n_params/1e6:.1f}M parameters")
-        
-        print("="*70 + "\n")
+
+        print("=" * 70 + "\n")
 
     print("\nCreating data loaders …")
     train_loader, train_dataset = create_dataloader(config, "train")
@@ -1940,34 +2006,41 @@ def train(config: Config, timestamp: str | None = None):
     # Build parameter groups with different learning rates
     optimizer_param_groups = []
 
-    if param_groups['new_prompts']:
-        optimizer_param_groups.append({
-            'params': param_groups['new_prompts'],
-            'lr': base_lr,
-            'name': 'new_prompts'
-        })
+    if param_groups["new_prompts"]:
+        optimizer_param_groups.append(
+            {
+                "params": param_groups["new_prompts"],
+                "lr": base_lr,
+                "name": "new_prompts",
+            }
+        )
 
-    if param_groups['continuing_prompts']:
-        optimizer_param_groups.append({
-            'params': param_groups['continuing_prompts'],
-            'lr': base_lr,
-            'name': 'continuing_prompts'
-        })
+    if param_groups["continuing_prompts"]:
+        optimizer_param_groups.append(
+            {
+                "params": param_groups["continuing_prompts"],
+                "lr": base_lr,
+                "name": "continuing_prompts",
+            }
+        )
 
-    if param_groups['backbone']:
+    if param_groups["backbone"]:
         if config.model.freeze_backbone:
             # Backbone is frozen, don't add to optimizer
             pass
         else:
-            optimizer_param_groups.append({
-                'params': param_groups['backbone'],
-                'lr': base_lr,
-                'name': 'backbone'
-            })
+            optimizer_param_groups.append(
+                {"params": param_groups["backbone"], "lr": base_lr, "name": "backbone"}
+            )
 
     # If no parameter groups (shouldn't happen), fall back to old behavior
     if not optimizer_param_groups:
-        optimizer_param_groups = [{'params': filter(lambda p: p.requires_grad, model.parameters()), 'name': 'default'}]
+        optimizer_param_groups = [
+            {
+                "params": filter(lambda p: p.requires_grad, model.parameters()),
+                "name": "default",
+            }
+        ]
 
     optimizer = optim.AdamW(optimizer_param_groups, weight_decay=weight_decay)
 
@@ -1991,16 +2064,17 @@ def train(config: Config, timestamp: str | None = None):
                 return 0.0
             # Apply multiplier on top of base schedule
             return base_lr_lambda(current_step) * multiplier
+
         return _lambda
 
     lambdas = []
     for group in optimizer_param_groups:
-        name = group.get('name', '')
-        if name == 'new_prompts':
+        name = group.get("name", "")
+        if name == "new_prompts":
             lambdas.append(base_lr_lambda)
-        elif name == 'continuing_prompts':
+        elif name == "continuing_prompts":
             lambdas.append(get_stabilization_lambda(existing_lr_mult))
-        elif name == 'backbone':
+        elif name == "backbone":
             # Note: you may want to configure backbone LR independently.
             # Defaulting to backbone_lr_multiplier (or 0.05).
             mult = getattr(config.training, "backbone_lr_multiplier", 0.05)
@@ -2015,22 +2089,30 @@ def train(config: Config, timestamp: str | None = None):
     _amp_backend = str(config.training.device).split(":")[0]
     needs_scaler = use_amp and amp_dtype == torch.float16
     scaler = torch.amp.GradScaler(_amp_backend, enabled=True) if needs_scaler else None
-    
-    print("\n" + "="*70)
+
+    print("\n" + "=" * 70)
     print("TRAINING CONFIGURATION")
-    print("="*70)
+    print("=" * 70)
     print(f"Device: {config.training.device}")
     print(f"AMP enabled: {use_amp}")
     print(f"AMP dtype: {amp_dtype}")
     print(f"GradScaler: {scaler is not None}")
     if str(config.training.device).startswith("cuda"):
         if torch.cuda.is_available():
-            device_idx = int(config.training.device.split(":")[1]) if ":" in config.training.device else 0
+            device_idx = (
+                int(config.training.device.split(":")[1])
+                if ":" in config.training.device
+                else 0
+            )
             print(f"GPU: {torch.cuda.get_device_name(device_idx)}")
-            print(f"GPU memory: {torch.cuda.get_device_properties(device_idx).total_memory / 1e9:.2f} GB")
+            print(
+                f"GPU memory: {torch.cuda.get_device_properties(device_idx).total_memory / 1e9:.2f} GB"
+            )
         else:
-            print("⚠️  WARNING: CUDA device specified but torch.cuda.is_available() = False")
-    print("="*70 + "\n")
+            print(
+                "⚠️  WARNING: CUDA device specified but torch.cuda.is_available() = False"
+            )
+    print("=" * 70 + "\n")
 
     # ---- Resume from checkpoint ---------------------------------------------
     start_epoch = 1
@@ -2043,21 +2125,25 @@ def train(config: Config, timestamp: str | None = None):
     resume_path = getattr(config.training, "resume_from", "") or ""
     if resume_path and Path(resume_path).is_file():
         print(f"Resuming training state from checkpoint: {resume_path}")
-        ckpt = torch.load(resume_path, map_location=config.training.device, weights_only=False)
+        ckpt = torch.load(
+            resume_path, map_location=config.training.device, weights_only=False
+        )
         # Model weights were already loaded in create_model(), only load optimizer/scheduler/history
-        
+
         # Try to load optimizer state, but skip if parameter groups have changed
         # (happens when extending model with new prompts)
-        has_new_prompts = bool(param_groups['new_prompts'])
-        has_frozen_prompts = bool(param_groups['frozen_prompts'])
+        has_new_prompts = bool(param_groups["new_prompts"])
+        has_frozen_prompts = bool(param_groups["frozen_prompts"])
         # Only consider it "extending" if there are truly NEW prompts being injected
         # (not just continuing to train existing prompts)
         is_extending = has_new_prompts or has_frozen_prompts
-        
+
         if is_extending:
             print("  ⚠️  Model is being extended with new/frozen prompts")
             print("     Skipping optimizer state loading (will start fresh)")
-            print("     This is expected and safe - Adam will build new momentum for all parameters")
+            print(
+                "     This is expected and safe - Adam will build new momentum for all parameters"
+            )
         else:
             # Continue fine-tuning mode: same prompts as before
             try:
@@ -2066,10 +2152,10 @@ def train(config: Config, timestamp: str | None = None):
             except Exception as e:
                 print(f"  ⚠️  Could not load optimizer state: {e}")
                 print("     Starting with fresh optimizer state")
-        
+
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         global_step = int(ckpt.get("global_step", 0))
-        
+
         # Reset best_val_loss ONLY when extending with new prompts (not when continuing all prompts)
         # Otherwise new prompts won't get a chance to save checkpoints
         # But if all prompts are continuing, we should keep the previous best_val_loss
@@ -2078,13 +2164,15 @@ def train(config: Config, timestamp: str | None = None):
             best_val_loss = float("inf")
             epochs_without_improvement = 0
             print("  ⚠️  Resetting best_val_loss to inf (new prompts need to learn)")
-            print(f"     Previous checkpoint had val_loss: {ckpt.get('val_loss', 'N/A')}")
+            print(
+                f"     Previous checkpoint had val_loss: {ckpt.get('val_loss', 'N/A')}"
+            )
         else:
             # All prompts are continuing - keep previous best_val_loss
             best_val_loss = float(ckpt.get("val_loss", float("inf")))
-        
+
         history = ckpt.get("history", history)
-        
+
         # Restore scheduler state so the LR curve continues seamlessly.
         if "scheduler_state_dict" in ckpt and not is_extending:
             # Only restore scheduler if we're continuing (not extending)
@@ -2093,18 +2181,20 @@ def train(config: Config, timestamp: str | None = None):
             print("  ✓ Loaded scheduler state")
         else:
             if is_extending:
-                print("  ⚠️  Starting fresh scheduler (will apply warmup from beginning)")
+                print(
+                    "  ⚠️  Starting fresh scheduler (will apply warmup from beginning)"
+                )
             else:
                 # Fallback for checkpoints saved before scheduler state was added:
                 # replay steps so the LR is consistent with where training left off.
                 print("  ⚠ No scheduler state in checkpoint – replaying steps …")
                 for _ in range(global_step):
                     scheduler.step()
-        
+
         # Restore GradScaler state (only relevant for fp16)
         if scaler is not None and "scaler_state_dict" in ckpt:
             scaler.load_state_dict(ckpt["scaler_state_dict"])
-        
+
         print(
             f"  Resumed at epoch {start_epoch}, global_step {global_step}, "
             f"best_val_loss {best_val_loss:.4f}, "
@@ -2276,7 +2366,7 @@ def main():
                 "webdataset_path must be set when use_webdataset=True. "
                 "Add webdataset_path to your training_config.yaml"
             )
-        
+
         print("\n" + "=" * 70)
         print("WebDataset Mode Enabled")
         print("=" * 70)
@@ -2284,13 +2374,13 @@ def main():
         print("  Skipping CSV dataset creation and metadata loading")
         print("  Data will be loaded directly from tar shards")
         print("=" * 70 + "\n")
-        
+
         # Set dummy df_path (not used in WebDataset mode but needed for validation)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         checkpoint_dir = Path(config.training.checkpoint_dir) / timestamp
         checkpoint_dir.mkdir(exist_ok=True, parents=True)
         config.data.df_path = str(checkpoint_dir / "webdataset_placeholder.csv")
-        
+
         # Save config and start training
         train(config, timestamp=timestamp)
         return

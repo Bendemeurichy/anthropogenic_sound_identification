@@ -171,7 +171,7 @@ data:
   background_only_prob: 0.3
 
   # How many background clips to mix together per sample
-  background_mix_n: 2
+  background_mix_n: 1
 
   # Each audio file is used this many times per epoch (with different
   # augmentations / offsets), effectively multiplying dataset size
@@ -180,13 +180,18 @@ data:
   # Probability of mixing a second target class into the mixture during training
   multi_coi_prob: 0.3
 
+  # Balance classes during training to prevent imbalanced datasets from
+  # causing one class to dominate. When True, samples from each COI class
+  # with equal probability regardless of dataset composition (recommended).
+  balance_classes: true
+
   # WebDataset configuration for HPC compressed data loading
   # Set use_webdataset: true to load from pre-compressed tar shards
   # instead of individual audio files (much faster on HPC scratch storage)
-  use_webdataset: false
+  use_webdataset: true
   # Path to WebDataset tar shards directory (e.g., $VSC_SCRATCH/webdataset_shards)
   # Only used when use_webdataset is true
-  webdataset_path: ""
+  webdataset_path: "$VSC_SCRATCH/webdataset_shards"
 
 model:
   # Path to the pretrained TUSS checkpoint directory (relative to train.py).
@@ -239,7 +244,7 @@ training:
 
   lr: 5.0e-5
   weight_decay: 1.0e-2
-  warmup_steps: 300 # linear LR warm-up
+  warmup_steps: 60 # linear LR warm-up
 
   clip_grad_norm: 5.0
 

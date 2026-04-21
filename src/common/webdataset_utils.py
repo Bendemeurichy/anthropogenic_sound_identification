@@ -39,6 +39,7 @@ References:
 
 import io
 import json
+import tempfile
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -46,6 +47,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import soundfile as sf
 import torch
 import torchaudio
 
@@ -200,6 +202,7 @@ class WebDatasetAudioLoader(AudioLoader):
         # In-memory sample cache for random access (limited size)
         self._sample_cache: Dict[str, Tuple[torch.Tensor, int, Dict]] = {}
         self._max_cache_size = 1000
+        self._decode_warning_count = 0
 
     def load_audio(
         self,
@@ -238,10 +241,37 @@ class WebDatasetAudioLoader(AudioLoader):
         return waveform, sr
 
     def _decode_audio(self, audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
-        """Decode audio from bytes (FLAC format expected)."""
-        buffer = io.BytesIO(audio_bytes)
-        waveform, sr = torchaudio.load(buffer, format="flac")
-        return waveform, sr
+        """Decode audio from bytes with robust fallbacks for HPC environments."""
+        if isinstance(audio_bytes, memoryview):
+            audio_bytes = audio_bytes.tobytes()
+
+        last_error = None
+
+        try:
+            audio_np, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=True)
+            waveform = torch.from_numpy(audio_np.T.copy())
+            return waveform, sr
+        except Exception as e:
+            last_error = e
+
+        try:
+            buffer = io.BytesIO(audio_bytes)
+            waveform, sr = torchaudio.load(buffer)
+            return waveform, sr
+        except Exception as e:
+            last_error = e
+
+        suffix = ".flac"
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix) as tmp:
+                tmp.write(audio_bytes)
+                tmp.flush()
+                waveform, sr = torchaudio.load(tmp.name)
+                return waveform, sr
+        except Exception as e:
+            last_error = e
+
+        raise RuntimeError(f"Failed to decode audio bytes: {last_error}")
 
     def _decode_json(self, json_bytes: bytes) -> Dict:
         """Decode JSON metadata from bytes."""
@@ -331,8 +361,18 @@ class WebDatasetAudioLoader(AudioLoader):
                 return None
 
             try:
-                buffer = io.BytesIO(audio_data)
-                waveform, sr = torchaudio.load(buffer, format="flac")
+                # Use robust decoding with fallbacks
+                if isinstance(audio_data, memoryview):
+                    audio_data = audio_data.tobytes()
+                
+                # Try soundfile first
+                try:
+                    audio_np, sr = sf.read(io.BytesIO(audio_data), dtype="float32", always_2d=True)
+                    waveform = torch.from_numpy(audio_np.T.copy())
+                except Exception:
+                    # Fallback to torchaudio
+                    buffer = io.BytesIO(audio_data)
+                    waveform, sr = torchaudio.load(buffer)
             except Exception:
                 return None
 
@@ -556,8 +596,18 @@ class WebDatasetWrapper(torch.utils.data.IterableDataset):
             return None
 
         try:
-            buffer = io.BytesIO(audio_data)
-            waveform, sr = torchaudio.load(buffer, format="flac")
+            # Use robust decoding with fallbacks
+            if isinstance(audio_data, memoryview):
+                audio_data = audio_data.tobytes()
+            
+            # Try soundfile first
+            try:
+                audio_np, sr = sf.read(io.BytesIO(audio_data), dtype="float32", always_2d=True)
+                waveform = torch.from_numpy(audio_np.T.copy())
+            except Exception:
+                # Fallback to torchaudio
+                buffer = io.BytesIO(audio_data)
+                waveform, sr = torchaudio.load(buffer)
         except Exception:
             return None
 
@@ -627,6 +677,8 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         dataset_filter: Optional[str] = None,
         coi_ratio: float = 0.25,
         seed: int = 42,
+        multi_coi_prob: float = 0.0,
+        balance_classes: bool = True,
     ):
         """
         Args:
@@ -646,6 +698,9 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
                           Only samples from matching datasets will be used as COI
             coi_ratio: Target ratio of COI samples in yielded data (default 0.25)
             seed: Random seed for reproducibility (default 42)
+            multi_coi_prob: Probability of mixing multiple COI classes in same sample (default 0.0)
+            balance_classes: If True, sample from each COI class with equal probability
+                           to prevent class imbalance (default True for training splits)
         """
         if not WEBDATASET_AVAILABLE:
             raise ImportError("webdataset is required. Install with: pip install webdataset")
@@ -664,9 +719,12 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         self.dataset_filter = dataset_filter
         self.coi_ratio = coi_ratio
         self.seed = seed
+        self.multi_coi_prob = multi_coi_prob if split == "train" else 0.0
+        self.balance_classes = balance_classes and split == "train"  # Only balance during training
 
         self._resampler_cache = ResamplerCache(max_size=8)
         self._rng = np.random.default_rng(seed)  # Use provided seed
+        self._decode_warning_count = 0
         
         # Try to load dataset size from manifest for __len__
         self._dataset_size = self._load_dataset_size()
@@ -727,37 +785,52 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         # Fallback: return a reasonable default (1000 samples per shard)
         return len(self.tar_paths) * 1000
 
-    def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
+    def __iter__(self) -> Iterator[torch.Tensor]:
         """
-        Iterate over samples yielding (mixture, sources) tuples.
+        Iterate over samples yielding source tensors.
+
+        This mirrors the file-based training dataset interface used by the
+        training loop, which expects only the stacked source tensor and builds
+        the mixture later via prepare_batch().
 
         Returns:
-            Tuples of (mixture, sources_tensor) where:
-                - mixture: (T,) or (C, T) if stereo
-                - sources_tensor: (n_src, T) or (n_src, C, T) with COI followed by background
+            Tensors of shape (n_src, T) or (n_src, C, T) with COI source(s)
+            followed by the background channel.
         """
-        url_pattern = " ".join(self.tar_paths)
+        urls = list(self.tar_paths)
 
-        # Create pipeline
-        dataset = wds.WebDataset(url_pattern, shardshuffle=self.shuffle)
+        # Create pipeline. Pass the shard URLs as a list so WebDataset opens
+        # each tar individually instead of treating a space-joined string as
+        # one invalid filename.
+        dataset = wds.WebDataset(urls, shardshuffle=(100 if self.shuffle else False))
         if self.shuffle:
             dataset = dataset.shuffle(1000)
 
         # Collect COI and background samples separately with filtering
-        coi_buffer = []
+        # For multi-class, maintain separate buffers per COI class
+        coi_buffers_by_class: List[List[Tuple[torch.Tensor, Dict]]] = [
+            [] for _ in range(self.n_coi_classes)
+        ]
         bg_buffer = []
         buffer_size = 100
         # Use smaller min buffer for validation (may have fewer samples per split)
         min_buffer_size = 5 if self.split in ["val", "test"] else 10
         
-        coi_count = 0
+        coi_counts = [0 for _ in range(self.n_coi_classes)]
         bg_count = 0
         yielded_count = 0
+        decoded_count = 0
+        
+        # For balanced sampling: track how many samples we need to yield from each class
+        # to achieve balance
+        yielded_per_class = [0 for _ in range(self.n_coi_classes)]
 
         for sample in dataset:
             result = self._decode_sample(sample)
             if result is None:
                 continue
+
+            decoded_count += 1
 
             waveform, metadata = result
             
@@ -766,21 +839,49 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
             is_valid_bg = self._is_valid_background(metadata)
             
             if is_coi:  # Pure COI
-                coi_buffer.append((waveform, metadata))
-                coi_count += 1
+                # Determine which COI class this belongs to
+                coi_class_idx = self._infer_coi_class_from_label(metadata)
+                coi_buffers_by_class[coi_class_idx].append((waveform, metadata))
+                coi_counts[coi_class_idx] += 1
                 
                 # Keep COI buffer bounded
-                if len(coi_buffer) > buffer_size:
-                    coi_buffer.pop(0)
+                if len(coi_buffers_by_class[coi_class_idx]) > buffer_size:
+                    coi_buffers_by_class[coi_class_idx].pop(0)
+                
+                # Yield strategy depends on balance_classes setting
+                if self.balance_classes:
+                    # Balanced sampling: only yield if this class is underrepresented
+                    # Wait until we have samples in all class buffers
+                    all_classes_ready = all(
+                        len(buf) >= min_buffer_size for buf in coi_buffers_by_class
+                    ) and len(bg_buffer) >= min_buffer_size
                     
-                # Yield mixed samples once we have sufficient background samples
-                # Note: We yield every COI sample (coi_ratio is achieved by 
-                # sampling backgrounds accordingly in the file-based approach,
-                # but here we stream all COI samples)
-                if len(bg_buffer) >= min_buffer_size:
-                    mix = self._create_mixture(coi_buffer.pop(0), bg_buffer)
-                    yielded_count += 1
-                    yield mix
+                    if all_classes_ready:
+                        # Find the class that has been yielded the least
+                        min_yielded = min(yielded_per_class)
+                        underrepresented_classes = [
+                            i for i, count in enumerate(yielded_per_class)
+                            if count == min_yielded and len(coi_buffers_by_class[i]) > 0
+                        ]
+                        
+                        if underrepresented_classes:
+                            # Sample from underrepresented classes
+                            selected_class = self._rng.choice(underrepresented_classes)
+                            sources = self._create_mixture_multiclass(
+                                coi_buffers_by_class, selected_class, bg_buffer
+                            )
+                            yielded_per_class[selected_class] += 1
+                            yielded_count += 1
+                            yield sources
+                else:
+                    # Unbalanced sampling: yield immediately when COI arrives
+                    if len(bg_buffer) >= min_buffer_size:
+                        sources = self._create_mixture_multiclass(
+                            coi_buffers_by_class, coi_class_idx, bg_buffer
+                        )
+                        yielded_per_class[coi_class_idx] += 1
+                        yielded_count += 1
+                        yield sources
                     
             elif is_valid_bg:  # Valid background (no COI labels, not empty)
                 bg_buffer.append((waveform, metadata))
@@ -790,24 +891,72 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
                     bg_buffer.pop(0)  # Keep buffer bounded
 
                 # Occasionally yield background-only sample
-                # The file-based approach includes all sampled backgrounds in training,
-                # but here we only yield background-only with a probability
                 if (
                     self.background_only_prob > 0
                     and self._rng.random() < self.background_only_prob
                     and len(bg_buffer) >= min_buffer_size
                 ):
-                    bg_only = self._create_background_only(bg_buffer)
+                    bg_only_sources = self._create_background_only(bg_buffer)
                     yielded_count += 1
-                    yield bg_only
+                    yield bg_only_sources
             # else: Mixed sample or invalid - skip completely
         
-        # IMPORTANT: Yield remaining COI samples in buffer after streaming completes
+        # IMPORTANT: Yield remaining COI samples in buffers after streaming completes
         # This ensures we don't drop COI samples at the end due to insufficient backgrounds
-        while len(coi_buffer) > 0 and len(bg_buffer) > 0:
-            mix = self._create_mixture(coi_buffer.pop(0), bg_buffer)
-            yielded_count += 1
-            yield mix
+        if len(bg_buffer) > 0:
+            if self.balance_classes:
+                # Balanced mode: yield from classes in order of least represented
+                while any(len(buf) > 0 for buf in coi_buffers_by_class):
+                    # Find class with lowest yield count that still has samples
+                    available_classes = [
+                        i for i in range(self.n_coi_classes)
+                        if len(coi_buffers_by_class[i]) > 0
+                    ]
+                    if not available_classes:
+                        break
+                    
+                    selected_class = min(
+                        available_classes,
+                        key=lambda i: yielded_per_class[i]
+                    )
+                    
+                    sources = self._create_mixture_multiclass(
+                        coi_buffers_by_class, selected_class, bg_buffer
+                    )
+                    yielded_per_class[selected_class] += 1
+                    yielded_count += 1
+                    yield sources
+            else:
+                # Unbalanced mode: yield all remaining samples
+                for class_idx in range(self.n_coi_classes):
+                    while len(coi_buffers_by_class[class_idx]) > 0:
+                        sources = self._create_mixture_multiclass(
+                            coi_buffers_by_class, class_idx, bg_buffer
+                        )
+                        yielded_per_class[class_idx] += 1
+                        yielded_count += 1
+                        yield sources
+
+        # Log class distribution for debugging
+        if yielded_count > 0 and self.n_coi_classes > 1:
+            class_dist = " ".join(
+                f"class{i}={yielded_per_class[i]}" for i in range(self.n_coi_classes)
+            )
+            print(
+                f"[WebDataset {self.split}] Yielded {yielded_count} samples: {class_dist} "
+                f"(balanced={self.balance_classes}, decoded={decoded_count}, "
+                f"coi_counts={coi_counts}, bg_count={bg_count})"
+            )
+
+        if yielded_count == 0:
+            raise RuntimeError(
+                "WebDataset yielded 0 training samples. "
+                f"split={self.split!r}, decoded={decoded_count}, "
+                f"coi_matches={coi_counts}, background_matches={bg_count}, "
+                f"target_classes={self.target_classes}, "
+                f"dataset_filter={self.dataset_filter!r}. "
+                "Check the resolved shard path and label names in the shard metadata."
+            )
 
     def _is_coi_sample(self, metadata: Dict) -> bool:
         """
@@ -943,9 +1092,12 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
             return None
 
         try:
-            buffer = io.BytesIO(audio_data)
-            waveform, sr = torchaudio.load(buffer, format="flac")
-        except Exception:
+            waveform, sr = self._decode_audio(audio_data)
+        except Exception as e:
+            key = sample.get("__key__", "unknown")
+            if self._decode_warning_count < 3:
+                warnings.warn(f"Failed to decode WebDataset sample {key}: {e}")
+                self._decode_warning_count += 1
             return None
 
         # Decode metadata
@@ -982,6 +1134,38 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         waveform = waveform[..., : self.segment_samples]
 
         return waveform, metadata
+
+    def _decode_audio(self, audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
+        """Decode audio bytes with soundfile first and torchaudio fallbacks."""
+        if isinstance(audio_bytes, memoryview):
+            audio_bytes = audio_bytes.tobytes()
+
+        last_error = None
+
+        try:
+            audio_np, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=True)
+            waveform = torch.from_numpy(audio_np.T.copy())
+            return waveform, sr
+        except Exception as e:
+            last_error = e
+
+        try:
+            buffer = io.BytesIO(audio_bytes)
+            waveform, sr = torchaudio.load(buffer)
+            return waveform, sr
+        except Exception as e:
+            last_error = e
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".flac") as tmp:
+                tmp.write(audio_bytes)
+                tmp.flush()
+                waveform, sr = torchaudio.load(tmp.name)
+                return waveform, sr
+        except Exception as e:
+            last_error = e
+
+        raise RuntimeError(f"Failed to decode audio bytes: {last_error}")
 
     def _create_empty_source(self) -> torch.Tensor:
         """Create an empty (silent) source tensor."""
@@ -1057,8 +1241,12 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         self,
         coi_sample: Tuple[torch.Tensor, Dict],
         bg_buffer: List[Tuple[torch.Tensor, Dict]],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Create a mixture from COI and background samples."""
+    ) -> torch.Tensor:
+        """Create stacked source tensors from COI and background samples.
+        
+        DEPRECATED: Use _create_mixture_multiclass for multi-class support.
+        Kept for backwards compatibility with single-class scenarios.
+        """
         coi_waveform, coi_metadata = coi_sample
 
         # Get random background
@@ -1083,14 +1271,70 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         sources.append(bg_waveform)
 
         sources_tensor = torch.stack(sources, dim=0)
-        mixture = sources_tensor.sum(dim=0)
+        return sources_tensor
 
-        return mixture, sources_tensor
+    def _create_mixture_multiclass(
+        self,
+        coi_buffers_by_class: List[List[Tuple[torch.Tensor, Dict]]],
+        primary_class_idx: int,
+        bg_buffer: List[Tuple[torch.Tensor, Dict]],
+    ) -> torch.Tensor:
+        """Create stacked source tensors with optional multi-COI mixing.
+        
+        Args:
+            coi_buffers_by_class: List of buffers, one per COI class
+            primary_class_idx: Index of the primary COI class to use
+            bg_buffer: List of background samples
+            
+        Returns:
+            Source tensor of shape (n_coi_classes + 1, T)
+        """
+        # Pop primary COI sample
+        if len(coi_buffers_by_class[primary_class_idx]) == 0:
+            # Fallback: create empty sources (shouldn't happen if called correctly)
+            sources = [self._create_empty_source() for _ in range(self.n_coi_classes)]
+            bg_idx = self._rng.integers(len(bg_buffer))
+            sources.append(bg_buffer[bg_idx][0])
+            return torch.stack(sources, dim=0)
+        
+        primary_waveform, primary_metadata = coi_buffers_by_class[primary_class_idx].pop(0)
+        
+        # Get random background
+        bg_idx = self._rng.integers(len(bg_buffer))
+        bg_waveform, _ = bg_buffer[bg_idx]
+
+        # Initialize sources - all empty except primary class
+        sources = [self._create_empty_source() for _ in range(self.n_coi_classes)]
+        sources[primary_class_idx] = primary_waveform
+        
+        # Multi-COI mixing: add a second COI class with probability multi_coi_prob
+        if (
+            self.n_coi_classes > 1
+            and self.multi_coi_prob > 0
+            and self._rng.random() < self.multi_coi_prob
+        ):
+            # Find other classes that have available samples
+            available_classes = [
+                i for i in range(self.n_coi_classes)
+                if i != primary_class_idx and len(coi_buffers_by_class[i]) > 0
+            ]
+            
+            if available_classes:
+                # Pick a random secondary class
+                secondary_class_idx = self._rng.choice(available_classes)
+                # Pick a random sample from that class's buffer (don't pop - reuse)
+                secondary_idx = self._rng.integers(len(coi_buffers_by_class[secondary_class_idx]))
+                secondary_waveform, _ = coi_buffers_by_class[secondary_class_idx][secondary_idx]
+                sources[secondary_class_idx] = secondary_waveform
+
+        sources.append(bg_waveform)
+        sources_tensor = torch.stack(sources, dim=0)
+        return sources_tensor
 
     def _create_background_only(
         self, bg_buffer: List[Tuple[torch.Tensor, Dict]]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Create a background-only sample."""
+    ) -> torch.Tensor:
+        """Create stacked source tensors for a background-only sample."""
         # Mix multiple backgrounds
         n_mix = min(2, len(bg_buffer))
         indices = self._rng.choice(len(bg_buffer), size=n_mix, replace=False)
@@ -1101,6 +1345,4 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         sources.append(bg_waveform)
 
         sources_tensor = torch.stack(sources, dim=0)
-        mixture = sources_tensor.sum(dim=0)
-
-        return mixture, sources_tensor
+        return sources_tensor
