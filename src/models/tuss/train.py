@@ -291,6 +291,7 @@ class DataConfig:
     background_mix_n: int = 2
     augment_multiplier: int = 2
     multi_coi_prob: float = 0.3
+    balance_classes: bool = False
     # WebDataset configuration
     use_webdataset: bool = False
     webdataset_path: str = ""
