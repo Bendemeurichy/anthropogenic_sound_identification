@@ -63,6 +63,89 @@ except ImportError:
 
 
 # =============================================================================
+# Audio Augmentations
+# =============================================================================
+
+
+class AudioAugmentations:
+    """Audio augmentation utilities for training."""
+    
+    @staticmethod
+    def time_stretch(waveform: torch.Tensor, rate: float) -> torch.Tensor:
+        """Time stretch waveform by given rate."""
+        if rate == 1.0:
+            return waveform
+        orig_len = waveform.shape[-1]
+        stretched = (
+            torch.nn.functional.interpolate(
+                waveform.unsqueeze(0).unsqueeze(0),
+                scale_factor=1.0 / rate,
+                mode="linear",
+                align_corners=False,
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
+        if stretched.shape[-1] > orig_len:
+            return stretched[:orig_len]
+        return torch.nn.functional.pad(stretched, (0, orig_len - stretched.shape[-1]))
+
+    @staticmethod
+    def add_noise(waveform: torch.Tensor, noise_level: float = 0.005) -> torch.Tensor:
+        """Add gaussian noise to waveform."""
+        return waveform + torch.randn_like(waveform) * noise_level
+
+    @staticmethod
+    def gain(waveform: torch.Tensor, gain_db: float) -> torch.Tensor:
+        """Apply gain in dB to waveform."""
+        return waveform * (10 ** (gain_db / 20.0))
+
+    @staticmethod
+    def time_shift(waveform: torch.Tensor, shift_samples: int) -> torch.Tensor:
+        """Circularly shift waveform by given number of samples."""
+        return torch.roll(waveform, shifts=shift_samples, dims=-1)
+
+    @staticmethod
+    def low_pass_filter(
+        waveform: torch.Tensor, cutoff_ratio: float = 0.8
+    ) -> torch.Tensor:
+        """Apply low-pass filter with given cutoff ratio."""
+        if cutoff_ratio >= 1.0:
+            return waveform
+        fft = torch.fft.rfft(waveform)
+        n_freqs = fft.shape[-1]
+        cutoff_idx = int(n_freqs * cutoff_ratio)
+        mask = torch.ones(n_freqs, device=waveform.device)
+        rolloff_width = max(1, n_freqs // 20)
+        for i in range(rolloff_width):
+            if cutoff_idx + i < n_freqs:
+                mask[cutoff_idx + i] = 1.0 - (i / rolloff_width)
+        mask[cutoff_idx + rolloff_width :] = 0.0
+        return torch.fft.irfft(fft * mask, n=waveform.shape[-1])
+
+    @staticmethod
+    def random_augment(
+        waveform: torch.Tensor, rng: np.random.Generator
+    ) -> torch.Tensor:
+        """Apply random augmentations to waveform (matches train.py behavior)."""
+        aug = waveform.clone()
+        if rng.random() < 0.5:
+            aug = AudioAugmentations.time_stretch(aug, rng.uniform(0.9, 1.1))
+        if rng.random() < 0.7:
+            aug = AudioAugmentations.gain(aug, rng.uniform(-6, 6))
+        if rng.random() < 0.4:
+            aug = AudioAugmentations.add_noise(aug, rng.uniform(0.001, 0.01))
+        if rng.random() < 0.5:
+            max_shift = int(aug.shape[-1] * 0.1)
+            aug = AudioAugmentations.time_shift(
+                aug, int(rng.integers(-max_shift, max_shift + 1))
+            )
+        if rng.random() < 0.3:
+            aug = AudioAugmentations.low_pass_filter(aug, rng.uniform(0.6, 0.95))
+        return aug
+
+
+# =============================================================================
 # Audio Loading Interface
 # =============================================================================
 
@@ -679,6 +762,7 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         seed: int = 42,
         multi_coi_prob: float = 0.0,
         balance_classes: bool = True,
+        coi_class_multipliers: Optional[List[int]] = None,
     ):
         """
         Args:
@@ -701,6 +785,10 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
             multi_coi_prob: Probability of mixing multiple COI classes in same sample (default 0.0)
             balance_classes: If True, sample from each COI class with equal probability
                            to prevent class imbalance (default True for training splits)
+            coi_class_multipliers: List of integers for per-class augmentation multipliers.
+                                 E.g., [16, 1] will duplicate class-0 samples 16x to balance
+                                 a 1:16 imbalance. Only applied during training. If None,
+                                 all classes use multiplier 1.
         """
         if not WEBDATASET_AVAILABLE:
             raise ImportError("webdataset is required. Install with: pip install webdataset")
@@ -721,6 +809,20 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         self.seed = seed
         self.multi_coi_prob = multi_coi_prob if split == "train" else 0.0
         self.balance_classes = balance_classes and split == "train"  # Only balance during training
+        
+        # Per-class augmentation multipliers (only applied during training)
+        if coi_class_multipliers is None:
+            self.coi_class_multipliers = [1] * n_coi_classes
+        else:
+            if len(coi_class_multipliers) != n_coi_classes:
+                raise ValueError(
+                    f"coi_class_multipliers length ({len(coi_class_multipliers)}) "
+                    f"must match n_coi_classes ({n_coi_classes})"
+                )
+            # Only apply multipliers during training
+            self.coi_class_multipliers = (
+                list(coi_class_multipliers) if split == "train" else [1] * n_coi_classes
+            )
 
         self._resampler_cache = ResamplerCache(max_size=8)
         self._rng = np.random.default_rng(seed)  # Use provided seed
@@ -841,11 +943,17 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
             if is_coi:  # Pure COI
                 # Determine which COI class this belongs to
                 coi_class_idx = self._infer_coi_class_from_label(metadata)
-                coi_buffers_by_class[coi_class_idx].append((waveform, metadata))
-                coi_counts[coi_class_idx] += 1
+                
+                # Apply per-class augmentation multiplier
+                # Duplicate samples from minority classes to balance dataset
+                multiplier = self.coi_class_multipliers[coi_class_idx]
+                for _ in range(multiplier):
+                    coi_buffers_by_class[coi_class_idx].append((waveform, metadata))
+                
+                coi_counts[coi_class_idx] += 1  # Count unique samples, not duplicates
                 
                 # Keep COI buffer bounded
-                if len(coi_buffers_by_class[coi_class_idx]) > buffer_size:
+                if len(coi_buffers_by_class[coi_class_idx]) > buffer_size * multiplier:
                     coi_buffers_by_class[coi_class_idx].pop(0)
                 
                 # Yield strategy depends on balance_classes setting
@@ -942,10 +1050,15 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
             class_dist = " ".join(
                 f"class{i}={yielded_per_class[i]}" for i in range(self.n_coi_classes)
             )
+            multipliers_str = (
+                f", multipliers={self.coi_class_multipliers}"
+                if any(m > 1 for m in self.coi_class_multipliers)
+                else ""
+            )
             print(
                 f"[WebDataset {self.split}] Yielded {yielded_count} samples: {class_dist} "
                 f"(balanced={self.balance_classes}, decoded={decoded_count}, "
-                f"coi_counts={coi_counts}, bg_count={bg_count})"
+                f"coi_counts={coi_counts}, bg_count={bg_count}{multipliers_str})"
             )
 
         if yielded_count == 0:
@@ -1135,6 +1248,10 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
 
         return waveform, metadata
 
+    def _apply_augmentation(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Apply random augmentations to waveform (training only)."""
+        return AudioAugmentations.random_augment(waveform, self._rng)
+
     def _decode_audio(self, audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
         """Decode audio bytes with soundfile first and torchaudio fallbacks."""
         if isinstance(audio_bytes, memoryview):
@@ -1248,6 +1365,10 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         Kept for backwards compatibility with single-class scenarios.
         """
         coi_waveform, coi_metadata = coi_sample
+        
+        # Apply augmentation if enabled (training only)
+        if self.augment:
+            coi_waveform = self._apply_augmentation(coi_waveform)
 
         # Get random background
         bg_idx = self._rng.integers(len(bg_buffer))
@@ -1299,6 +1420,10 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         
         primary_waveform, primary_metadata = coi_buffers_by_class[primary_class_idx].pop(0)
         
+        # Apply augmentation if enabled (training only)
+        if self.augment:
+            primary_waveform = self._apply_augmentation(primary_waveform)
+        
         # Get random background
         bg_idx = self._rng.integers(len(bg_buffer))
         bg_waveform, _ = bg_buffer[bg_idx]
@@ -1325,6 +1450,11 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
                 # Pick a random sample from that class's buffer (don't pop - reuse)
                 secondary_idx = self._rng.integers(len(coi_buffers_by_class[secondary_class_idx]))
                 secondary_waveform, _ = coi_buffers_by_class[secondary_class_idx][secondary_idx]
+                
+                # Apply augmentation if enabled
+                if self.augment:
+                    secondary_waveform = self._apply_augmentation(secondary_waveform)
+                
                 sources[secondary_class_idx] = secondary_waveform
 
         sources.append(bg_waveform)

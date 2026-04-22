@@ -185,6 +185,12 @@ data:
   # with equal probability regardless of dataset composition (recommended).
   balance_classes: true
 
+  # Per-class augmentation multipliers to address dataset imbalances.
+  # List of integers, one per COI class. E.g., [16, 1] duplicates class-0
+  # samples 16x to balance a 1:16 ratio with class-1. Only applied during
+  # training. Set to null or [1, 1, ...] to disable.
+  coi_class_multipliers: [5, 1] # Airplane=4x, Birds=1x to balance 102:1648 ratio a bit
+
   # WebDataset configuration for HPC compressed data loading
   # Set use_webdataset: true to load from pre-compressed tar shards
   # instead of individual audio files (much faster on HPC scratch storage)
@@ -234,7 +240,7 @@ model:
   variance_normalization: true
 
 training:
-  batch_size: 32 # per-GPU batch size (keep low if VRAM is tight)
+  batch_size: 20 # per-GPU batch size (keep low if VRAM is tight)
   grad_accum_steps: 4 # effective batch = batch_size × grad_accum_steps = 16
   use_amp: true # mixed-precision training; disable if unstable
   amp_dtype: "bf16" # "bf16" (recommended, matches pretrained model) or "fp16"
@@ -260,6 +266,31 @@ training:
   # After stabilization_epochs, if the backbone is not frozen (freeze_backbone=false),
   # it will train at lr * backbone_lr_multiplier
   backbone_lr_multiplier: 0.05
+
+  # -----------------------------------------------------------------------
+  # PROMPT VARIABILITY (like base TUSS model training)
+  # -----------------------------------------------------------------------
+  # Enable variable prompt configurations during training to improve
+  # inference flexibility. When enabled, each batch randomly drops COI
+  # prompts (keeping background), so the model learns to work with
+  # different prompt combinations (similar to base TUSS training).
+  #
+  # Benefits:
+  #   - Inference with subset prompts (e.g., ["airplane", "background"])
+  #     performs as well as full prompts (e.g., ["airplane", "birds", "background"])
+  #   - Model learns flexible cross-prompt attention patterns
+  #   - Enables efficient single-class inference without degradation
+  #
+  # Recommended settings:
+  #   variable_prompts: true
+  #   prompt_dropout_prob: 0.5  (50% chance to drop each COI prompt)
+  #   min_coi_prompts: 0        (allow background-only samples)
+  #
+  # Note: Validation always uses all prompts for consistent metrics.
+  # -----------------------------------------------------------------------
+  variable_prompts: true # Enable variable prompt configurations during training
+  prompt_dropout_prob: 0.5 # Probability of dropping each COI prompt per batch
+  min_coi_prompts: 0 # Minimum COI prompts per sample (0 = allow background-only)
 
   # Loss weights
   coi_weight: 2.0 # up-weight COI streams relative to background

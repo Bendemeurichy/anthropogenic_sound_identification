@@ -28,6 +28,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -292,6 +293,7 @@ class DataConfig:
     augment_multiplier: int = 2
     multi_coi_prob: float = 0.3
     balance_classes: bool = False
+    coi_class_multipliers: Optional[list] = None  # Per-class augmentation multipliers
     # WebDataset configuration
     use_webdataset: bool = False
     webdataset_path: str = ""
@@ -343,6 +345,10 @@ class TrainingConfig:
     )
     stabilization_epochs: int = 0  # Number of epochs to freeze old prompts and backbone
     backbone_lr_multiplier: float = 0.05  # LR multiplier for backbone when unfreezing
+    # Prompt variability settings (similar to base TUSS training)
+    variable_prompts: bool = False  # Enable variable prompt configurations during training
+    prompt_dropout_prob: float = 0.5  # Probability of dropping each COI prompt during training
+    min_coi_prompts: int = 0  # Minimum number of COI prompts per sample (0 = allow background-only)
 
 
 @dataclass
@@ -425,12 +431,20 @@ class COIWeightedSNRLoss(torch.nn.Module):
             ref: (B, n_src, T)
         Returns:
             scalar loss
+            
+        Note:
+            When using variable prompts, n_src may differ from self.n_src.
+            The function infers the actual n_src from the tensor shape.
         """
+        # Infer actual n_src from tensor shape (supports variable prompts)
+        actual_n_src = est.shape[1]
+        actual_n_coi = actual_n_src - 1  # Last source is always background
+        
         # snr_with_zeroref_loss returns (B, n_src) with solve_perm=False
         per_src = snr_with_zeroref_loss(
             est,
             ref,
-            n_src=self.n_src,
+            n_src=actual_n_src,  # Use actual n_src from tensor
             snr_max=self.snr_max,
             zero_ref_loss_weight=self.zero_ref_loss_weight,
             solve_perm=False,
@@ -438,7 +452,15 @@ class COIWeightedSNRLoss(torch.nn.Module):
         )  # (B, n_src)
 
         # COI heads are 0 … n_coi-1, background is last
-        coi_loss = per_src[:, : self.n_coi].mean(dim=-1)  # (B,)
+        # Only average over ACTIVE COI classes (non-silent channels)
+        # This prevents silent classes from dominating the loss gradient
+        ref_power = (ref[:, :actual_n_coi] ** 2).mean(dim=-1)  # (B, actual_n_coi)
+        is_active = ref_power > SILENCE_ENERGY_EPS  # (B, actual_n_coi)
+        
+        coi_losses = per_src[:, :actual_n_coi]  # (B, actual_n_coi)
+        active_count = is_active.sum(dim=-1).clamp(min=1)  # (B,), prevent div by zero
+        coi_loss = (coi_losses * is_active.float()).sum(dim=-1) / active_count  # (B,)
+        
         bg_loss = per_src[:, -1]  # (B,)
 
         weighted = (self.coi_weight * coi_loss + bg_loss) / (self.coi_weight + 1.0)
@@ -841,7 +863,7 @@ class AudioDataset(Dataset):
                 coi_audio = self._load_audio(
                     filepath, frame_offset=offset, num_frames=seg_frames
                 )
-                if self.augment and augment_variant > 0:
+                if self.augment:
                     coi_audio = AudioAugmentations.random_augment(coi_audio, self._rng)
 
                 sources = [
@@ -987,17 +1009,15 @@ def prepare_batch(
     mixture = torch.where(is_silent, torch.zeros_like(mixture), mixture)
 
     # Normalise each clean source with the mixture's mean/std.
-    # Each source is zero-centred around its own mean (so DC offsets don't
-    # leak between sources) but scaled by the shared std.
+    # Use mix_mean for all sources to preserve additivity:
+    # mixture = sum(norm_cois) + norm_bg
     norm_cois = []
     for c in cois:
-        c_mean = c.mean(dim=-1, keepdim=True)
-        normed = (c - c_mean) / mix_std_safe
+        normed = (c - mix_mean) / mix_std_safe
         normed = torch.where(is_silent, torch.zeros_like(normed), normed)
         norm_cois.append(normed)
 
-    bg_mean = bg_scaled.mean(dim=-1, keepdim=True)
-    norm_bg = (bg_scaled - bg_mean) / mix_std_safe
+    norm_bg = (bg_scaled - mix_mean) / mix_std_safe
     norm_bg = torch.where(is_silent, torch.zeros_like(norm_bg), norm_bg)
 
     clean_wavs = torch.stack(norm_cois + [norm_bg], dim=1)  # (B, n_src, T)
@@ -1006,6 +1026,104 @@ def prepare_batch(
 
 def check_finite(*tensors) -> bool:
     return all(torch.isfinite(t).all() for t in tensors)
+
+
+def generate_variable_prompts(
+    coi_prompts: list[str],
+    bg_prompt: str,
+    batch_size: int,
+    dropout_prob: float = 0.5,
+    min_coi: int = 0,
+    rng: np.random.Generator | None = None,
+) -> list[list[str]]:
+    """Generate variable prompt configurations for a batch.
+    
+    Randomly drops COI prompts to create variable n_src configurations,
+    similar to the base TUSS model's training strategy.
+    
+    Args:
+        coi_prompts: List of COI prompt names (e.g., ["airplane", "birds"])
+        bg_prompt: Background prompt name (e.g., "background")
+        batch_size: Number of samples in batch
+        dropout_prob: Probability of dropping each COI prompt
+        min_coi: Minimum number of COI prompts to keep (0 = allow background-only)
+        rng: Random number generator for reproducibility
+        
+    Returns:
+        List of prompt lists, one per batch sample.
+        Each inner list has variable length (min_coi+1 to len(coi_prompts)+1)
+        
+    Examples:
+        >>> generate_variable_prompts(["airplane", "birds"], "background", 3, 0.5, 0)
+        [["airplane", "background"], 
+         ["airplane", "birds", "background"],
+         ["birds", "background"]]
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    n_coi = len(coi_prompts)
+    min_coi = max(0, min(min_coi, n_coi))  # Clamp to valid range
+    
+    batch_prompts = []
+    for _ in range(batch_size):
+        # Randomly select which COI prompts to include
+        keep_mask = rng.random(n_coi) > dropout_prob
+        
+        # Ensure minimum number of COI prompts
+        n_kept = keep_mask.sum()
+        if n_kept < min_coi:
+            # Randomly enable additional prompts to reach minimum
+            disabled_indices = np.where(~keep_mask)[0]
+            enable_count = min_coi - n_kept
+            enable_indices = rng.choice(disabled_indices, size=enable_count, replace=False)
+            keep_mask[enable_indices] = True
+        
+        # Build prompt list for this sample
+        sample_prompts = [coi_prompts[i] for i in range(n_coi) if keep_mask[i]]
+        sample_prompts.append(bg_prompt)  # Always include background
+        
+        batch_prompts.append(sample_prompts)
+    
+    return batch_prompts
+
+
+def select_sources_for_prompts(
+    clean_wavs: torch.Tensor,
+    all_coi_prompts: list[str],
+    bg_prompt: str,
+    selected_prompts: list[str],
+) -> torch.Tensor:
+    """Select and reorder source channels to match variable prompt configuration.
+    
+    Args:
+        clean_wavs: (B, n_src_full, T) - full source tensor with all COI classes + background
+        all_coi_prompts: Complete list of COI prompts (e.g., ["airplane", "birds"])
+        bg_prompt: Background prompt name
+        selected_prompts: Variable prompts for this batch (e.g., ["airplane", "background"])
+        
+    Returns:
+        Tensor (B, n_src_selected, T) with sources matching selected_prompts order
+        
+    Example:
+        clean_wavs.shape = (B, 3, T)  # [airplane, birds, background]
+        all_coi_prompts = ["airplane", "birds"]
+        selected_prompts = ["birds", "background"]
+        
+        Returns: (B, 2, T)  # [birds, background] with airplane removed
+    """
+    B, n_src_full, T = clean_wavs.shape
+    device = clean_wavs.device
+    
+    # Build mapping from prompt name to channel index in clean_wavs
+    prompt_to_idx = {prompt: i for i, prompt in enumerate(all_coi_prompts)}
+    prompt_to_idx[bg_prompt] = len(all_coi_prompts)  # Background is last channel
+    
+    # Select channels in the order specified by selected_prompts
+    selected_indices = [prompt_to_idx[p] for p in selected_prompts]
+    selected_wavs = clean_wavs[:, selected_indices, :]
+    
+    return selected_wavs
 
 
 # =============================================================================
@@ -1026,6 +1144,13 @@ def train_epoch(
     snr_range: tuple[float, float] = (-5.0, 5.0),
     scaler: torch.amp.GradScaler | None = None,
     scheduler=None,
+    # Variable prompts configuration (like base TUSS training)
+    variable_prompts: bool = False,
+    coi_prompts: list[str] | None = None,
+    bg_prompt: str | None = None,
+    prompt_dropout_prob: float = 0.5,
+    min_coi_prompts: int = 0,
+    epoch_seed: int = 0,
 ) -> tuple[float, int, list[float]]:
     model.train()
     running_loss, n_samples = 0.0, 0
@@ -1046,6 +1171,9 @@ def train_epoch(
     optimizer.zero_grad(set_to_none=True)
     optimizer_step = 0
     has_pending_grads = False
+    
+    # Initialize RNG for variable prompts (deterministic per epoch)
+    prompt_rng = np.random.default_rng(epoch_seed) if variable_prompts else None
 
     pbar = progress_bar(dataloader, desc="Training")
     for step_idx, sources in enumerate(pbar, start=1):
@@ -1059,8 +1187,29 @@ def train_epoch(
             grad_norms.append(float("nan"))
             continue
 
-        # Build per-batch prompts list; length == B, each sub-list has n_src strings
-        prompts = prompts_batch_template[:B]
+        # Build per-batch prompts list
+        # With variable_prompts: generate new prompt config for each batch
+        # Without variable_prompts: use fixed template (backward compatible)
+        if variable_prompts and coi_prompts is not None and bg_prompt is not None:
+            # Generate single prompt configuration for this batch
+            # All samples in batch use same prompts (required by TUSS architecture)
+            batch_prompt_config = generate_variable_prompts(
+                coi_prompts, bg_prompt, batch_size=1,
+                dropout_prob=prompt_dropout_prob,
+                min_coi=min_coi_prompts,
+                rng=prompt_rng
+            )[0]
+            prompts = [batch_prompt_config] * B
+            
+            # CRITICAL: Select corresponding ground truth channels to match variable prompts
+            # clean_wavs from dataset: (B, n_coi_full+1, T) = [airplane, birds, background]
+            # If prompts = ["birds", "background"], we need clean_wavs = (B, 2, T) = [birds, background]
+            clean_wavs = select_sources_for_prompts(
+                clean_wavs, coi_prompts, bg_prompt, batch_prompt_config
+            )
+        else:
+            # Fixed prompts (original behavior)
+            prompts = prompts_batch_template[:B]
 
         with autocast_ctx:
             outputs = model(mixture, prompts)
@@ -1092,6 +1241,15 @@ def train_epoch(
                 clean_wavs = clean_wavs[..., :T_est]
 
             loss = criterion(outputs.float(), clean_wavs.float())
+        
+        # Track per-class active samples for visibility (before deletion)
+        active_class_counts = None
+        actual_n_coi = clean_wavs.shape[1] - 1  # Infer from tensor (last channel is background)
+        if step_idx % 10 == 0 and actual_n_coi >= 1:
+            with torch.no_grad():
+                ref_power = (clean_wavs[:, :actual_n_coi] ** 2).mean(dim=-1)
+                is_active = ref_power > SILENCE_ENERGY_EPS
+                active_class_counts = is_active.sum(dim=0).cpu()  # (actual_n_coi,)
 
         del outputs, mixture, clean_wavs
 
@@ -1147,9 +1305,13 @@ def train_epoch(
 
         running_loss += batch_loss * B
         n_samples += B
-        pbar.set_postfix(
-            loss=f"{batch_loss:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}"
-        )
+        
+        # Show class distribution in progress bar
+        postfix = {"loss": f"{batch_loss:.4f}", "lr": f"{optimizer.param_groups[0]['lr']:.2e}"}
+        if active_class_counts is not None:
+            for cls_i in range(len(active_class_counts)):
+                postfix[f"c{cls_i}"] = int(active_class_counts[cls_i])
+        pbar.set_postfix(postfix)
 
         if str(device).startswith("cuda") and step_idx % 20 == 0:
             torch.cuda.empty_cache()
@@ -1210,6 +1372,7 @@ def validate_epoch(
     running_loss, n_samples = 0.0, 0
     val_step = 0
     per_class_sisnr: list[list[float]] = [[] for _ in range(criterion.n_coi)]
+    per_class_counts: list[int] = [0 for _ in range(criterion.n_coi)]
     bg_sisnr_vals: list[float] = []
 
     use_amp = use_amp and str(device).startswith("cuda")
@@ -1268,6 +1431,7 @@ def validate_epoch(
                         per_class_sisnr[cls_i].append(
                             float(snr_val[present].mean().item())
                         )
+                        per_class_counts[cls_i] += present.sum().item()
                 bg_snr = -si_snr_loss(
                     outputs[:, -1:], clean_wavs[:, -1:], solve_perm=False
                 )
@@ -1284,10 +1448,14 @@ def validate_epoch(
         torch.cuda.empty_cache()
 
     if bg_sisnr_vals:
-        class_strs = [
-            f"cls{i}: {np.mean(v):.2f} dB" if v else f"cls{i}: n/a"
-            for i, v in enumerate(per_class_sisnr)
-        ]
+        class_strs = []
+        for i, v in enumerate(per_class_sisnr):
+            if v:
+                avg_snr = np.mean(v)
+                count = per_class_counts[i]
+                class_strs.append(f"cls{i}: {avg_snr:.2f} dB [{count} samples]")
+            else:
+                class_strs.append(f"cls{i}: n/a")
         print(
             f"  Val SI-SNR – {', '.join(class_strs)}, BG: {np.mean(bg_sisnr_vals):.2f} dB"
         )
@@ -1363,6 +1531,9 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
             ),
             balance_classes=(
                 getattr(config.data, "balance_classes", True) if split == "train" else False
+            ),
+            coi_class_multipliers=(
+                getattr(config.data, "coi_class_multipliers", None)
             ),
         )
 
@@ -2223,6 +2394,13 @@ def train(config: Config, timestamp: str | None = None):
             snr_range=tuple(config.data.snr_range),
             scaler=scaler,
             scheduler=scheduler,
+            # Variable prompts configuration
+            variable_prompts=config.training.variable_prompts,
+            coi_prompts=config.model.coi_prompts,
+            bg_prompt=config.model.bg_prompt,
+            prompt_dropout_prob=config.training.prompt_dropout_prob,
+            min_coi_prompts=config.training.min_coi_prompts,
+            epoch_seed=config.training.seed + epoch,
         )
         global_step += epoch_steps
         history["train_loss"].append(train_loss)
