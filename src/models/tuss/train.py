@@ -1289,6 +1289,9 @@ def select_sources_for_prompts(
 ) -> torch.Tensor:
     """Select and reorder source channels to match variable prompt configuration.
     
+    Dropped COI sources are merged into the background channel so the model learns
+    to separate only what's prompted and put everything else in the residual.
+    
     Args:
         clean_wavs: (B, n_src_full, T) - full source tensor with all COI classes + background
         all_coi_prompts: Complete list of COI prompts (e.g., ["airplane", "birds"])
@@ -1296,27 +1299,43 @@ def select_sources_for_prompts(
         selected_prompts: Variable prompts for this batch (e.g., ["airplane", "background"])
         
     Returns:
-        Tensor (B, n_src_selected, T) with sources matching selected_prompts order
+        Tensor (B, n_src_selected, T) with sources matching selected_prompts order,
+        where background includes any dropped COI sources.
         
     Example:
         clean_wavs.shape = (B, 3, T)  # [airplane, birds, background]
         all_coi_prompts = ["airplane", "birds"]
         selected_prompts = ["birds", "background"]
         
-        Returns: (B, 2, T)  # [birds, background] with airplane removed
+        Returns: (B, 2, T)  # [birds, (airplane+background)] with airplane merged to bg
     """
     B, n_src_full, T = clean_wavs.shape
-    device = clean_wavs.device
     
-    # Build mapping from prompt name to channel index in clean_wavs
-    prompt_to_idx = {prompt: i for i, prompt in enumerate(all_coi_prompts)}
-    prompt_to_idx[bg_prompt] = len(all_coi_prompts)  # Background is last channel
+    # Identify which COI prompts are ACTIVE (in selected_prompts)
+    active_coi_indices = []
+    for prompt in selected_prompts:
+        if prompt != bg_prompt and prompt in all_coi_prompts:
+            active_coi_indices.append(all_coi_prompts.index(prompt))
     
-    # Select channels in the order specified by selected_prompts
-    selected_indices = [prompt_to_idx[p] for p in selected_prompts]
-    selected_wavs = clean_wavs[:, selected_indices, :]
+    # Start with original background channel
+    bg_channel = clean_wavs[:, -1, :].clone()
     
-    return selected_wavs
+    # Merge dropped COI sources into background
+    # (any COI source that doesn't have a corresponding prompt)
+    for i in range(len(all_coi_prompts)):
+        if i not in active_coi_indices:
+            bg_channel = bg_channel + clean_wavs[:, i, :]
+    
+    # Build output: active COI channels (in selected_prompts order) + merged background
+    selected_channels = []
+    for prompt in selected_prompts:
+        if prompt == bg_prompt:
+            selected_channels.append(bg_channel)
+        elif prompt in all_coi_prompts:
+            idx = all_coi_prompts.index(prompt)
+            selected_channels.append(clean_wavs[:, idx, :])
+    
+    return torch.stack(selected_channels, dim=1)
 
 
 # =============================================================================
@@ -1425,8 +1444,11 @@ def train_epoch(
             prompts = [batch_prompt_config] * B
             
             # CRITICAL: Select corresponding ground truth channels to match variable prompts
-            # clean_wavs from dataset: (B, n_coi_full+1, T) = [airplane, birds, background]
-            # If prompts = ["birds", "background"], we need clean_wavs = (B, 2, T) = [birds, background]
+            # Dropped COI sources are merged into background so model learns to separate
+            # only what's prompted and put everything else in the residual.
+            # Example:
+            #   clean_wavs from dataset: (B, 3, T) = [airplane, birds, background]
+            #   If prompts = ["birds", "background"], output: (B, 2, T) = [birds, (airplane+background)]
             clean_wavs = select_sources_for_prompts(
                 clean_wavs, coi_prompts, bg_prompt, batch_prompt_config
             )
