@@ -11,9 +11,9 @@ from validation_functions.demo_separation import plot_combined_spectrograms_from
 
 def main():
     ckpt_path = (
-        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/20260421_085947"
+        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/20260422_004025"
     )
-    wav_path = "/home/bendm/Thesis/project/data/misclassifications/239_as_is_sep_cls_['plane',_'wind',_'biophony']_conf0.456_S4A04430_20180716_113000.wav"
+    wav_path = "/home/bendm/Thesis/project/code/src/validation_functions/demo_output/520539__szegvari__forest-wind-birds-tree-airplane-mastered.wav"
 
     out_dir = Path(
         "/home/bendm/Thesis/project/code/src/validation_functions/demo_output"

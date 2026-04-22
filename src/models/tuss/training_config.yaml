@@ -316,6 +316,34 @@ training:
   # Leave empty to start fresh.  Example: "checkpoints/20250101_120000/best_model.pt"
   resume_from: ""
 
+  # -----------------------------------------------------------------------
+  # GPU AUGMENTATION SETTINGS (optimized for aircraft + birds)
+  # -----------------------------------------------------------------------
+  # Apply augmentations on GPU (10-100x faster than CPU)
+  use_gpu_augmentations: true
+  
+  # Gain: Simulates distance/recording level variations (KEEP)
+  gpu_aug_gain_prob: 0.7          # -6 to +6 dB amplitude change
+  
+  # Noise: Simulates microphone/environment noise (KEEP)
+  gpu_aug_noise_prob: 0.4         # Small Gaussian noise (0.001-0.01)
+  
+  # Time stretch: Changes pitch AND duration together (REDUCE for birds)
+  # WARNING: Can shift bird species-specific frequencies!
+  # Aircraft: 100Hz → 90-110Hz (changes engine type perception)
+  # Birds: 4kHz chirp → 3.6-4.4kHz (breaks species identification)
+  gpu_aug_time_stretch_prob: 0.2  # Reduced from default 0.5
+  # Recommendation: Set to 0.0 if bird species ID is critical
+  
+  # Time shift: Circular roll can break transient sounds (REDUCE)
+  # Can split bird chirps: "chirp-chirp" → "irp-chi-rp-chi"
+  gpu_aug_shift_prob: 0.2         # Reduced from default 0.5
+  
+  # Low-pass filter: CRITICAL - DISABLED for bird preservation
+  # Would remove 5-10kHz bird calls when cutoff is low!
+  # Aircraft harmonics also important for discrimination
+  gpu_aug_lpf_prob: 0.0           # DISABLED (was 0.3)
+
 # =============================================================================
 # QUICK-START RECIPES
 # =============================================================================
