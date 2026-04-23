@@ -261,7 +261,7 @@ training:
 
   # Stabilization phase settings for adding new classes
   # Keep old prompts and backbone frozen (LR=0) for this many epochs
-  stabilization_epochs: 5
+  stabilization_epochs: 0  # Disabled (was 5) to allow immediate prompt learning from epoch 1
 
   # After stabilization_epochs, if the backbone is not frozen (freeze_backbone=false),
   # it will train at lr * backbone_lr_multiplier

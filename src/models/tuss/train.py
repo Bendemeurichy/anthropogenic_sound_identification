@@ -2022,9 +2022,10 @@ def create_model(
 
         if prompt_name not in prompts_dict:
             init_val = _get_init_vector(init_from)
-            # Small noise so each new COI prompt starts from a slightly
-            # different position even if they all init from "sfx"
-            noise = torch.randn_like(init_val) * 0.001
+            # Add noise so each new COI prompt starts from a different position
+            # even if they all init from the same source (e.g., "sfx")
+            # Increased from 0.001 to 0.05 to ensure meaningful divergence
+            noise = torch.randn_like(init_val) * 0.05
             prompts_dict[prompt_name] = torch.nn.Parameter(init_val + noise)
             newly_injected.append(prompt_name)
             print(f"  Injected NEW prompt '{prompt_name}' (init from '{init_from}')")
