@@ -17,6 +17,13 @@ def load_risoux_test(path: str) -> pd.DataFrame:
     else:
         df["label"] = [[] for _ in range(len(df))]
 
+    # Map Risoux-specific labels to model expectations
+    # Paper specifies biophony represents birds in Risoux dataset
+    label_mapping = {"biophony": "bird", "plane": "airplane"}
+    df["label"] = df["label"].apply(
+        lambda labels: [label_mapping.get(l, l) for l in labels]
+    )
+
     df["dataset"] = "risoux_test"
     df["start_time"] = "0.0"
     df["end_time"] = "unknown"

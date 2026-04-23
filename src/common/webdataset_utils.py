@@ -63,6 +63,104 @@ except ImportError:
 
 
 # =============================================================================
+# Robust Audio Decoding
+# =============================================================================
+
+
+def robust_decode_audio_bytes(audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
+    """
+    Robustly decode audio bytes with multiple fallback strategies.
+    
+    This function implements a comprehensive fallback chain to handle
+    various audio codec issues, especially when FFmpeg/torchcodec are
+    not fully available on HPC systems.
+    
+    Fallback strategy:
+    1. Try soundfile from BytesIO (pure Python, no FFmpeg/torchcodec dependency)
+    2. Try soundfile from temporary file (helps with some format issues)
+    3. Only if soundfile completely fails, try torchaudio with soundfile backend
+    
+    Note: We prioritize soundfile and avoid torchaudio's default backend
+    as it may attempt to use torchcodec which requires full FFmpeg installation.
+    Webdatasets created by create_webdataset.py use FLAC format which
+    soundfile handles natively via libsndfile.
+    
+    Args:
+        audio_bytes: Raw audio file bytes (FLAC, WAV, OGG, etc.)
+        
+    Returns:
+        Tuple of (waveform, sample_rate) where waveform has shape (channels, frames)
+        
+    Raises:
+        RuntimeError: If all decoding methods fail
+    """
+    if isinstance(audio_bytes, memoryview):
+        audio_bytes = audio_bytes.tobytes()
+    
+    errors = []
+    
+    # 1) Try soundfile from BytesIO (works for FLAC, WAV, OGG)
+    # This should work for all webdataset files since they're FLAC
+    try:
+        audio_np, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(audio_np.T.copy())
+        return waveform, sr
+    except Exception as e:
+        errors.append(f"soundfile BytesIO: {type(e).__name__}: {str(e)[:100]}")
+    
+    # 2) Try soundfile from temporary file
+    # (some libsndfile versions work better from file paths)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".flac", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp.flush()
+            tmp_path = tmp.name
+        
+        audio_np, sr = sf.read(tmp_path, dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(audio_np.T.copy())
+        return waveform, sr
+    except Exception as e:
+        errors.append(f"soundfile temp file: {type(e).__name__}: {str(e)[:100]}")
+    finally:
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
+    
+    # 3) Only if soundfile completely failed, try torchaudio with soundfile backend
+    # This should rarely be needed for FLAC files
+    tmp_path = None
+    try:
+        # Set backend to soundfile to avoid torchcodec
+        torchaudio.set_audio_backend("soundfile")
+        
+        with tempfile.NamedTemporaryFile(suffix=".flac", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp.flush()
+            tmp_path = tmp.name
+        
+        waveform, sr = torchaudio.load(tmp_path)
+        return waveform, sr
+    except Exception as e:
+        errors.append(f"torchaudio soundfile backend: {type(e).__name__}: {str(e)[:100]}")
+    finally:
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
+    
+    # All methods failed - provide detailed error information
+    error_summary = "\n  - ".join(errors)
+    raise RuntimeError(
+        f"Failed to decode audio bytes with all methods:\n  - {error_summary}\n"
+        f"Ensure soundfile is installed with FLAC support: pip install soundfile"
+    )
+
+
+# =============================================================================
 # Audio Augmentations
 # =============================================================================
 
@@ -648,6 +746,7 @@ class WebDatasetWrapper(torch.utils.data.IterableDataset):
         self.filter_fn = filter_fn
 
         self._resampler_cache = ResamplerCache(max_size=8)
+        self._decode_warning_count = 0
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, int]]:
         """Iterate over samples yielding (waveform, label) tuples."""
@@ -668,9 +767,9 @@ class WebDatasetWrapper(torch.utils.data.IterableDataset):
         self, sample: Dict
     ) -> Optional[Tuple[torch.Tensor, int]]:
         """Process a single WebDataset sample."""
-        # Find and decode audio
+        # Find and decode audio (prioritize FLAC as that's what create_webdataset.py produces)
         audio_data = None
-        for ext in ["flac", "wav", "mp3", "ogg"]:
+        for ext in ["flac", "wav", "ogg", "mp3"]:
             if ext in sample:
                 audio_data = sample[ext]
                 break
@@ -679,19 +778,14 @@ class WebDatasetWrapper(torch.utils.data.IterableDataset):
             return None
 
         try:
-            # Use robust decoding with fallbacks
-            if isinstance(audio_data, memoryview):
-                audio_data = audio_data.tobytes()
-            
-            # Try soundfile first
-            try:
-                audio_np, sr = sf.read(io.BytesIO(audio_data), dtype="float32", always_2d=True)
-                waveform = torch.from_numpy(audio_np.T.copy())
-            except Exception:
-                # Fallback to torchaudio
-                buffer = io.BytesIO(audio_data)
-                waveform, sr = torchaudio.load(buffer)
-        except Exception:
+            # Use robust decoding with comprehensive fallbacks
+            waveform, sr = robust_decode_audio_bytes(audio_data)
+        except Exception as e:
+            # Only skip sample if all decoding methods fail
+            if self._decode_warning_count < 3:
+                key = sample.get("__key__", "unknown")
+                warnings.warn(f"Failed to decode WebDataset sample {key} after all fallbacks: {e}")
+                self._decode_warning_count += 1
             return None
 
         # Decode metadata
@@ -1195,8 +1289,9 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         self, sample: Dict
     ) -> Optional[Tuple[torch.Tensor, Dict]]:
         """Decode a WebDataset sample to waveform and metadata."""
+        # Find and decode audio (prioritize FLAC as that's what create_webdataset.py produces)
         audio_data = None
-        for ext in ["flac", "wav", "mp3", "ogg"]:
+        for ext in ["flac", "wav", "ogg", "mp3"]:
             if ext in sample:
                 audio_data = sample[ext]
                 break
@@ -1253,36 +1348,8 @@ class COIWebDatasetWrapper(torch.utils.data.IterableDataset):
         return AudioAugmentations.random_augment(waveform, self._rng)
 
     def _decode_audio(self, audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
-        """Decode audio bytes with soundfile first and torchaudio fallbacks."""
-        if isinstance(audio_bytes, memoryview):
-            audio_bytes = audio_bytes.tobytes()
-
-        last_error = None
-
-        try:
-            audio_np, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=True)
-            waveform = torch.from_numpy(audio_np.T.copy())
-            return waveform, sr
-        except Exception as e:
-            last_error = e
-
-        try:
-            buffer = io.BytesIO(audio_bytes)
-            waveform, sr = torchaudio.load(buffer)
-            return waveform, sr
-        except Exception as e:
-            last_error = e
-
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".flac") as tmp:
-                tmp.write(audio_bytes)
-                tmp.flush()
-                waveform, sr = torchaudio.load(tmp.name)
-                return waveform, sr
-        except Exception as e:
-            last_error = e
-
-        raise RuntimeError(f"Failed to decode audio bytes: {last_error}")
+        """Decode audio bytes using robust fallback strategy."""
+        return robust_decode_audio_bytes(audio_bytes)
 
     def _create_empty_source(self) -> torch.Tensor:
         """Create an empty (silent) source tensor."""

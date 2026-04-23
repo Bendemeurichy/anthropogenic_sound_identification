@@ -11,6 +11,11 @@ IMPORTANT: The script extracts the FULL time-bounded region from each audio file
 crops can be taken from these stored regions for data augmentation, matching the
 behavior of the original training code.
 
+HPC NOTE: This script uses soundfile to encode FLAC files. Ensure soundfile is
+installed with FLAC support in your environment:
+    pip install soundfile
+If on HPC, you may need to load libsndfile module or ensure it's in LD_LIBRARY_PATH.
+
 Usage:
     python create_webdataset.py \
         --metadata_csv /path/to/metadata.csv \
