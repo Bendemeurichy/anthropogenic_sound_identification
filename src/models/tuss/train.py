@@ -327,7 +327,7 @@ class TrainingConfig:
     num_epochs: int = 200
     lr: float = 5e-5
     weight_decay: float = 1e-2
-    num_workers: int = 4
+    num_workers: int = 8  # Increased from 4 for faster data loading
     pin_memory: bool = True
     clip_grad_norm: float = 5.0
     patience: int = 30
@@ -1558,7 +1558,9 @@ def train_epoch(
                 postfix[f"c{cls_i}"] = int(active_class_counts[cls_i])
         pbar.set_postfix(postfix)
 
-        if str(device).startswith("cuda") and step_idx % 20 == 0:
+        # Reduce cache clearing frequency for better performance
+        # Only clear every 100 steps instead of 20 (cache clearing is slow)
+        if str(device).startswith("cuda") and step_idx % 100 == 0:
             torch.cuda.empty_cache()
 
     # Flush remaining accumulated gradients
@@ -1685,8 +1687,9 @@ def validate_epoch(
             except Exception:
                 pbar.set_postfix(loss=f"{batch_loss:.4f}")
 
+            # Reduce cache clearing frequency for better performance
             del outputs, loss, mixture, clean_wavs
-            if str(device).startswith("cuda") and val_step % 20 == 0:
+            if str(device).startswith("cuda") and val_step % 100 == 0:
                 torch.cuda.empty_cache()
 
     if str(device).startswith("cuda"):
@@ -1754,6 +1757,11 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         # Get seed for reproducibility
         seed = getattr(config.training, "seed", 42)
 
+        # Disable CPU augmentations if GPU augmentations are enabled (10-100x faster)
+        # GPU augmentations are applied in the training loop instead
+        use_gpu_aug = getattr(config.training, "use_gpu_augmentations", True)
+        cpu_augment = (split == "train") and not use_gpu_aug
+        
         dataset = COIWebDatasetWrapper(
             tar_paths=tar_paths,
             split=split,
@@ -1762,7 +1770,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
             snr_range=tuple(config.data.snr_range),
             n_coi_classes=n_coi,
             shuffle=(split == "train"),
-            augment=(split == "train"),
+            augment=cpu_augment,  # Only use CPU augmentations if GPU augmentations are disabled
             stereo=False,
             background_only_prob=(
                 config.data.background_only_prob if split == "train" else 0.0
