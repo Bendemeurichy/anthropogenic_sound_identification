@@ -2024,8 +2024,9 @@ def create_model(
             init_val = _get_init_vector(init_from)
             # Add noise so each new COI prompt starts from a different position
             # even if they all init from the same source (e.g., "sfx")
-            # Increased from 0.001 to 0.05 to ensure meaningful divergence
-            noise = torch.randn_like(init_val) * 0.05
+            # Increased from 0.05 to 0.15 to ensure stronger initial divergence
+            # Higher LR (1e-4) will help maintain this separation during training
+            noise = torch.randn_like(init_val) * 0.15
             prompts_dict[prompt_name] = torch.nn.Parameter(init_val + noise)
             newly_injected.append(prompt_name)
             print(f"  Injected NEW prompt '{prompt_name}' (init from '{init_from}')")

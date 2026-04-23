@@ -178,7 +178,8 @@ data:
   augment_multiplier: 1
 
   # Probability of mixing a second target class into the mixture during training
-  multi_coi_prob: 0.3
+  # Increased from 0.3 to 0.6 to ensure model learns overlapping separation well
+  multi_coi_prob: 0.6
 
   # Balance classes during training to prevent imbalanced datasets from
   # causing one class to dominate. When True, samples from each COI class
@@ -248,9 +249,18 @@ training:
   num_epochs: 200
   patience: 25 # early-stop after this many epochs without improvement
 
-  lr: 5.0e-5
-  weight_decay: 1.0e-2
-  warmup_steps: 60 # linear LR warm-up
+  # Learning rate increased from 5e-5 to 1e-4 to help prompt vectors diverge better
+  # Higher initial LR allows new prompts to move away from their init point faster
+  lr: 1.0e-4
+  
+  # Weight decay reduced from 1e-2 to 5e-3 to prioritize prompt divergence
+  # Lower regularization allows prompts to explore parameter space more freely
+  # Can increase to 1e-2 or 1.5e-2 after prompts have diverged (after ~30 epochs)
+  weight_decay: 5.0e-3
+  
+  # Warmup steps increased from 60 to 200 to match higher LR
+  # Prevents instability from high LR at training start
+  warmup_steps: 200
 
   clip_grad_norm: 5.0
 
