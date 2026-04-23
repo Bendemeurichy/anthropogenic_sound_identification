@@ -293,8 +293,8 @@ training:
   min_coi_prompts: 0 # Minimum COI prompts per sample (0 = allow background-only)
 
   # Loss weights
-  coi_weight: 2.0 # up-weight COI streams relative to background
-  zero_ref_loss_weight: 0.1 # penalty for estimating energy when target is silent
+  coi_weight: 1.3 # up-weight COI streams relative to background (reduced from 2.0 to improve BG separation)
+  zero_ref_loss_weight: 0.3 # penalty for estimating energy when target is silent (increased from 0.1)
   snr_max: 30 # clip SNR loss at this value (dB)
 
   num_workers: 1

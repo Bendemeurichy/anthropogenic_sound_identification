@@ -1621,6 +1621,9 @@ def validate_epoch(
     per_class_sisnr: list[list[float]] = [[] for _ in range(criterion.n_coi)]
     per_class_counts: list[int] = [0 for _ in range(criterion.n_coi)]
     bg_sisnr_vals: list[float] = []
+    bg_sisnr_bg_only: list[float] = []  # Background SI-SNR on background-only samples
+    bg_sisnr_mixed: list[float] = []  # Background SI-SNR on mixed samples
+    bg_energy_ratios: list[float] = []  # BG energy / total energy ratio
 
     use_amp = use_amp and str(device).startswith("cuda")
     amp_dtype = getattr(criterion, "_amp_dtype", torch.bfloat16)
@@ -1666,10 +1669,14 @@ def validate_epoch(
                 from loss_functions.si_snr import si_snr_loss
 
                 n_src = outputs.shape[1]
+                
+                # Check if any COI is present (to identify background-only samples)
+                any_coi_present = False
                 for cls_i in range(n_src - 1):
                     ref_energy = clean_wavs[:, cls_i].pow(2).mean(dim=-1)
                     present = ref_energy > SILENCE_ENERGY_EPS
                     if present.any():
+                        any_coi_present = True
                         snr_val = -si_snr_loss(
                             outputs[:, cls_i : cls_i + 1],
                             clean_wavs[:, cls_i : cls_i + 1],
@@ -1679,10 +1686,27 @@ def validate_epoch(
                             float(snr_val[present].mean().item())
                         )
                         per_class_counts[cls_i] += present.sum().item()
+                
+                # Background metrics
                 bg_snr = -si_snr_loss(
                     outputs[:, -1:], clean_wavs[:, -1:], solve_perm=False
                 )
-                bg_sisnr_vals.append(float(bg_snr.mean().item()))
+                bg_snr_mean = float(bg_snr.mean().item())
+                bg_sisnr_vals.append(bg_snr_mean)
+                
+                # Track background-only vs mixed samples separately
+                if any_coi_present:
+                    bg_sisnr_mixed.append(bg_snr_mean)
+                else:
+                    bg_sisnr_bg_only.append(bg_snr_mean)
+                
+                # Track energy ratio: BG / (COI + BG)
+                coi_energy = outputs[:, :-1].pow(2).sum(dim=(1, 2))  # Sum over all COI sources
+                bg_energy = outputs[:, -1].pow(2).sum(dim=1)
+                total_energy = coi_energy + bg_energy + 1e-8
+                energy_ratio = (bg_energy / total_energy).mean().item()
+                bg_energy_ratios.append(energy_ratio)
+                
                 pbar.set_postfix(loss=f"{batch_loss:.4f}")
             except Exception:
                 pbar.set_postfix(loss=f"{batch_loss:.4f}")
@@ -1704,9 +1728,19 @@ def validate_epoch(
                 class_strs.append(f"cls{i}: {avg_snr:.2f} dB [{count} samples]")
             else:
                 class_strs.append(f"cls{i}: n/a")
+        
+        bg_overall = np.mean(bg_sisnr_vals)
         print(
-            f"  Val SI-SNR – {', '.join(class_strs)}, BG: {np.mean(bg_sisnr_vals):.2f} dB"
+            f"  Val SI-SNR – {', '.join(class_strs)}, BG: {bg_overall:.2f} dB"
         )
+        
+        # Enhanced background metrics
+        if bg_sisnr_bg_only:
+            print(f"    BG (background-only samples): {np.mean(bg_sisnr_bg_only):.2f} dB [{len(bg_sisnr_bg_only)} batches]")
+        if bg_sisnr_mixed:
+            print(f"    BG (mixed samples): {np.mean(bg_sisnr_mixed):.2f} dB [{len(bg_sisnr_mixed)} batches]")
+        if bg_energy_ratios:
+            print(f"    BG energy ratio (BG/total): {np.mean(bg_energy_ratios):.3f}")
 
     return running_loss / max(n_samples, 1)
 
