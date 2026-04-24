@@ -133,8 +133,18 @@ def robust_decode_audio_bytes(audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
     # This should rarely be needed for FLAC files
     tmp_path = None
     try:
-        # Set backend to soundfile to avoid torchcodec
-        torchaudio.set_audio_backend("soundfile")
+        # Set backend to soundfile to avoid torchcodec (handle both old and new API)
+        try:
+            # Try new API (torchaudio 2.1.0+)
+            import torchaudio.backend
+            # In modern torchaudio, backend is auto-selected, soundfile is used if available
+        except (ImportError, AttributeError):
+            # Fall back to old API (torchaudio < 2.1.0)
+            try:
+                torchaudio.set_audio_backend("soundfile")
+            except AttributeError:
+                # Even older versions or custom builds without backend selection
+                pass
         
         with tempfile.NamedTemporaryFile(suffix=".flac", delete=False) as tmp:
             tmp.write(audio_bytes)
@@ -423,36 +433,7 @@ class WebDatasetAudioLoader(AudioLoader):
 
     def _decode_audio(self, audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
         """Decode audio from bytes with robust fallbacks for HPC environments."""
-        if isinstance(audio_bytes, memoryview):
-            audio_bytes = audio_bytes.tobytes()
-
-        last_error = None
-
-        try:
-            audio_np, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=True)
-            waveform = torch.from_numpy(audio_np.T.copy())
-            return waveform, sr
-        except Exception as e:
-            last_error = e
-
-        try:
-            buffer = io.BytesIO(audio_bytes)
-            waveform, sr = torchaudio.load(buffer)
-            return waveform, sr
-        except Exception as e:
-            last_error = e
-
-        suffix = ".flac"
-        try:
-            with tempfile.NamedTemporaryFile(suffix=suffix) as tmp:
-                tmp.write(audio_bytes)
-                tmp.flush()
-                waveform, sr = torchaudio.load(tmp.name)
-                return waveform, sr
-        except Exception as e:
-            last_error = e
-
-        raise RuntimeError(f"Failed to decode audio bytes: {last_error}")
+        return robust_decode_audio_bytes(audio_bytes)
 
     def _decode_json(self, json_bytes: bytes) -> Dict:
         """Decode JSON metadata from bytes."""
@@ -543,17 +524,7 @@ class WebDatasetAudioLoader(AudioLoader):
 
             try:
                 # Use robust decoding with fallbacks
-                if isinstance(audio_data, memoryview):
-                    audio_data = audio_data.tobytes()
-                
-                # Try soundfile first
-                try:
-                    audio_np, sr = sf.read(io.BytesIO(audio_data), dtype="float32", always_2d=True)
-                    waveform = torch.from_numpy(audio_np.T.copy())
-                except Exception:
-                    # Fallback to torchaudio
-                    buffer = io.BytesIO(audio_data)
-                    waveform, sr = torchaudio.load(buffer)
+                waveform, sr = robust_decode_audio_bytes(audio_data)
             except Exception:
                 return None
 
