@@ -1006,7 +1006,10 @@ class AudioDataset(Dataset):
                 return torch.zeros(self.segment_samples)
 
         if sr != self.sample_rate:
-            waveform = self._resampler_cache.resample(waveform, sr, self.sample_rate)
+            # Use padded resampling to eliminate edge artifacts
+            # This is critical for fragment-based separation models where edge artifacts
+            # visible in spectrograms can confuse the model
+            waveform = self._resampler_cache.resample_padded(waveform, sr, self.sample_rate)
 
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)

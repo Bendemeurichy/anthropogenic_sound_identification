@@ -13,6 +13,8 @@ References:
         https://github.com/bmcfee/resampy
 """
 
+import torch
+import torch.nn.functional as F
 import torchaudio
 
 # =============================================================================
@@ -64,6 +66,12 @@ def create_high_quality_resampler(
     Uses Kaiser windowed sinc interpolation for best anti-aliasing performance,
     matching the quality of resampy's kaiser_best mode (used by librosa).
 
+    Note on edge artifacts:
+        Windowed sinc interpolation can produce artifacts at signal boundaries
+        because the filter needs samples on both sides of each point. To mitigate
+        this, consider using resample_with_padding() which adds reflection padding
+        before resampling.
+
     Args:
         orig_sr: Original sample rate (Hz)
         target_sr: Target sample rate (Hz)
@@ -91,6 +99,82 @@ def create_high_quality_resampler(
         rolloff=rolloff,
         beta=beta,
     )
+
+
+def resample_with_padding(
+    waveform: torch.Tensor,
+    orig_sr: int,
+    target_sr: int,
+    pad_mode: str = "reflect",
+) -> torch.Tensor:
+    """
+    Resample audio with padding to eliminate edge artifacts.
+
+    Windowed sinc interpolation produces artifacts at signal boundaries because
+    the filter needs samples on both sides of each interpolation point. This
+    function adds reflection padding before resampling and trims it afterward,
+    ensuring clean edges in the resampled output.
+
+    This is especially important for:
+    - Audio separation models (artifacts visible in spectrograms can affect models)
+    - Fragment-based processing (edge artifacts at every boundary)
+    - High-quality audio output (visible transients in spectrograms)
+
+    Args:
+        waveform: Audio tensor (..., time) - can be any shape with time as last dim
+        orig_sr: Original sample rate (Hz)
+        target_sr: Target sample rate (Hz)
+        pad_mode: Padding mode - 'reflect' (default), 'replicate', or 'constant'
+                  'reflect': mirrors signal at boundaries (best for most audio)
+                  'replicate': extends edge values (good for DC-offset signals)
+                  'constant': zero-padding (not recommended, causes discontinuities)
+
+    Returns:
+        Resampled waveform with same shape except time dimension scaled by ratio
+
+    Example:
+        >>> # Shape: (batch, channels, time)
+        >>> waveform = torch.randn(4, 2, 32000)
+        >>> resampled = resample_with_padding(waveform, 32000, 48000)
+        >>> # Shape: (4, 2, 48000)
+
+    Note:
+        Padding length is set to 2x the filter width (128 samples) which is
+        sufficient for the Kaiser window with lowpass_filter_width=64.
+    """
+    if orig_sr == target_sr:
+        return waveform
+
+    # Calculate padding needed (2x filter width for safety)
+    # lowpass_filter_width=64 means 64 samples on each side
+    pad_samples = RESAMPLE_LOWPASS_WIDTH * 2
+
+    # Add padding to avoid edge artifacts
+    # F.pad expects (left, right) for 1D or (..., left, right) for last dim
+    if pad_mode == "reflect":
+        # Reflect mode: mirror the signal at boundaries
+        waveform_padded = F.pad(waveform, (pad_samples, pad_samples), mode="reflect")
+    elif pad_mode == "replicate":
+        # Replicate mode: extend edge values
+        waveform_padded = F.pad(waveform, (pad_samples, pad_samples), mode="replicate")
+    elif pad_mode == "constant":
+        # Zero padding (not recommended but available)
+        waveform_padded = F.pad(waveform, (pad_samples, pad_samples), mode="constant", value=0)
+    else:
+        raise ValueError(f"Unknown pad_mode: {pad_mode}. Use 'reflect', 'replicate', or 'constant'")
+
+    # Create resampler and process
+    resampler = create_high_quality_resampler(orig_sr, target_sr)
+    resampled_padded = resampler(waveform_padded)
+
+    # Calculate how many samples to trim from resampled output
+    ratio = target_sr / orig_sr
+    trim_samples = int(pad_samples * ratio)
+
+    # Trim padding from output
+    resampled = resampled_padded[..., trim_samples:-trim_samples]
+
+    return resampled
 
 
 def create_low_quality_resampler(
@@ -173,6 +257,10 @@ class ResamplerCache:
         """
         Resample waveform using cached high-quality resampler.
 
+        Note: This method does NOT use padding. For fragment-based processing
+        or when edge artifacts are visible in spectrograms, use resample_with_padding()
+        instead (available as a standalone function in this module).
+
         Args:
             waveform: Audio tensor (any shape, resampling applied to last dimension)
             orig_sr: Original sample rate (Hz)
@@ -186,6 +274,26 @@ class ResamplerCache:
 
         resampler = self.get_resampler(orig_sr, target_sr)
         return resampler(waveform)
+
+    def resample_padded(
+        self, waveform, orig_sr: int, target_sr: int, pad_mode: str = "reflect"
+    ):
+        """
+        Resample waveform with padding to eliminate edge artifacts.
+
+        This method uses reflection padding before resampling to avoid edge
+        artifacts that are visible in spectrograms and can affect separation models.
+
+        Args:
+            waveform: Audio tensor (any shape, resampling applied to last dimension)
+            orig_sr: Original sample rate (Hz)
+            target_sr: Target sample rate (Hz)
+            pad_mode: Padding mode ('reflect', 'replicate', or 'constant')
+
+        Returns:
+            Resampled waveform with clean edges
+        """
+        return resample_with_padding(waveform, orig_sr, target_sr, pad_mode)
 
     def clear(self):
         """Clear the resampler cache."""
