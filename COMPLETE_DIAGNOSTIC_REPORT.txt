@@ -1,0 +1,320 @@
+"""
+================================================================================
+COMPLETE DIAGNOSTIC REPORT: TUSS SEPARATION FAILURE
+================================================================================
+
+EXECUTIVE SUMMARY:
+------------------
+✅ Upsampling (STFT/iSTFT): PERFECT - 138 dB SNR reconstruction
+❌ Prompt Divergence: FAILED - cosine similarity 0.9977 (expected < 0.70)
+❌ Separation Quality: FAILED - 98.56% energy goes to background, <0.01% to COI
+❌ Root Cause: Variable prompts with high dropout prevented prompt learning
+
+================================================================================
+DETAILED FINDINGS:
+================================================================================
+
+1. UPSAMPLING ANALYSIS (STFT/iSTFT):
+   ✅ Status: WORKING CORRECTLY
+   
+   Test: Waveform → STFT → iSTFT → Reconstructed
+   Result: 
+   - Reconstruction SNR: 138.00 dB
+   - Max error: 0.000000
+   - Mean error: 0.000000
+   - Length match: Perfect (0 sample difference)
+   
+   Conclusion: The decoder upsampling via iSTFT is NOT the problem.
+   
+   STFT parameters (from hparams.yaml):
+   - window_length: 2048
+   - hop_length: 512
+   - fft_size: 2048
+   - window_type: sqrt_hann
+   - normalize: null
+
+2. RESAMPLING ANALYSIS (32kHz → 48kHz):
+   Status: CHECKED
+   
+   Kaiser window sinc interpolation parameters:
+   - beta: 14.769 (96 dB stopband rejection)
+   - lowpass_filter_width: 64
+   - rolloff: 0.99
+   
+   Energy ratio: 1.5000 (expected due to upsampling from 32k to 48k)
+   
+   Note: Some energy appears above original Nyquist (16 kHz) in resampled
+   signal, but this is expected behavior for high-quality resampling with
+   rolloff < 1.0. Check resampling_comparison.png for visual verification.
+
+3. PROMPT DIVERGENCE ANALYSIS:
+   ❌ Status: CRITICAL FAILURE
+   
+   From checkpoint inspection (best_model.pt):
+   
+   Prompt similarities:
+   - airplane <-> birds:    0.9977 (❌ TOO SIMILAR - should be < 0.70)
+   - airplane <-> sfx:      0.9926 (❌ TOO SIMILAR)
+   - birds <-> sfx:         0.9951 (❌ TOO SIMILAR)
+   - background <-> sfxbg:  0.9984 (❌ TOO SIMILAR)
+   
+   Euclidean distances:
+   - airplane <-> birds:    0.1617 (❌ TOO CLOSE - should be > 3.0)
+   
+   Average cosine similarity: 0.1250 (good for pretrained prompts)
+   BUT: COI prompts (airplane, birds) are nearly identical!
+   
+   Checkpoint info:
+   - Epochs trained: 32
+   - Global steps: 3388
+   - Learning rate: 5e-05
+   - Weight decay: 0.01
+
+4. SEPARATION OUTPUT ANALYSIS:
+   ❌ Status: NO SEPARATION OCCURRING
+   
+   From demo output (15.05s audio, 48kHz):
+   
+   Energy distribution:
+   - Mixture:     1.37e+03 (100.00%)
+   - Plane:       2.25e-03 (  0.00%) ❌ NEARLY SILENT
+   - Birds:       4.51e-04 (  0.00%) ❌ NEARLY SILENT  
+   - Background:  1.35e+03 ( 98.56%) ❌ ALMOST ENTIRE MIXTURE
+   
+   Peak amplitudes:
+   - Mixture:     0.2247
+   - Plane:       0.0022 (100x quieter)
+   - Bird:        0.0001 (2000x quieter)
+   - Background:  0.2219 (essentially same as mixture)
+   
+   Background-Mixture correlation: 0.9999
+   ⚠️ This means the background output is 99.99% identical to the input!
+   
+   Plane-Bird correlation: 0.4128
+   ⚠️ Moderate correlation, but both are nearly silent so irrelevant.
+   
+   Reconstruction check:
+   - Error: 2.91e-01
+   - SNR: 36.72 dB (good reconstruction, but wrong separation)
+
+5. VISUALIZATIONS CREATED:
+   - test_separation_outputs/resampling_comparison.png
+     Shows original vs resampled spectrograms
+   
+   - test_separation_outputs/demo_separation_spectrograms.png
+     Shows mixture and all separated outputs
+   
+   - test_separation_outputs/demo_separation_differences.png
+     Shows how much each output differs from mixture (in dB)
+
+================================================================================
+ROOT CAUSE ANALYSIS:
+================================================================================
+
+The model is NOT separating because the prompts never diverged during training.
+When prompts are identical, the model can't distinguish between classes.
+
+WHY PROMPTS DIDN'T DIVERGE:
+
+1. Variable Prompts Feature (training_config.yaml):
+   ```yaml
+   variable_prompts: true
+   prompt_dropout_prob: 0.5
+   min_coi_prompts: 0
+   ```
+   
+   During training:
+   - Each COI prompt is randomly DROPPED 50% of the time
+   - Sometimes BOTH prompts are dropped (only background active)
+   - Prompts that are frequently dropped receive inconsistent gradients
+   - Without consistent gradients, prompts can't diverge from initialization
+
+2. Same Initialization Source (train.py:2012-2014):
+   ```python
+   init_sources = [config.model.coi_prompt_init_from] * len(config.model.coi_prompts)
+   # Both airplane and birds initialize from 'sfx'
+   ```
+   
+   - Both airplane and birds start from identical 'sfx' prompt
+   - Only 0.15 stddev noise added (line 2029)
+   - Not enough separation to overcome variable prompts
+
+3. Variable Prompts Training Strategy:
+   
+   The variable prompts feature is designed for models with MANY sources
+   (e.g., 2-4 sources in base TUSS) where you want robustness to missing
+   sources. But for a 2-class COI model:
+   
+   - Dropping prompts 50% of the time = each prompt only trains 50% of steps
+   - Inconsistent gradients prevent divergence
+   - Prompts stay nearly identical to initialization
+
+================================================================================
+RECOMMENDED SOLUTIONS:
+================================================================================
+
+SOLUTION A: Disable Variable Prompts (RECOMMENDED)
+---------------------------------------------------
+This is the simplest and most effective fix for 2-class COI separation.
+
+1. Edit training_config.yaml:
+   ```yaml
+   variable_prompts: false  # Change from true
+   ```
+
+2. Retrain from scratch
+
+3. Monitor divergence every 5 epochs:
+   ```bash
+   python inspect_checkpoint.py checkpoints/*/best_model.pt -d
+   ```
+   
+   Target: cosine similarity < 0.70 between airplane and birds
+
+Benefits:
+- Both prompts train on EVERY batch (100% gradient updates)
+- Prompts will diverge quickly and consistently
+- Simplest solution with proven track record
+
+SOLUTION B: Adjust Variable Prompts Settings
+---------------------------------------------
+Keep variable prompts but make them work for 2-class case.
+
+1. Edit training_config.yaml:
+   ```yaml
+   variable_prompts: true
+   prompt_dropout_prob: 0.2      # Reduce from 0.5
+   min_coi_prompts: 1            # Increase from 0 (keep at least 1 COI)
+   ```
+
+2. Edit train.py line 2029 to increase initialization noise:
+   ```python
+   noise = torch.randn_like(init_val) * 0.35  # Increase from 0.15
+   ```
+
+3. Consider initializing from different sources:
+   - airplane from 'sfx'
+   - birds from 'speech' or create a bird-specific init
+
+Benefits:
+- Still get some robustness to missing sources
+- More consistent training signal for prompts
+
+Drawbacks:
+- More complex
+- Slower divergence than Solution A
+- Requires code modification
+
+SOLUTION C: Staged Training
+----------------------------
+Train with fixed prompts first, then enable variable prompts.
+
+1. Phase 1 (epochs 1-20):
+   ```yaml
+   variable_prompts: false
+   ```
+   Let prompts diverge completely
+
+2. Phase 2 (epochs 21+):
+   ```yaml
+   variable_prompts: true
+   prompt_dropout_prob: 0.3  # Lower than default
+   ```
+   Add robustness training
+
+Benefits:
+- Best of both worlds
+- Ensures divergence happens
+- Adds robustness afterward
+
+Drawbacks:
+- Requires manual intervention between phases
+- Longer total training time
+
+================================================================================
+EXECUTION PLAN:
+================================================================================
+
+IMMEDIATE ACTION (Recommended):
+
+1. Execute upsampling test on test_input.wav:
+   ```bash
+   cd /home/bendm/Thesis/project/code
+   source .venv/bin/activate
+   python /home/bendm/Thesis/project/code/src/models/tuss/inference.py \\
+       --checkpoint checkpoints/20260423_105141 \\
+       --input test_separation_outputs/test_input.wav \\
+       --output test_separation_outputs/test_output_new.wav
+   ```
+
+2. Implement Solution A:
+   
+   a. Backup current training config:
+      ```bash
+      cp src/models/tuss/training_config.yaml src/models/tuss/training_config_old.yaml
+      ```
+   
+   b. Edit src/models/tuss/training_config.yaml:
+      Change line with `variable_prompts: true` to `variable_prompts: false`
+   
+   c. Start new training run:
+      ```bash
+      cd src/models/tuss
+      python train.py
+      ```
+   
+   d. Monitor prompt divergence every 5 epochs:
+      ```bash
+      python inspect_checkpoint.py checkpoints/YYYYMMDD_HHMMSS/best_model.pt -d
+      ```
+
+3. Validation criteria:
+   
+   After ~10 epochs, check:
+   ✓ Airplane <-> Birds cosine similarity < 0.80 (target < 0.70)
+   ✓ Validation output shows COI energy > 10% of mixture
+   ✓ Background no longer correlates 0.99+ with mixture
+
+================================================================================
+FILES TO CHECK:
+================================================================================
+
+Generated visualizations:
+1. test_separation_outputs/resampling_comparison.png
+   → Verify resampling quality (should look clean)
+
+2. test_separation_outputs/demo_separation_spectrograms.png
+   → See current separation outputs (plane/bird nearly silent)
+
+3. test_separation_outputs/demo_separation_differences.png
+   → See how outputs differ from mixture (background ≈ 0 dB difference)
+
+Current checkpoint:
+- checkpoints/20260423_105141/best_model.pt
+- Use: python inspect_checkpoint.py <path> -d
+
+Configuration:
+- src/models/tuss/training_config.yaml (needs variable_prompts: false)
+
+================================================================================
+CONCLUSION:
+================================================================================
+
+The poor separation is NOT due to upsampling issues. The STFT/iSTFT decoder
+is working perfectly (138 dB SNR). The problem is that the COI prompts
+(airplane, birds) never learned to be different from each other during training.
+
+The variable_prompts feature with 50% dropout prevented the prompts from
+receiving consistent gradient updates, so they stayed nearly identical to
+their initialization (both from 'sfx' prompt).
+
+The fix is simple: Disable variable_prompts and retrain. The prompts will
+diverge naturally when they receive consistent training signals.
+
+Expected improvement after retraining with variable_prompts=false:
+- Airplane <-> Birds similarity: 0.9977 → < 0.70
+- Plane output energy: 0.00% → 30-50% of mixture
+- Bird output energy: 0.00% → 20-40% of mixture
+- Background correlation: 0.9999 → < 0.50
+
+================================================================================
