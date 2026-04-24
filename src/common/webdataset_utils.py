@@ -134,16 +134,14 @@ def robust_decode_audio_bytes(audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
     tmp_path = None
     try:
         # Set backend to soundfile to avoid torchcodec (handle both old and new API)
-        try:
-            # Try new API (torchaudio 2.1.0+)
-            import torchaudio.backend
-            # In modern torchaudio, backend is auto-selected, soundfile is used if available
-        except (ImportError, AttributeError):
-            # Fall back to old API (torchaudio < 2.1.0)
+        # In torchaudio 2.1.0+, backend selection is automatic. For older versions,
+        # attempt to set it explicitly if the API exists.
+        if hasattr(torchaudio, 'set_audio_backend'):
             try:
                 torchaudio.set_audio_backend("soundfile")
-            except AttributeError:
-                # Even older versions or custom builds without backend selection
+            except Exception:
+                # Backend setting failed, proceed anyway - modern torchaudio
+                # will auto-select backend
                 pass
         
         with tempfile.NamedTemporaryFile(suffix=".flac", delete=False) as tmp:
