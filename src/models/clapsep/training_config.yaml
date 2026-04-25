@@ -4,14 +4,14 @@
 
 data:
   df_path: "data/aircraft_data.csv"
-  sample_rate: 32000  # CLAPSep default sample rate
-  segment_length: 5.0  # seconds
-  snr_range: [-5, 5]  # dB range for mixing
+  sample_rate: 32000 # CLAPSep default sample rate
+  segment_length: 4.0 # seconds
+  snr_range: [-10, 10] # dB range for mixing
   n_coi_classes: 1
   background_only_prob: 0.20
   background_mix_n: 2
   augment_multiplier: 3
-  
+
   # WebDataset configuration for HPC compressed data loading
   # Set use_webdataset: true to load from pre-compressed tar shards
   # instead of individual audio files (much faster on HPC scratch storage)
@@ -19,35 +19,43 @@ data:
   # Path to WebDataset tar shards directory (e.g., $VSC_SCRATCH/webdataset_shards)
   # Only used when use_webdataset is true
   webdataset_path: ""
-  
+
   # Target classes for COI filtering (used with WebDataset and text-prompt training)
   # Maps dataset semantic labels to COI classes
   # Format: list of lists, one per COI class
   # Example single-class (aircraft): [["airplane", "aircraft", "jet", "propeller_airplane"]]
-  # Example multi-class (aircraft + birds): 
+  # Example multi-class (aircraft + birds):
   #   [["airplane", "aircraft", "jet"], ["bird", "bird_song", "birds"]]
   # Leave empty to use all label==1 samples as COI
-  target_classes: [["airplane", "aircraft", "jet", "propeller_airplane", "aeroplane"]]
+  target_classes:
+    [["airplane", "aircraft", "jet", "propeller_airplane", "aeroplane"]]
 
 # Model settings
 model:
   # CLAP pretrained checkpoint path
   clap_checkpoint: "src/models/clapsep/checkpoint/CLAPSep/model/music_audioset_epoch_15_esc_90.14.pt"
-  
+
   # Resample rate for CLAP input (CLAP expects 48kHz)
   resample_rate: 48000
-  
+
   # Text prompt configuration (for train_text_coi.py)
   # Multiple prompt variations per class improve robustness
   coi_text_prompts:
     # Class 0: Aircraft/Airplane prompts (variations for data augmentation)
-    - ["airplane engine", "aircraft noise", "jet flying", "propeller airplane", "plane flying overhead"]
+    - [
+        "airplane engine",
+        "aircraft noise",
+        "jet flying",
+        "propeller airplane",
+        "plane flying overhead",
+      ]
     # Class 1: Birds (for future multi-class expansion)
     # - ["bird chirping", "bird singing", "songbird", "birds calling"]
-  
+
   # Background prompt variations
-  background_text_prompts: ["ambient noise", "background sounds", "environmental noise"]
-  
+  background_text_prompts:
+    ["ambient noise", "background sounds", "environmental noise"]
+
   # Decoder architecture
   lan_embed_dim: 1024
   depths: [1, 1, 1, 1]
@@ -67,7 +75,7 @@ model:
   # Option 3: freeze_encoder=false, use_lora=false → Full fine-tuning (most parameters)
   freeze_encoder: false
   use_lora: true
-  lora_rank: 8  # LoRA rank: 4-16 typical (lower = fewer params, faster training)
+  lora_rank: 8 # LoRA rank: 4-16 typical (lower = fewer params, faster training)
   # Number of sources (COI + background)
   num_sources: 2
 
@@ -81,9 +89,9 @@ training:
   weight_decay: 1e-5
   num_workers: 4
   pin_memory: true
-  patience: 30  # early stopping patience
+  patience: 30 # early stopping patience
   gradient_clip_val: 5.0
   checkpoint_dir: "checkpoints/clapsep"
   device: "cuda"
-  class_weight: 1.5
+  class_weight: 1.3
   seed: 42

@@ -93,7 +93,7 @@ training:
   device: "cuda:0"
   compile_model: false
   compile_backend: "eager"
-  class_weight: 2.0
+  class_weight: 1.3
   aux_waveform_weight: 0.0
   warmup_steps: 400
   validate_every_n_epochs: 1
