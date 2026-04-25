@@ -1,0 +1,173 @@
+# =============================================================================
+# SuDoRMRF Hyperparameter Tuning Configuration
+# =============================================================================
+# This config is ONLY for Optuna hyperparameter tuning.
+# For normal training, use src/models/sudormrf/training_config.yaml
+#
+# Design philosophy:
+# - Separate tuning trials from production training runs
+# - Use short epochs (5-10) for fast iteration
+# - Focus on most impactful hyperparameters
+# - Save results to dedicated tuning directory
+# =============================================================================
+
+# Tuning-specific settings
+tuning:
+  # Number of epochs per trial (keep low for fast iteration)
+  num_epochs: 5
+  
+  # Directory for tuning checkpoints (separate from production)
+  checkpoint_dir: "checkpoints/tuning/sudormrf"
+  
+  # Whether to save model checkpoints during trials (disable to save space)
+  save_checkpoints: false
+  
+  # Validation frequency
+  validate_every_n_epochs: 1
+
+# Data configuration (same as training but with tuning-specific settings)
+data:
+  df_path: "src/models/tuss/checkpoints/.csv"  # Will be overridden by CLI
+  sample_rate: 32000
+  segment_length: 4.0
+  snr_range: [-10, 10]
+  n_coi_classes: 1
+  
+  # Target classes (will be set dynamically for each target)
+  target_classes: ["bird", "Bird"]
+  
+  # Disable augmentation for faster tuning
+  augment_multiplier: 1
+  background_only_prob: 0.3
+  background_mix_n: 1
+  
+  use_webdataset: false
+  webdataset_path: ""
+
+# Fixed model architecture (from training_config.yaml)
+# These are NOT tuned, only training hyperparameters are tuned
+model:
+  type: "improved"
+  
+  # FIXED architectural parameters (use training config values)
+  # Only tune these if you have a specific reason (they impact memory/compute heavily)
+  out_channels: 256
+  in_channels: 512
+  num_blocks: 16
+  enc_num_basis: 1024
+  enc_kernel_size: 81
+  num_head_conv_blocks: 2
+  upsampling_depth: 5
+  expanded_channels: null
+
+# Training hyperparameters - these are defaults that will be overridden by Optuna
+training:
+  batch_size: 2
+  num_workers: 1
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 1
+  use_amp: true
+  compile_model: false
+  compile_backend: "eager"
+  device: "cuda"
+  seed: 42
+  
+  # These will be overridden by Optuna trials
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  class_weight: 2.0
+  warmup_steps: 400
+  grad_accum_steps: 16
+  clip_grad_norm: 5.0
+  
+  # Fixed for tuning
+  patience: 20
+  aux_waveform_weight: 0.0
+
+# =============================================================================
+# Hyperparameter Search Spaces (used by Optuna)
+# =============================================================================
+# These define the ranges that Optuna will explore during tuning.
+# Ranges are carefully chosen based on the training config values and
+# reasonable variations around them.
+# =============================================================================
+
+hyperparameter_space:
+  # === TRAINING HYPERPARAMETERS (highest impact) ===
+  
+  # Learning rate: centered around 5e-4 (training default)
+  # Range: 1e-4 to 1e-3 (log scale)
+  lr:
+    type: "float"
+    low: 1.0e-4
+    high: 1.0e-3
+    log: true
+  
+  # Weight decay: centered around 1e-4 (training default)
+  # Range: 5e-5 to 5e-4 (log scale)
+  weight_decay:
+    type: "float"
+    low: 5.0e-5
+    high: 5.0e-4
+    log: true
+  
+  # Class weight for COI vs background: training uses 2.0
+  # Range: 1.5 to 2.5
+  class_weight:
+    type: "float"
+    low: 1.5
+    high: 2.5
+  
+  # Warmup steps: training uses 400
+  # Range: 200 to 600 (note: tuning uses 5 epochs, training uses 400)
+  warmup_steps:
+    type: "int"
+    low: 200
+    high: 600
+  
+  # Gradient accumulation: training uses 16
+  # Options: [8, 16, 32]
+  grad_accum_steps:
+    type: "categorical"
+    choices: [8, 16, 32]
+  
+  # === ARCHITECTURAL HYPERPARAMETERS ===
+  
+  # Number of SuDoRM-RF blocks in shared backbone
+  # Training uses 16, range 12-20 for tuning
+  # More blocks = more capacity but slower and more memory
+  num_blocks:
+    type: "int"
+    low: 12
+    high: 20
+  
+  # Number of UConvBlocks in each separation branch (COI and background heads)
+  # Training uses 2, range 1-4 for tuning
+  # 0 = simple architecture (PReLU + Conv1d)
+  # >0 = enhanced architecture with N UConvBlocks per branch
+  num_head_conv_blocks:
+    type: "int"
+    low: 1
+    high: 4
+  
+  # === OTHER ARCHITECTURAL HYPERPARAMETERS (currently disabled) ===
+  # Uncomment these if you want to tune more architecture, but be aware:
+  # - This creates a HUGE search space (combinatorial explosion)
+  # - Different architectures need different training hyperparameters
+  # - Much slower trials (larger models = more compute)
+  
+  # # Output channels (bottleneck dimension)
+  # out_channels:
+  #   type: "categorical"
+  #   choices: [128, 256]
+  # 
+  # # Internal representation dimension
+  # in_channels:
+  #   type: "categorical"
+  #   choices: [256, 512]
+  # 
+  # # Encoder/decoder basis functions
+  # enc_num_basis:
+  #   type: "categorical"
+  #   choices: [512, 1024]

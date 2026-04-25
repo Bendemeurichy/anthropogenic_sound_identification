@@ -252,6 +252,61 @@ class CLAPSepModelWrapper(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+class _TextPromptModelAdapter(nn.Module):
+    """Wraps TextPromptCLAPSep: ``(B,1,T) -> (B,2,T)`` with text prompt support."""
+
+    num_sources: int = NUM_SOURCES
+
+    def __init__(self, lightning_model, embed_pos, embed_neg, sample_rate=DEFAULT_SAMPLE_RATE):
+        super().__init__()
+        self.lm = lightning_model
+        self.sample_rate = sample_rate
+        self.register_buffer("embed_pos", embed_pos)
+        self.register_buffer("embed_neg", embed_neg)
+
+    @torch.inference_mode()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass using stored text embeddings.
+        
+        Args:
+            x: (B, 1, T) input mixture
+            
+        Returns:
+            (B, 2, T) separated sources [COI, background]
+        """
+        B = x.shape[0]
+        mixture = x.squeeze(1)  # (B, T)
+        
+        # Create dummy text prompts (embeddings are precomputed)
+        # The actual forward pass uses self.embed_pos/neg buffers
+        pos_texts = [""] * B  # Dummy, embeddings already computed
+        neg_texts = [""] * B
+        
+        # Get separation using stored embeddings
+        # We need to temporarily replace the text embedding computation
+        # with our precomputed embeddings
+        with torch.no_grad():
+            # Save original method
+            original_get_text = self.lm.clap_model.get_text_embedding
+            
+            # Replace with function that returns our precomputed embeddings
+            def return_stored_embeddings(texts, use_tensor=True):
+                if texts == pos_texts:
+                    return self.embed_pos.repeat(B, 1)
+                else:
+                    return self.embed_neg.repeat(B, 1)
+            
+            self.lm.clap_model.get_text_embedding = return_stored_embeddings
+            
+            try:
+                separated = self.lm.forward(mixture, pos_texts, neg_texts)
+            finally:
+                # Restore original method
+                self.lm.clap_model.get_text_embedding = original_get_text
+        
+        return separated
+
+
 class _COIModelAdapter(nn.Module):
     """Wraps COICLAPSep: ``(B,1,T) -> (B,2,T)``."""
 
@@ -316,22 +371,40 @@ class CLAPSepInference:
 
     # -- Factory: COI-trained Lightning checkpoint --------------------------
     @classmethod
-    def from_checkpoint(cls, checkpoint_path, device=None):
-        """Load a COI-trained CLAPSep (from ``train_coi.py``)."""
+    def from_checkpoint(cls, checkpoint_path, device=None, text_pos=None, text_neg=None):
+        """Load a COI-trained CLAPSep (from ``train_coi.py`` or ``train_text_coi.py``).
+        
+        Automatically detects whether the checkpoint uses:
+        - Text-prompt conditioning (train_text_coi.py) → supports dynamic prompts at inference
+        - Learned embeddings (train_coi.py) → fixed to trained COI class
+        
+        Args:
+            checkpoint_path: Path to Lightning checkpoint (.ckpt)
+            device: Device to load on (cuda/cpu)
+            text_pos: Positive text prompt (only for text-prompt models)
+            text_neg: Negative text prompt (only for text-prompt models)
+        """
         import laion_clap
 
         from models.clapsep.base.model.CLAPSep_decoder import HTSAT_Decoder
-        from models.clapsep.train_coi import COICLAPSep, COICLAPSepDecoder
 
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         checkpoint_path = Path(checkpoint_path)
         _validate_weight_file(checkpoint_path, "COI checkpoint")
 
-        print(f"[CLAPSep] Loading COI checkpoint: {checkpoint_path}")
+        print(f"[CLAPSep] Loading checkpoint: {checkpoint_path}")
         ckpt = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
         state_dict = ckpt.get("state_dict", ckpt)
         hp = ckpt.get("hyper_parameters", {})
         sr = hp.get("sample_rate", DEFAULT_SAMPLE_RATE)
+
+        # Detect model type
+        is_text_prompt_model = "coi_text_prompts" in hp
+        
+        if is_text_prompt_model:
+            print(f"[CLAPSep] Detected: Text-prompt model (supports dynamic prompts)")
+        else:
+            print(f"[CLAPSep] Detected: Learned-embedding model (fixed COI class)")
 
         # Find CLAP weights
         clap_path = _DEFAULT_CLAP_PATH
@@ -344,24 +417,60 @@ class CLAPSepInference:
         )
         clap_model.load_ckpt(str(clap_path))
 
-        coi_decoder = COICLAPSepDecoder(
-            decoder=HTSAT_Decoder(**DEFAULT_MODEL_CONFIG),
-            embed_dim=DEFAULT_MODEL_CONFIG["lan_embed_dim"],
-            num_sources=NUM_SOURCES,
-        )
-        lm = COICLAPSep(
-            clap_model=clap_model,
-            decoder_model=coi_decoder,
-            nfft=hp.get("nfft", 1024),
-            sample_rate=sr,
-            resample_rate=hp.get("resample_rate", 48000),
-        )
-        m, u = lm.load_state_dict(state_dict, strict=False)
-        if m:
-            print(f"[CLAPSep] Missing keys: {len(m)}")
-        if u:
-            print(f"[CLAPSep] Unexpected keys: {len(u)}")
-        lm.eval().to(device)
+        if is_text_prompt_model:
+            # Text-prompt model: uses base CLAPSep decoder
+            from models.clapsep.train_text_coi import TextPromptCLAPSep
+            
+            decoder = HTSAT_Decoder(**DEFAULT_MODEL_CONFIG)
+            lm = TextPromptCLAPSep(
+                clap_model=clap_model,
+                decoder_model=decoder,
+                coi_text_prompts=hp.get("coi_text_prompts", [["airplane engine"]]),
+                background_text_prompts=hp.get("background_text_prompts", ["ambient noise"]),
+                nfft=hp.get("nfft", 1024),
+                sample_rate=sr,
+                resample_rate=hp.get("resample_rate", 48000),
+            )
+            m, u = lm.load_state_dict(state_dict, strict=False)
+            if m:
+                print(f"[CLAPSep] Missing keys: {len(m)}")
+            if u:
+                print(f"[CLAPSep] Unexpected keys: {len(u)}")
+            lm.eval().to(device)
+            
+            # Use default prompts from training or override with provided prompts
+            if text_pos is None:
+                text_pos = hp.get("coi_text_prompts", [["airplane engine"]])[0][0]
+            if text_neg is None:
+                text_neg = hp.get("background_text_prompts", ["ambient noise"])[0]
+            
+            # Wrap in text-prompt adapter (similar to pretrained model)
+            ep, en = _text_embeddings(lm, text_pos, text_neg, device)
+            wrapper = _TextPromptModelAdapter(lm, ep, en, sr)
+            return cls(wrapper, sr, int(sr * 10), device)
+            
+        else:
+            # Learned-embedding model: uses COICLAPSepDecoder
+            from models.clapsep.train_coi import COICLAPSep, COICLAPSepDecoder
+            
+            coi_decoder = COICLAPSepDecoder(
+                decoder=HTSAT_Decoder(**DEFAULT_MODEL_CONFIG),
+                embed_dim=DEFAULT_MODEL_CONFIG["lan_embed_dim"],
+                num_sources=NUM_SOURCES,
+            )
+            lm = COICLAPSep(
+                clap_model=clap_model,
+                decoder_model=coi_decoder,
+                nfft=hp.get("nfft", 1024),
+                sample_rate=sr,
+                resample_rate=hp.get("resample_rate", 48000),
+            )
+            m, u = lm.load_state_dict(state_dict, strict=False)
+            if m:
+                print(f"[CLAPSep] Missing keys: {len(m)}")
+            if u:
+                print(f"[CLAPSep] Unexpected keys: {len(u)}")
+            lm.eval().to(device)
 
         return cls(_COIModelAdapter(lm, sr), sr, int(sr * 10), device)
 
@@ -402,13 +511,22 @@ class CLAPSepInference:
         print(f"Saved: {path}")
 
     def _update_text_embeddings(self, text_pos, text_neg):
-        if not isinstance(self.model, CLAPSepModelWrapper):
-            return
-        ep, en = _text_embeddings(
-            self.model.clapsep, text_pos or "", text_neg or "", self.device
-        )
-        self.model.embed_pos = ep
-        self.model.embed_neg = en
+        """Update text embeddings for models that support dynamic prompts."""
+        if isinstance(self.model, CLAPSepModelWrapper):
+            # Original pretrained model
+            ep, en = _text_embeddings(
+                self.model.clapsep, text_pos or "", text_neg or "", self.device
+            )
+            self.model.embed_pos = ep
+            self.model.embed_neg = en
+        elif isinstance(self.model, _TextPromptModelAdapter):
+            # Text-prompt trained model
+            ep, en = _text_embeddings(
+                self.model.lm, text_pos or "", text_neg or "", self.device
+            )
+            self.model.embed_pos = ep
+            self.model.embed_neg = en
+        # else: learned-embedding model (_COIModelAdapter) doesn't support text prompts
 
 
 # ---------------------------------------------------------------------------

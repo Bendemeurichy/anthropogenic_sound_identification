@@ -4,6 +4,16 @@ Lightweight Optuna hyperparameter tuning for COI separation models.
 This script tunes the most important hyperparameters for each model (sudormrf, tuss, clapsep)
 and saves the best configurations for fair model comparison.
 
+REDESIGNED ARCHITECTURE:
+-----------------------
+This script NOW uses dedicated tuning configurations (configs/tuning/) instead of
+modifying production training configs. This provides:
+
+1. Clear separation: Tuning trials don't interfere with normal training runs
+2. Explicit hyperparameter ranges: Documented in tuning config files
+3. Fast iteration: Default 5 epochs per trial
+4. Storage efficiency: Optional --no-save-checkpoints flag
+
 STORAGE-EFFICIENT DESIGN (--no-save-checkpoints):
 -------------------------------------------------
 To save HPC storage during tuning, use the --no-save-checkpoints flag.
@@ -32,21 +42,21 @@ Each model has a different command-line interface for training:
    - Solution: Temporarily replace training_config.yaml, restore after trial
    - Note: Loads pretrained TUSS model from pretrained_path in config
 
-3. CLAPSep (train_coi.py):
-   - No --config argument; uses individual CLI arguments
-   - Accepts: --df-path, --clap-checkpoint, --batch-size, --lr, etc.
-   - Solution: Convert config dict to individual command-line arguments
+3. CLAPSep (train_text_coi.py):
+   - Accepts: --config <path_to_yaml>
+   - Uses text prompts + LoRA fine-tuning for parameter-efficient adaptation
+   - Solution: Create temporary YAML file with trial config (like SuDoRMRF)
    - Note: Requires --clap-checkpoint to load pretrained CLAP encoder
 
 All models properly load their pretrained checkpoints because:
-- Base configs are loaded from training_config.yaml files
-- Deep copy preserves pretrained_path and clap_checkpoint settings
-- Trial configs inherit these paths from base_config
+- Tuning configs specify pretrained_path and clap_checkpoint
+- Deep copy preserves these paths when creating trial configs
+- Trial configs inherit pretrained paths from tuning configs
 
 Optimized for birds dataset with abundant samples:
 - Uses only 5 epochs by default (converges quickly)
 - Disables augmentations (augment_multiplier=1)
-- Reduced warmup steps (50-200 instead of 200-600)
+- Reduced warmup steps compared to full training
 - Each trial takes ~2-5 minutes
 
 Usage:
@@ -59,11 +69,8 @@ Usage:
     # Tune specific model with more trials
     python scripts/optuna_tune_models.py --model sudormrf --n-trials 30 --target bird
 
-    # Full tuning run (default 5 epochs)
-    python scripts/optuna_tune_models.py --n-trials 20 --target bird
-
-    # For smaller datasets, increase epochs
-    python scripts/optuna_tune_models.py --n-trials 20 --max-epochs 50 --target airplane
+    # Override epochs if needed (e.g., for smaller datasets)
+    python scripts/optuna_tune_models.py --n-trials 20 --max-epochs 10 --target airplane
 """
 
 import argparse
@@ -80,8 +87,6 @@ import optuna
 import yaml
 
 # Fix UTF-8 encoding for Windows Server compatibility
-# Under pythonw there is no console and sys.stdout/stderr are None.
-# Wrap only when the underlying buffer actually exists.
 if sys.stdout is not None and hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(
         sys.stdout.buffer, encoding="utf-8", line_buffering=True
@@ -94,6 +99,7 @@ if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
 # Ensure we can import from src
 _script_dir = Path(__file__).parent
 _src_dir = _script_dir.parent / "src"
+_configs_dir = _script_dir.parent / "configs"
 if str(_src_dir) not in sys.path:
     sys.path.insert(0, str(_src_dir))
 
@@ -103,142 +109,130 @@ if str(_src_dir) not in sys.path:
 # =============================================================================
 
 
-def create_sudormrf_trial_config(
-    trial: optuna.Trial, base_config: Dict[str, Any], save_checkpoints: bool = True
-) -> Dict[str, Any]:
-    """Create SuDoRMRF config with trial hyperparameters."""
-    import copy
-
-    config = copy.deepcopy(base_config)
-
-    # Most important architectural hyperparameters
-    config["model"]["out_channels"] = trial.suggest_categorical(
-        "out_channels", [128, 256, 512]
-    )
-    config["model"]["in_channels"] = trial.suggest_categorical(
-        "in_channels", [256, 512, 768]
-    )
-    config["model"]["num_blocks"] = trial.suggest_int("num_blocks", 12, 20)
-    config["model"]["enc_num_basis"] = trial.suggest_categorical(
-        "enc_num_basis", [512, 1024, 2048]
-    )
-    config["model"]["num_head_conv_blocks"] = trial.suggest_int(
-        "num_head_conv_blocks", 1, 3
-    )
-
-    # Training hyperparameters
-    config["training"]["lr"] = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-    config["training"]["weight_decay"] = trial.suggest_float(
-        "weight_decay", 1e-5, 1e-3, log=True
-    )
-    config["training"]["class_weight"] = trial.suggest_float("class_weight", 1.0, 3.0)
-    config["training"]["warmup_steps"] = trial.suggest_int("warmup_steps", 50, 200)
-    config["training"]["grad_accum_steps"] = trial.suggest_categorical(
-        "grad_accum_steps", [8, 16, 32]
-    )
-
-    # Disable augmentations for faster tuning with abundant bird data
-    config["data"]["augment_multiplier"] = 1
-    config["data"]["background_only_prob"] = 0.3
-
-    # Disable checkpoint saving if requested (saves HPC storage during tuning)
-    if not save_checkpoints:
-        config["training"]["save_checkpoints"] = False
-
-    return config
-
-
-def create_tuss_trial_config(
-    trial: optuna.Trial, base_config: Dict[str, Any], save_checkpoints: bool = True
-) -> Dict[str, Any]:
-    """Create TUSS config with trial hyperparameters."""
-    import copy
-
-    config = copy.deepcopy(base_config)
-
-    # TUSS-specific hyperparameters
-    config["training"]["lr"] = trial.suggest_float("lr", 1e-6, 1e-4, log=True)
-    config["training"]["weight_decay"] = trial.suggest_float(
-        "weight_decay", 1e-3, 1e-1, log=True
-    )
-    config["training"]["coi_weight"] = trial.suggest_float("coi_weight", 1.0, 3.0)
-    config["training"]["zero_ref_loss_weight"] = trial.suggest_float(
-        "zero_ref_loss_weight", 0.01, 0.5, log=True
-    )
-    config["training"]["warmup_steps"] = trial.suggest_int("warmup_steps", 50, 200)
-    config["training"]["grad_accum_steps"] = trial.suggest_categorical(
-        "grad_accum_steps", [4, 8, 16]
-    )
-
-    # Whether to freeze pretrained backbone
-    config["model"]["freeze_backbone"] = trial.suggest_categorical(
-        "freeze_backbone", [True, False]
-    )
-
-    # Disable augmentations for faster tuning with abundant bird data
-    config["data"]["augment_multiplier"] = 1
-    config["data"]["background_only_prob"] = 0.3
-
-    # Disable checkpoint saving if requested (saves HPC storage during tuning)
-    # Use a temp directory that can be cleaned up after trials
-    if not save_checkpoints:
-        import tempfile
-        config["training"]["checkpoint_dir"] = tempfile.gettempdir() + "/optuna_temp_ckpt"
-
-    return config
-
-
-def create_clapsep_trial_config(
-    trial: optuna.Trial, base_config: Dict[str, Any], save_checkpoints: bool = True
-) -> Dict[str, Any]:
-    """Create CLAPSep config with trial hyperparameters."""
-    import copy
-
-    config = copy.deepcopy(base_config)
-
-    # CLAPSep architecture hyperparameters
-    config["model"]["embed_dim"] = trial.suggest_categorical(
-        "embed_dim", [64, 128, 256]
-    )
-    config["model"]["encoder_embed_dim"] = trial.suggest_categorical(
-        "encoder_embed_dim", [64, 128, 256]
-    )
-    config["model"]["n_masker_layer"] = trial.suggest_int("n_masker_layer", 2, 5)
-    config["model"]["d_attn"] = trial.suggest_categorical("d_attn", [320, 640, 1024])
-
-    # Training hyperparameters
-    config["training"]["lr"] = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-    config["training"]["weight_decay"] = trial.suggest_float(
-        "weight_decay", 1e-6, 1e-4, log=True
-    )
-    config["training"]["class_weight"] = trial.suggest_float("class_weight", 1.0, 3.0)
-
-    # Encoder fine-tuning strategy
-    use_lora = trial.suggest_categorical("use_lora", [True, False])
-    if use_lora:
-        # LoRA fine-tuning (parameter-efficient)
-        config["model"]["freeze_encoder"] = False
-        config["model"]["use_lora"] = True
-        config["model"]["lora_rank"] = trial.suggest_categorical(
-            "lora_rank", [4, 8, 16]
+def sample_from_space(trial: optuna.Trial, param_name: str, space_config: Dict[str, Any]) -> Any:
+    """
+    Sample a hyperparameter value from its space definition.
+    
+    Args:
+        trial: Optuna trial object
+        param_name: Name of the parameter
+        space_config: Configuration dict with 'type' and type-specific keys
+        
+    Returns:
+        Sampled value from the hyperparameter space
+    """
+    param_type = space_config["type"]
+    
+    if param_type == "float":
+        return trial.suggest_float(
+            param_name,
+            space_config["low"],
+            space_config["high"],
+            log=space_config.get("log", False)
         )
+    elif param_type == "int":
+        return trial.suggest_int(
+            param_name,
+            space_config["low"],
+            space_config["high"],
+            log=space_config.get("log", False)
+        )
+    elif param_type == "categorical":
+        return trial.suggest_categorical(param_name, space_config["choices"])
     else:
-        # Freeze encoder completely (decoder-only training)
-        config["model"]["freeze_encoder"] = True
-        config["model"]["use_lora"] = False
+        raise ValueError(f"Unknown parameter type: {param_type}")
 
-    # Disable augmentations for faster tuning with abundant bird data
-    config["data"]["augment_multiplier"] = 1
-    config["data"]["background_only_prob"] = 0.3
 
-    # Disable checkpoint saving if requested (saves HPC storage during tuning)
-    # Use a temp directory that can be cleaned up after trials
-    # For CLAPSep specifically, we'll pass save_top_k via CLI in run_training()
+def create_trial_config(
+    trial: optuna.Trial,
+    tuning_config: Dict[str, Any],
+    max_epochs: int = None,
+    save_checkpoints: bool = True
+) -> Dict[str, Any]:
+    """
+    Create a trial configuration by sampling from hyperparameter spaces.
+    
+    Args:
+        trial: Optuna trial object
+        tuning_config: Tuning configuration loaded from configs/tuning/
+        max_epochs: Override for number of epochs (None = use tuning config)
+        save_checkpoints: Whether to save model checkpoints
+        
+    Returns:
+        Complete configuration dict for this trial
+    """
+    import copy
+    
+    # Start with the tuning config (deep copy to avoid modifying original)
+    config = copy.deepcopy(tuning_config)
+    
+    # Override epochs if specified
+    if max_epochs is not None:
+        config["tuning"]["num_epochs"] = max_epochs
+    
+    # Set checkpoint saving
+    config["tuning"]["save_checkpoints"] = save_checkpoints
+    
+    # Sample hyperparameters from their defined spaces
+    hyperparameter_space = config.get("hyperparameter_space", {})
+    
+    for param_name, space_config in hyperparameter_space.items():
+        # Check if this parameter is conditional
+        conditional_on = space_config.get("conditional_on")
+        
+        if conditional_on:
+            # Only sample if condition is met
+            condition_param = conditional_on["param"]
+            condition_value = conditional_on["value"]
+            
+            # Get the value of the conditioning parameter (already sampled)
+            # We need to check what was sampled for the condition param
+            if condition_param in trial.params:
+                actual_value = trial.params[condition_param]
+                if actual_value == condition_value:
+                    sampled_value = sample_from_space(trial, param_name, space_config)
+                else:
+                    # Use default from config
+                    continue
+            else:
+                # Condition param not yet sampled, skip for now
+                continue
+        else:
+            # Unconditional parameter, always sample
+            sampled_value = sample_from_space(trial, param_name, space_config)
+        
+        # Update config with sampled value
+        # Need to find where this parameter lives in the config structure
+        # Convention: hyperparameters are in 'training' or 'model' sections
+        if param_name in config.get("training", {}):
+            config["training"][param_name] = sampled_value
+        elif param_name in config.get("model", {}):
+            config["model"][param_name] = sampled_value
+        else:
+            # Try to infer from the parameter name
+            # Architecture params usually go in 'model', training params in 'training'
+            arch_params = ["out_channels", "in_channels", "num_blocks", "enc_num_basis",
+                          "num_head_conv_blocks", "embed_dim", "encoder_embed_dim",
+                          "n_masker_layer", "d_attn", "freeze_backbone", "use_lora", "lora_rank"]
+            
+            if param_name in arch_params:
+                config["model"][param_name] = sampled_value
+            else:
+                config["training"][param_name] = sampled_value
+    
+    # Copy tuning settings to training section for compatibility with training scripts
+    config["training"]["num_epochs"] = config["tuning"]["num_epochs"]
+    config["training"]["checkpoint_dir"] = config["tuning"]["checkpoint_dir"]
+    config["training"]["validate_every_n_epochs"] = config["tuning"]["validate_every_n_epochs"]
+    
+    # Handle checkpoint saving for different models
     if not save_checkpoints:
-        import tempfile
-        config["training"]["checkpoint_dir"] = tempfile.gettempdir() + "/optuna_temp_ckpt"
-        config["training"]["save_top_k"] = 0  # Store in config for CLI arg generation
-
+        if "save_checkpoints" in config["training"]:
+            config["training"]["save_checkpoints"] = False
+        # For models that don't have save_checkpoints, use temp dir
+        if "checkpoint_dir" in config["training"]:
+            config["training"]["checkpoint_dir"] = tempfile.gettempdir() + "/optuna_temp_ckpt"
+    
     return config
 
 
@@ -273,14 +267,14 @@ def run_training(
     IMPORTANT: Each model has different command-line interfaces:
     - SuDoRMRF: Accepts --config argument for YAML config file
     - TUSS: Reads from hardcoded training_config.yaml (no --config arg)
-    - CLAPSep: Uses individual command-line arguments (no --config arg)
+    - CLAPSep: Accepts --config argument (uses train_text_coi.py)
 
     This function handles these differences by:
     1. SuDoRMRF: Writing config to temp file and passing via --config
     2. TUSS: Temporarily replacing training_config.yaml with trial config
-    3. CLAPSep: Converting config dict to individual command-line arguments
+    3. CLAPSep: Writing config to temp file and passing via --config
 
-    All models properly load pretrained checkpoints because the base_config
+    All models properly load pretrained checkpoints because the tuning_config
     (which includes pretrained paths) is deep-copied before modification.
 
     Args:
@@ -289,6 +283,7 @@ def run_training(
         trial_number: Optuna trial number
         device: Device to use (e.g., 'cuda', 'cuda:0', 'cpu')
         timeout: Maximum training time in seconds
+        save_checkpoints: Whether to save checkpoints
 
     Returns:
         Best validation metric (SI-SNR or SNR in dB)
@@ -296,6 +291,21 @@ def run_training(
     try:
         # Convert all Path objects to strings to avoid YAML serialization issues
         config = _convert_paths_to_strings(config)
+        
+        # Extract key training settings for display
+        num_epochs = config["training"].get("num_epochs", "UNKNOWN")
+        lr = config["training"].get("lr", "UNKNOWN")
+        
+        print(f"\n{'=' * 80}")
+        print(f"Trial {trial_number}: {model_name.upper()} on {device}")
+        print(f"Epochs: {num_epochs} | LR: {lr:.2e}")
+        if model_name == "sudormrf":
+            num_blocks = config["model"].get("num_blocks", "N/A")
+            num_head = config["model"].get("num_head_conv_blocks", "N/A")
+            print(f"Architecture: num_blocks={num_blocks}, num_head_conv_blocks={num_head}")
+        print(f"{'=' * 80}\n")
+        sys.stdout.flush()
+        
         # Determine training script path and build command
         if model_name == "sudormrf":
             # SuDoRMRF accepts --config argument
@@ -323,7 +333,6 @@ def run_training(
             backup_path = tuss_config_path.with_suffix(".yaml.backup")
             if tuss_config_path.exists():
                 import shutil
-
                 shutil.copy2(tuss_config_path, backup_path)
 
             # Write trial config
@@ -336,92 +345,47 @@ def run_training(
             cleanup_path = None  # Will restore from backup instead
 
         elif model_name == "clapsep":
-            # CLAPSep uses individual command-line arguments
-            script = str(_src_dir / "models" / "clapsep" / "train_coi.py")
+            # CLAPSep uses train_text_coi.py with text prompts and LoRA
+            # Accepts --config argument (like SuDoRMRF)
+            config["training"]["device"] = device
 
-            # Extract config parameters
-            data_cfg = config.get("data", {})
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False
+            ) as f:
+                yaml.dump(config, f, default_flow_style=False)
+                config_path = f.name
+
+            script = str(_src_dir / "models" / "clapsep" / "train_text_coi.py")
+            
+            # Build command with config file and optional overrides
+            cmd = [sys.executable, script, "--config", config_path, "--device", device]
+            
+            # Override specific settings via CLI if needed
             model_cfg = config.get("model", {})
-            train_cfg = config.get("training", {})
-
-            # Build command with all required and optional arguments
-            cmd = [
-                sys.executable,
-                script,
-                "--df-path",
-                str(data_cfg.get("df_path", "")),
-                "--clap-checkpoint",
-                str(model_cfg.get("clap_checkpoint", "")),
-                "--checkpoint-dir",
-                str(train_cfg.get("checkpoint_dir", "checkpoints/clapsep")),
-                "--sample-rate",
-                str(data_cfg.get("sample_rate", 32000)),
-                "--segment-length",
-                str(data_cfg.get("segment_length", 5.0)),
-                "--batch-size",
-                str(train_cfg.get("batch_size", 16)),
-                "--num-epochs",
-                str(train_cfg.get("num_epochs", 150)),
-                "--lr",
-                str(train_cfg.get("lr", 1e-4)),
-                "--device",
-                device,
-                "--class-weight",
-                str(train_cfg.get("class_weight", 1.5)),
-                "--num-workers",
-                str(train_cfg.get("num_workers", 4)),
-                "--seed",
-                str(train_cfg.get("seed", 42)),
-                "--nfft",
-                str(model_cfg.get("nfft", 1024)),
-                "--precision",
-                str(train_cfg.get("precision", "bf16-mixed")),
-                # Decoder architecture parameters (tunable)
-                "--embed-dim",
-                str(model_cfg.get("embed_dim", 128)),
-                "--encoder-embed-dim",
-                str(model_cfg.get("encoder_embed_dim", 128)),
-                "--d-attn",
-                str(model_cfg.get("d_attn", 640)),
-                "--n-masker-layer",
-                str(model_cfg.get("n_masker_layer", 3)),
-            ]
-
-            # Add SNR range
-            if "snr_range" in data_cfg:
-                snr_range = data_cfg["snr_range"]
-                cmd.extend(
-                    ["--snr-min", str(snr_range[0]), "--snr-max", str(snr_range[1])]
-                )
-
-            # Add optional flags
-            if model_cfg.get("freeze_encoder", True) == False:
-                cmd.append("--no-freeze-encoder")
             if model_cfg.get("use_lora", False):
                 cmd.append("--use-lora")
                 cmd.extend(["--lora-rank", str(model_cfg.get("lora_rank", 8))])
-
-            cleanup_path = None
+            else:
+                cmd.append("--no-lora")
+            
+            if not model_cfg.get("freeze_encoder", False):
+                cmd.append("--no-freeze-encoder")
+            else:
+                cmd.append("--freeze-encoder")
+            
+            cleanup_path = config_path
 
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
-        print(f"\n{'=' * 80}")
-        print(f"Trial {trial_number}: Running {model_name} on {device}")
-        print(f"Command: {' '.join(cmd[:4])}...")
-        print(f"{'=' * 80}\n")
-        sys.stdout.flush()  # Ensure header is written to redirected file
-
         # Run training script and stream output in real-time
-        # This allows progress to be visible when running with start-process on Windows
-        # Using stdout=None allows subprocess to inherit our redirected stdout/stderr
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
-            errors="replace",  # Replace invalid UTF-8 sequences instead of crashing
+            errors="replace",
             bufsize=1,  # Line buffered
         )
 
@@ -429,9 +393,8 @@ def run_training(
         output_lines = []
         try:
             for line in process.stdout:
-                # Write to our stdout (which might be redirected by Start-Process)
                 sys.stdout.write(line)
-                sys.stdout.flush()  # Critical: flush after each line for redirected output
+                sys.stdout.flush()
                 output_lines.append(line)
             
             # Wait for process to complete
@@ -449,7 +412,7 @@ def run_training(
         metric = parse_best_metric(full_output, model_name)
 
         print(f"\nTrial {trial_number} completed with metric: {metric:.2f} dB\n")
-        sys.stdout.flush()  # Ensure completion message is written
+        sys.stdout.flush()
         return metric
 
     except subprocess.TimeoutExpired:
@@ -458,12 +421,12 @@ def run_training(
     except Exception as e:
         print(f"Error in trial {trial_number}: {e}")
         import traceback
-
         traceback.print_exc()
         return -100.0
     finally:
         # Clean up temp files and restore backups
-        if model_name == "sudormrf" and cleanup_path:
+        if cleanup_path and model_name in ["sudormrf", "clapsep"]:
+            # SuDoRMRF and CLAPSep use temp config files
             Path(cleanup_path).unlink(missing_ok=True)
         elif model_name == "tuss":
             # Restore original config
@@ -471,7 +434,6 @@ def run_training(
             backup_path = tuss_config_path.with_suffix(".yaml.backup")
             if backup_path.exists():
                 import shutil
-
                 shutil.move(str(backup_path), str(tuss_config_path))
 
 
@@ -532,7 +494,7 @@ def parse_best_metric(output: str, model_name: str) -> float:
 
 def create_objective(
     model_name: str,
-    base_config: Dict[str, Any],
+    tuning_config: Dict[str, Any],
     max_epochs: int = None,
     device: str = "cuda",
     save_checkpoints: bool = True,
@@ -541,18 +503,12 @@ def create_objective(
 
     def objective(trial: optuna.Trial) -> float:
         # Create config with trial hyperparameters
-        if model_name == "sudormrf":
-            config = create_sudormrf_trial_config(trial, base_config, save_checkpoints)
-        elif model_name == "tuss":
-            config = create_tuss_trial_config(trial, base_config, save_checkpoints)
-        elif model_name == "clapsep":
-            config = create_clapsep_trial_config(trial, base_config, save_checkpoints)
-        else:
-            raise ValueError(f"Unknown model: {model_name}")
-
-        # Override max epochs if specified (for quick testing)
-        if max_epochs is not None:
-            config["training"]["num_epochs"] = max_epochs
+        config = create_trial_config(
+            trial,
+            tuning_config,
+            max_epochs=max_epochs,
+            save_checkpoints=save_checkpoints
+        )
 
         # Run training and get metric
         metric = run_training(
@@ -586,32 +542,32 @@ def tune_model(
         model_name: One of 'sudormrf', 'tuss', 'clapsep'
         target_class: Target class for separation (e.g., 'bird', 'airplane')
         n_trials: Number of Optuna trials to run
-        max_epochs: Maximum epochs per trial (for quick testing)
+        max_epochs: Maximum epochs per trial (None = use tuning config default)
         device: Device to use (e.g., 'cuda', 'cuda:0', 'cpu')
         storage: Optuna storage URL
         study_name: Name for the Optuna study
-        csv_path: Path to dataset CSV file (default: "data/aircraft_data.csv")
-        save_checkpoints: Whether to save model checkpoints during trials (default: True)
+        csv_path: Path to dataset CSV file
+        save_checkpoints: Whether to save model checkpoints during trials
 
     Returns:
         Best hyperparameters dictionary
     """
-    # Load base config
-    config_path = _src_dir / "models" / model_name / "training_config.yaml"
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config not found: {config_path}")
+    # Load tuning config
+    tuning_config_path = _configs_dir / "tuning" / f"{model_name}_tuning.yaml"
+    if not tuning_config_path.exists():
+        raise FileNotFoundError(f"Tuning config not found: {tuning_config_path}")
 
-    with open(config_path) as f:
-        base_config = yaml.safe_load(f)
+    with open(tuning_config_path) as f:
+        tuning_config = yaml.safe_load(f)
 
     # Update target classes for the specified class
     if model_name == "tuss":
-        base_config["data"]["target_classes"] = [
+        tuning_config["data"]["target_classes"] = [
             [target_class, target_class.capitalize()]
         ]
-        base_config["model"]["coi_prompts"] = [target_class]
+        tuning_config["model"]["coi_prompts"] = [target_class]
     else:
-        base_config["data"]["target_classes"] = [
+        tuning_config["data"]["target_classes"] = [
             target_class,
             target_class.capitalize(),
         ]
@@ -620,7 +576,7 @@ def tune_model(
     if not Path(csv_path).exists():
         raise FileNotFoundError(f"Dataset CSV file does not exist: {csv_path}")
     print(f"Using dataset CSV: {csv_path}")
-    base_config["data"]["df_path"] = csv_path
+    tuning_config["data"]["df_path"] = csv_path
 
     # Create study
     if study_name is None:
@@ -637,21 +593,25 @@ def tune_model(
     )
 
     # Print study info
+    epochs_per_trial = max_epochs if max_epochs else tuning_config['tuning']['num_epochs']
     print(f"\n{'=' * 80}")
     print(f"Starting Optuna hyperparameter tuning for {model_name.upper()}")
     print(f"{'=' * 80}")
     print(f"Target class: {target_class}")
     print(f"Number of trials: {n_trials}")
-    print(f"Max epochs per trial: {max_epochs if max_epochs else 'from config'}")
+    print(f"⚠️  EPOCHS PER TRIAL: {epochs_per_trial}  ⚠️")
     print(f"Device: {device}")
     print(f"Save checkpoints: {save_checkpoints}")
     print(f"Study name: {study_name}")
     print(f"Storage: {storage}")
+    print(f"Tuning config: {tuning_config_path}")
+    if epochs_per_trial != 5:
+        print(f"\n⚠️  WARNING: Using {epochs_per_trial} epochs (default is 5) ⚠️")
     print(f"{'=' * 80}\n")
 
     # Run optimization
     objective = create_objective(
-        model_name, base_config, max_epochs, device=device, save_checkpoints=save_checkpoints
+        model_name, tuning_config, max_epochs, device=device, save_checkpoints=save_checkpoints
     )
     study.optimize(objective, n_trials=n_trials)
 
@@ -666,13 +626,8 @@ def tune_model(
         print(f"  {key}: {value}")
     print(f"{'=' * 80}\n")
 
-    # Create best config
-    if model_name == "sudormrf":
-        best_config = create_sudormrf_trial_config(study.best_trial, base_config, save_checkpoints=True)
-    elif model_name == "tuss":
-        best_config = create_tuss_trial_config(study.best_trial, base_config, save_checkpoints=True)
-    elif model_name == "clapsep":
-        best_config = create_clapsep_trial_config(study.best_trial, base_config, save_checkpoints=True)
+    # Create best config by applying best params to tuning config
+    best_config = create_trial_config(study.best_trial, tuning_config, save_checkpoints=True)
 
     # Save best config
     output_dir = Path("configs/tuned")
@@ -717,7 +672,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Quick test with 5 trials (uses default 5 epochs)
+  # Quick test with 5 trials (uses default 5 epochs from tuning config)
   python scripts/optuna_tune_models.py --n-trials 5 --target bird
 
   # Tune specific model with more trials
@@ -725,11 +680,12 @@ Examples:
 
   # Use specific GPU
   python scripts/optuna_tune_models.py --n-trials 20 --target bird --gpu 1
-  # Or equivalently:
-  python scripts/optuna_tune_models.py --n-trials 20 --target bird --device cuda:1
 
   # Override epochs if needed (e.g., for smaller datasets)
-  python scripts/optuna_tune_models.py --n-trials 20 --max-epochs 50 --target airplane
+  python scripts/optuna_tune_models.py --n-trials 20 --max-epochs 10 --target airplane
+  
+  # Save storage with --no-save-checkpoints (recommended for HPC)
+  python scripts/optuna_tune_models.py --n-trials 20 --target bird --no-save-checkpoints
         """,
     )
     parser.add_argument(
@@ -754,8 +710,8 @@ Examples:
     parser.add_argument(
         "--max-epochs",
         type=int,
-        default=5,
-        help="Maximum epochs per trial (default: 5, optimized for abundant bird data)",
+        default=None,
+        help="Maximum epochs per trial (default: None, uses tuning config value of 5)",
     )
     parser.add_argument(
         "--storage",
@@ -814,7 +770,6 @@ Examples:
             print(f"{'=' * 80}")
             print(f"{e}")
             import traceback
-
             traceback.print_exc()
             print(f"{'=' * 80}\n")
             results[model_name] = None

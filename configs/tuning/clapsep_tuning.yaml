@@ -1,0 +1,179 @@
+# =============================================================================
+# CLAPSep Hyperparameter Tuning Configuration (Text-Prompt Training)
+# =============================================================================
+# This config is ONLY for Optuna hyperparameter tuning.
+# For normal training, use src/models/clapsep/training_config.yaml
+#
+# Design philosophy:
+# - Separate tuning trials from production training runs
+# - Use short epochs (5-10) for fast iteration
+# - Focus on most impactful hyperparameters
+# - Save results to dedicated tuning directory
+#
+# TRAINING MODE: Text-Prompt + LoRA
+# - Uses train_text_coi.py (NOT train_coi.py)
+# - Text prompts for COI classes (inference-time flexibility)
+# - LoRA fine-tuning of audio encoder (parameter-efficient)
+# - Multiple prompt variations per class for robustness
+# =============================================================================
+
+# Tuning-specific settings
+tuning:
+  # Number of epochs per trial (keep low for fast iteration)
+  num_epochs: 5
+  
+  # Directory for tuning checkpoints (separate from production)
+  checkpoint_dir: "checkpoints/tuning/clapsep"
+  
+  # Whether to save model checkpoints during trials (disable to save space)
+  save_checkpoints: false
+  
+  # Validation frequency
+  validate_every_n_epochs: 1
+
+# Data configuration
+data:
+  df_path: "src/models/tuss/checkpoints/.csv"  # Will be overridden by CLI
+  sample_rate: 32000
+  segment_length: 5.0
+  snr_range: [-5, 5]
+  n_coi_classes: 1
+  
+  # Target classes (will be set dynamically)
+  target_classes: [["airplane", "aircraft", "jet", "propeller_airplane", "aeroplane"]]
+  
+  # Disable augmentation for faster tuning
+  augment_multiplier: 1
+  background_only_prob: 0.3
+  background_mix_n: 1
+  
+  use_webdataset: false
+  webdataset_path: ""
+
+# Model configuration
+model:
+  # IMPORTANT: Path to pretrained CLAP model
+  clap_checkpoint: "src/models/clapsep/checkpoint/CLAPSep/model/music_audioset_epoch_15_esc_90.14.pt"
+  
+  # CLAP expects 48kHz input
+  resample_rate: 48000
+  
+  # Text prompts (for text-based training)
+  coi_text_prompts:
+    - ["airplane engine", "aircraft noise", "jet flying", "propeller airplane", "plane flying overhead"]
+  background_text_prompts: ["ambient noise", "background sounds", "environmental noise"]
+  
+  # Fixed architecture parameters (from training config)
+  lan_embed_dim: 1024
+  depths: [1, 1, 1, 1]
+  phase: false
+  spec_factor: 8
+  conv: false
+  nfft: 1024
+  hop_length: 320
+  num_sources: 2
+  
+  # These will be tuned by Optuna (but have defaults from training config)
+  embed_dim: 128
+  encoder_embed_dim: 128
+  d_attn: 640
+  n_masker_layer: 3
+  freeze_encoder: false
+  use_lora: true
+  lora_rank: 8
+
+# Training hyperparameters
+training:
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  use_amp: true
+  precision: "bf16-mixed"
+  device: "cuda"
+  seed: 42
+  gradient_clip_val: 5.0
+  patience: 20
+  
+  # These will be overridden by Optuna trials
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  class_weight: 1.5
+
+# =============================================================================
+# Hyperparameter Search Spaces (used by Optuna)
+# =============================================================================
+# These define the ranges that Optuna will explore during tuning.
+# =============================================================================
+
+hyperparameter_space:
+  # === DECODER ARCHITECTURE ===
+  # These are relatively lightweight to tune (don't affect encoder)
+  
+  # Decoder embedding dimension: training uses 128
+  # Options: [64, 128, 256]
+  embed_dim:
+    type: "categorical"
+    choices: [64, 128, 256]
+  
+  # Encoder embedding dimension: training uses 128
+  # Options: [64, 128, 256]
+  encoder_embed_dim:
+    type: "categorical"
+    choices: [64, 128, 256]
+  
+  # Number of masker layers: training uses 3
+  # Range: 2 to 4
+  n_masker_layer:
+    type: "int"
+    low: 2
+    high: 4
+  
+  # Attention dimension: training uses 640
+  # Options: [320, 640, 1024]
+  d_attn:
+    type: "categorical"
+    choices: [320, 640, 1024]
+  
+  # === TRAINING HYPERPARAMETERS ===
+  
+  # Learning rate: centered around 1e-4 (training default)
+  # Range: 5e-5 to 5e-4 (log scale)
+  lr:
+    type: "float"
+    low: 5.0e-5
+    high: 5.0e-4
+    log: true
+  
+  # Weight decay: training uses 1e-5
+  # Range: 5e-6 to 5e-5 (log scale)
+  weight_decay:
+    type: "float"
+    low: 5.0e-6
+    high: 5.0e-5
+    log: true
+  
+  # Class weight for COI vs background: training uses 1.5
+  # Range: 1.0 to 2.0
+  class_weight:
+    type: "float"
+    low: 1.0
+    high: 2.0
+  
+  # === ENCODER FINE-TUNING STRATEGY ===
+  
+  # Whether to use LoRA for encoder fine-tuning
+  # Training uses LoRA with rank=8
+  use_lora:
+    type: "categorical"
+    choices: [true, false]
+  
+  # LoRA rank (only used if use_lora=true)
+  # Training uses 8
+  # Options: [4, 8, 16]
+  # Note: This is conditional - only sampled when use_lora=true
+  lora_rank:
+    type: "categorical"
+    choices: [4, 8, 16]
+    conditional_on:
+      param: "use_lora"
+      value: true
