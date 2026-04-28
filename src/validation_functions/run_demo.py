@@ -31,7 +31,7 @@ def peak_normalize(waveform: torch.Tensor, target_peak: float = 0.95) -> torch.T
 
 def main():
     ckpt_path = (
-        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/20260424_225612"
+        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/multi_coi_27_04"
     )
     wav_path = "/home/bendm/Thesis/project/data/misclassifications/239_as_is_sep_cls_['plane',_'wind',_'biophony']_conf0.456_S4A04430_20180716_113000.wav"
 

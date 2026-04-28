@@ -1627,6 +1627,12 @@ def validate_epoch(
     bg_sisnr_bg_only: list[float] = []  # Background SI-SNR on background-only samples
     bg_sisnr_mixed: list[float] = []  # Background SI-SNR on mixed samples
     bg_energy_ratios: list[float] = []  # BG energy / total energy ratio
+    
+    # Track per-class losses for class-balanced validation loss
+    per_class_loss_sum: list[float] = [0.0 for _ in range(criterion.n_coi)]
+    per_class_loss_counts: list[int] = [0 for _ in range(criterion.n_coi)]
+    bg_loss_sum = 0.0
+    bg_loss_count = 0
 
     use_amp = use_amp and str(device).startswith("cuda")
     amp_dtype = getattr(criterion, "_amp_dtype", torch.bfloat16)
@@ -1666,6 +1672,35 @@ def validate_epoch(
             batch_loss = float(loss.item())
             running_loss += batch_loss * B
             n_samples += B
+            
+            # Accumulate per-class losses for class-balanced validation
+            # This ensures equal weight for each class regardless of sample count
+            with torch.no_grad():
+                n_src = outputs.shape[1]
+                # Compute per-source losses (same as in COIWeightedSNRLoss but without weighting)
+                from loss_functions.snr import snr_with_zeroref_loss
+                per_src_losses = snr_with_zeroref_loss(
+                    outputs.float(),
+                    clean_wavs.float(),
+                    n_src=n_src,
+                    snr_max=criterion.snr_max,
+                    zero_ref_loss_weight=criterion.zero_ref_loss_weight,
+                    solve_perm=False,
+                    eps=criterion.eps,
+                )  # (B, n_src)
+                
+                # Track COI losses per class (only for active samples)
+                for cls_i in range(n_src - 1):
+                    ref_power = (clean_wavs[:, cls_i] ** 2).mean(dim=-1)  # (B,)
+                    is_active = ref_power > SILENCE_ENERGY_EPS  # (B,)
+                    if is_active.any():
+                        active_losses = per_src_losses[:, cls_i][is_active]
+                        per_class_loss_sum[cls_i] += active_losses.sum().item()
+                        per_class_loss_counts[cls_i] += is_active.sum().item()
+                
+                # Track background loss (always active)
+                bg_loss_sum += per_src_losses[:, -1].sum().item()
+                bg_loss_count += B
 
             # Per-class SI-SNR for reporting
             try:
@@ -1722,6 +1757,27 @@ def validate_epoch(
     if str(device).startswith("cuda"):
         torch.cuda.empty_cache()
 
+    # Compute class-balanced validation loss
+    # Average per-class losses, then average across classes (not samples)
+    # This gives equal weight to each class regardless of validation set imbalance
+    per_class_avg_losses = []
+    for cls_i in range(criterion.n_coi):
+        if per_class_loss_counts[cls_i] > 0:
+            avg_loss = per_class_loss_sum[cls_i] / per_class_loss_counts[cls_i]
+            per_class_avg_losses.append(avg_loss)
+    
+    if bg_loss_count > 0:
+        bg_avg_loss = bg_loss_sum / bg_loss_count
+        per_class_avg_losses.append(bg_avg_loss)
+    
+    # Class-balanced loss: equal weight to each class
+    class_balanced_loss = (
+        np.mean(per_class_avg_losses) if per_class_avg_losses else 0.0
+    )
+    
+    # Also compute the standard sample-weighted loss for comparison
+    sample_weighted_loss = running_loss / max(n_samples, 1)
+
     if bg_sisnr_vals:
         class_strs = []
         for i, v in enumerate(per_class_sisnr):
@@ -1744,8 +1800,13 @@ def validate_epoch(
             print(f"    BG (mixed samples): {np.mean(bg_sisnr_mixed):.2f} dB [{len(bg_sisnr_mixed)} batches]")
         if bg_energy_ratios:
             print(f"    BG energy ratio (BG/total): {np.mean(bg_energy_ratios):.3f}")
+    
+    # Print both loss metrics for transparency
+    print(f"  Val Loss (class-balanced): {class_balanced_loss:.6f}")
+    print(f"  Val Loss (sample-weighted): {sample_weighted_loss:.6f}")
+    print(f"  Class sample counts: {per_class_loss_counts}, BG: {bg_loss_count}")
 
-    return running_loss / max(n_samples, 1)
+    return class_balanced_loss
 
 
 # =============================================================================
@@ -1819,9 +1880,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
             multi_coi_prob=(
                 getattr(config.data, "multi_coi_prob", 0.0) if split == "train" else 0.0
             ),
-            balance_classes=(
-                getattr(config.data, "balance_classes", True) if split == "train" else False
-            ),
+            balance_classes=getattr(config.data, "balance_classes", False),
             coi_class_multipliers=(
                 getattr(config.data, "coi_class_multipliers", None)
             ),
