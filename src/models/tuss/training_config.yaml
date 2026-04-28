@@ -190,7 +190,7 @@ data:
   # List of integers, one per COI class. E.g., [16, 1] duplicates class-0
   # samples 16x to balance a 1:16 ratio with class-1. Only applied during
   # training. Set to null or [1, 1, ...] to disable.
-  coi_class_multipliers: [5, 1] # Airplane=4x, Birds=1x to balance 102:1648 ratio a bit
+  coi_class_multipliers: [5, 1] # Airplane=5x, Birds=1x (was [10,1] - too aggressive; 102:1648 ratio = 1:16, using 5:1 for partial balance)
 
   # WebDataset configuration for HPC compressed data loading
   # Set use_webdataset: true to load from pre-compressed tar shards

@@ -501,6 +501,11 @@ class AudioAugmentations:
 
     @staticmethod
     def add_noise(waveform: torch.Tensor, noise_level: float = 0.005) -> torch.Tensor:
+        """Add white Gaussian noise to simulate microphone self-noise.
+        
+        White noise has flat frequency spectrum (equal power at all frequencies),
+        making it representative of typical recording equipment noise floor.
+        """
         return waveform + torch.randn_like(waveform) * noise_level
 
     @staticmethod
@@ -509,7 +514,21 @@ class AudioAugmentations:
 
     @staticmethod
     def time_shift(waveform: torch.Tensor, shift_samples: int) -> torch.Tensor:
-        return torch.roll(waveform, shifts=shift_samples, dims=-1)
+        """Apply time shift with zero-padding (not circular roll).
+        
+        Positive shift = delay (add silence at start), negative = advance (trim start).
+        """
+        if shift_samples == 0:
+            return waveform
+        
+        shifted = torch.zeros_like(waveform)
+        if shift_samples > 0:
+            # Delay: zero-pad at start, trim end
+            shifted[..., shift_samples:] = waveform[..., :-shift_samples]
+        else:
+            # Advance: trim start, zero-pad at end
+            shifted[..., :shift_samples] = waveform[..., -shift_samples:]
+        return shifted
 
     @staticmethod
     def low_pass_filter(
@@ -602,7 +621,12 @@ class GpuAudioAugmentations:
     def add_noise_batch(
         waveform: torch.Tensor, noise_level_range: tuple[float, float] = (0.001, 0.01)
     ) -> torch.Tensor:
-        """Add random Gaussian noise to each sample in batch."""
+        """Add white Gaussian noise to each sample in batch.
+        
+        Simulates microphone/preamp self-noise typical of field recording equipment.
+        White noise = flat frequency spectrum (equal power across all frequencies).
+        Range 0.001-0.01 = approximately -60 to -40 dB SNR (typical noise floor).
+        """
         # Random noise level per sample
         noise_levels = torch.empty(
             waveform.shape[0], device=waveform.device
@@ -636,7 +660,11 @@ class GpuAudioAugmentations:
     def time_shift_batch(
         waveform: torch.Tensor, max_shift_ratio: float = 0.1
     ) -> torch.Tensor:
-        """Apply random time shift to each sample in batch."""
+        """Apply random time shift to each sample in batch with zero-padding.
+        
+        Uses zero-padding instead of circular roll to avoid wraparound artifacts.
+        Positive shift = delay (add silence at start), negative = advance (trim start).
+        """
         T = waveform.shape[-1]
         max_shift = int(T * max_shift_ratio)
         
@@ -650,7 +678,19 @@ class GpuAudioAugmentations:
         
         result = []
         for i, shift in enumerate(shifts):
-            result.append(torch.roll(waveform[i], shifts=shift.item(), dims=-1))
+            shift_val = shift.item()
+            if shift_val == 0:
+                result.append(waveform[i])
+            elif shift_val > 0:
+                # Delay: zero-pad at start, trim end
+                shifted = torch.zeros_like(waveform[i])
+                shifted[..., shift_val:] = waveform[i, ..., :-shift_val]
+                result.append(shifted)
+            else:  # shift_val < 0
+                # Advance: trim start, zero-pad at end
+                shifted = torch.zeros_like(waveform[i])
+                shifted[..., :shift_val] = waveform[i, ..., -shift_val:]
+                result.append(shifted)
         
         return torch.stack(result, dim=0)
 
