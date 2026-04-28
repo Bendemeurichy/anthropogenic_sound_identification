@@ -9,11 +9,31 @@ from models.tuss.inference import TUSSInference
 from validation_functions.demo_separation import plot_combined_spectrograms_from_wavs
 
 
+def peak_normalize(waveform: torch.Tensor, target_peak: float = 0.95) -> torch.Tensor:
+    """Peak-normalize a waveform for saving to disk (human listening).
+    
+    Scales the audio so the peak amplitude is at target_peak (default 0.95)
+    to ensure proper loudness for playback while leaving small headroom
+    to prevent clipping artifacts in lossy formats.
+    
+    Args:
+        waveform: Input waveform tensor
+        target_peak: Target peak level (0.0 to 1.0), default 0.95
+        
+    Returns:
+        Peak-normalized waveform at listening level
+    """
+    peak = waveform.abs().max()
+    if peak < 1e-8:
+        return waveform
+    return waveform * (target_peak / peak)
+
+
 def main():
     ckpt_path = (
-        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/20260423_105141"
+        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/20260424_225612"
     )
-    wav_path = "/home/bendm/Thesis/project/code/src/validation_functions/demo_output/520539__szegvari__forest-wind-birds-tree-airplane-mastered.wav"
+    wav_path = "/home/bendm/Thesis/project/data/misclassifications/239_as_is_sep_cls_['plane',_'wind',_'biophony']_conf0.456_S4A04430_20180716_113000.wav"
 
     out_dir = Path(
         "/home/bendm/Thesis/project/code/src/validation_functions/demo_output"
@@ -54,20 +74,23 @@ def main():
     elif mixture_wav.dim() == 1:
         mixture_wav = mixture_wav.unsqueeze(0)
 
-    # Save files
+    # Save files with peak normalization for proper listening level
     mix_path = out_dir / "mixture.wav"
     plane_path = out_dir / "separated_plane.wav"
     bird_path = out_dir / "separated_bird.wav"
+    bg_path = out_dir / "separated_background.wav"
+
+    # Peak-normalize all audio for proper playback volume
+    mixture_wav_norm = peak_normalize(mixture_wav.squeeze(0) if mixture_wav.dim() > 1 else mixture_wav)
+    plane_audio_norm = peak_normalize(plane_audio)
+    bird_audio_norm = peak_normalize(bird_audio)
+    bg_audio_norm = peak_normalize(bg_audio)
 
     # Convert tensors back to numpy for soundfile
-    sf.write(str(mix_path), mixture_wav.numpy().T, mix_sr)
-    sf.write(
-        str(plane_path), plane_audio.unsqueeze(0).numpy().T, inferencer.sample_rate
-    )
-    sf.write(str(bird_path), bird_audio.unsqueeze(0).numpy().T, inferencer.sample_rate)
-
-    bg_path = out_dir / "separated_background.wav"
-    sf.write(str(bg_path), bg_audio.unsqueeze(0).numpy().T, inferencer.sample_rate)
+    sf.write(str(mix_path), mixture_wav_norm.unsqueeze(0).numpy().T, mix_sr)
+    sf.write(str(plane_path), plane_audio_norm.unsqueeze(0).numpy().T, inferencer.sample_rate)
+    sf.write(str(bird_path), bird_audio_norm.unsqueeze(0).numpy().T, inferencer.sample_rate)
+    sf.write(str(bg_path), bg_audio_norm.unsqueeze(0).numpy().T, inferencer.sample_rate)
 
     print("Plotting spectrograms...")
     save_png_path = out_dir / "spectrogram_plane_bird_bg_separation.png"

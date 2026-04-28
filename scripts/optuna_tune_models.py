@@ -546,7 +546,7 @@ def tune_model(
         device: Device to use (e.g., 'cuda', 'cuda:0', 'cpu')
         storage: Optuna storage URL
         study_name: Name for the Optuna study
-        csv_path: Path to dataset CSV file
+        csv_path: Path to dataset CSV file (only required if use_webdataset=false in config)
         save_checkpoints: Whether to save model checkpoints during trials
 
     Returns:
@@ -572,11 +572,17 @@ def tune_model(
             target_class.capitalize(),
         ]
 
-    # Set dataset CSV path
-    if not Path(csv_path).exists():
-        raise FileNotFoundError(f"Dataset CSV file does not exist: {csv_path}")
-    print(f"Using dataset CSV: {csv_path}")
-    tuning_config["data"]["df_path"] = csv_path
+    # Set dataset CSV path (only required if not using WebDataset)
+    use_webdataset = tuning_config.get("data", {}).get("use_webdataset", False)
+    webdataset_path = tuning_config.get("data", {}).get("webdataset_path", "")
+    
+    if use_webdataset:
+        print(f"Using WebDataset directory: {webdataset_path}")
+    else:
+        if not Path(csv_path).exists():
+            raise FileNotFoundError(f"Dataset CSV file does not exist: {csv_path}")
+        print(f"Using dataset CSV: {csv_path}")
+        tuning_config["data"]["df_path"] = csv_path
 
     # Create study
     if study_name is None:

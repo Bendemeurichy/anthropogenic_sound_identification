@@ -1224,6 +1224,25 @@ class ValidationPipeline:
             return waveform
         return waveform / peak
 
+    def _normalize_for_saving(self, waveform: torch.Tensor, target_peak: float = 0.95) -> torch.Tensor:
+        """Peak-normalize a waveform for saving to disk (human listening).
+        
+        Scales the audio so the peak amplitude is at target_peak (default 0.95)
+        to ensure proper loudness for playback while leaving small headroom
+        to prevent clipping artifacts in lossy formats.
+        
+        Args:
+            waveform: Input waveform tensor
+            target_peak: Target peak level (0.0 to 1.0), default 0.95
+            
+        Returns:
+            Peak-normalized waveform at listening level
+        """
+        peak = waveform.abs().max()
+        if peak < 1e-8:
+            return waveform
+        return waveform * (target_peak / peak)
+
     def _get_coi_head_index(self) -> int:
         """Return the COI head index for the current separator model."""
         if isinstance(self.separator, TUSSInference):
@@ -1420,9 +1439,11 @@ class ValidationPipeline:
                 if save_dir is not None and idx in sample_choices:
                     try:
                         k = list(sample_choices).index(idx)
+                        # Peak-normalize for proper listening level
+                        seg_normalized = self._normalize_for_saving(segments[0])
                         torchaudio.save(
                             str(save_dir / f"clean_coi_{k}.wav"),
-                            segments[0].unsqueeze(0).cpu(),
+                            seg_normalized.unsqueeze(0).cpu(),
                             self.sample_rate,
                         )
                     except Exception:
@@ -1661,19 +1682,24 @@ class ValidationPipeline:
                     if save_dir is not None and idx in sample_choices and seg_idx == 0:
                         try:
                             k = list(sample_choices).index(idx)
+                            # Peak-normalize for proper listening level
+                            coi_n_save = self._normalize_for_saving(coi_n)
+                            bg_n_save = self._normalize_for_saving(bg_n)
+                            mixture_save = self._normalize_for_saving(mixture)
+                            
                             torchaudio.save(
                                 str(save_dir / f"mixture_coi_clean_{k}.wav"),
-                                coi_n.unsqueeze(0).cpu(),
+                                coi_n_save.unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
                             torchaudio.save(
                                 str(save_dir / f"mixture_bg_clean_{k}.wav"),
-                                bg_n.unsqueeze(0).cpu(),
+                                bg_n_save.unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
                             torchaudio.save(
                                 str(save_dir / f"mixture_created_{k}.wav"),
-                                mixture.unsqueeze(0).cpu(),
+                                mixture_save.unsqueeze(0).cpu(),
                                 self.sample_rate,
                             )
                         except Exception:
@@ -1711,31 +1737,37 @@ class ValidationPipeline:
                             try:
                                 k = list(sample_choices).index(idx)
                                 if separated.dim() == 1:
+                                    # Peak-normalize for proper listening level
+                                    sep_save = self._normalize_for_saving(separated)
                                     torchaudio.save(
                                         str(
                                             save_dir
                                             / f"mixture_separated_coi_est_{k}.wav"
                                         ),
-                                        separated.unsqueeze(0).cpu(),
+                                        sep_save.unsqueeze(0).cpu(),
                                         self.sample_rate,
                                     )
                                 else:
                                     for s in range(separated.shape[0]):
+                                        # Peak-normalize each source for proper listening level
+                                        src_save = self._normalize_for_saving(separated[s])
                                         torchaudio.save(
                                             str(
                                                 save_dir
                                                 / f"mixture_separated_src{s}_{k}.wav"
                                             ),
-                                            separated[s].unsqueeze(0).cpu(),
+                                            src_save.unsqueeze(0).cpu(),
                                             self.sample_rate,
                                         )
+                                    # Also save the COI head specifically
                                     coi_head = separated[self._get_coi_head_index()]
+                                    coi_head_save = self._normalize_for_saving(coi_head)
                                     torchaudio.save(
                                         str(
                                             save_dir
                                             / f"mixture_separated_coi_head_{k}.wav"
                                         ),
-                                        coi_head.unsqueeze(0).cpu(),
+                                        coi_head_save.unsqueeze(0).cpu(),
                                         self.sample_rate,
                                     )
                             except Exception:
@@ -2296,17 +2328,33 @@ def demo_two_wav_separation(
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Prepare tensors for saving: (channels, samples)
-    def _prep(t: torch.Tensor) -> torch.Tensor:
+    # Prepare single-source tensors for saving with peak normalization
+    def _prep_single(t: torch.Tensor) -> torch.Tensor:
+        """Prepare a single-source tensor (1D) for saving."""
         t = t.detach().cpu()
+        # Peak-normalize for proper listening level
+        t = pipeline._normalize_for_saving(t)
         if t.dim() == 1:
             t = t.unsqueeze(0)
         return t
 
-    mix_t = _prep(mixture)
-    sep_t = _prep(separated)
-    src_t = _prep(src)
-    noise_t = _prep(noise)
+    mix_t = _prep_single(mixture)
+    src_t = _prep_single(src)
+    noise_t = _prep_single(noise)
+    
+    # Prepare separated output (may be multi-source)
+    sep_t = separated.detach().cpu()
+    if sep_t.dim() == 1:
+        sep_t = pipeline._normalize_for_saving(sep_t).unsqueeze(0)
+    elif sep_t.dim() == 2:
+        # Normalize each source independently
+        normalized_sources = []
+        for i in range(sep_t.shape[0]):
+            normalized_sources.append(pipeline._normalize_for_saving(sep_t[i]))
+        sep_t = torch.stack(normalized_sources)
+    else:
+        # Unexpected shape - normalize as-is
+        sep_t = pipeline._normalize_for_saving(sep_t)
 
     mix_path = out_dir / f"mixture_{ts}.wav"
     sep_path = out_dir / f"separated_{ts}.wav"

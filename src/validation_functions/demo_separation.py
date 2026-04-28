@@ -128,6 +128,15 @@ def compute_spectrogram(
         )
         sr = display_sr
 
+    # Validate minimum length for STFT computation
+    min_length = N_FFT
+    if len(wav) < min_length:
+        raise ValueError(
+            f"Audio is too short ({len(wav)} samples) for spectrogram computation. "
+            f"Minimum required: {min_length} samples (N_FFT={N_FFT}). "
+            f"This typically indicates an error in audio processing or file I/O."
+        )
+
     # Compute Mel-spectrogram (torchaudio returns power by default)
     # MelSpectrogram expects input shape (channel, samples)
     mel_transform = torchaudio.transforms.MelSpectrogram(

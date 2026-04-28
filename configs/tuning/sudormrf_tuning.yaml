@@ -41,8 +41,8 @@ data:
   background_only_prob: 0.3
   background_mix_n: 1
   
-  use_webdataset: false
-  webdataset_path: ""
+  use_webdataset: true
+  webdataset_path: "/scratch/gent/464/vsc46423/webdataset_shards"
 
 # Fixed model architecture (from training_config.yaml)
 # These are NOT tuned, only training hyperparameters are tuned

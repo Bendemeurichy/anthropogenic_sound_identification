@@ -45,8 +45,8 @@ data:
   balance_classes: false
   coi_class_multipliers: null
   
-  use_webdataset: false
-  webdataset_path: ""
+  use_webdataset: true
+  webdataset_path: "/scratch/gent/464/vsc46423/webdataset_shards"
 
 # Model configuration
 model:
