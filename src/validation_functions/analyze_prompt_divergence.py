@@ -243,7 +243,7 @@ def plot_similarity_heatmap(cos_sim_matrix, prompt_names, save_path: Path):
 
 def main():
     ckpt_path = Path(
-        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/20260423_105141"
+        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/multi_coi_29_04"
     )
     
     # Load prompts
