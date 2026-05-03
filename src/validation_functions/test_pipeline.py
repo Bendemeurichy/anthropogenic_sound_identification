@@ -650,6 +650,7 @@ class ValidationPipeline:
         use_ast_finetuned: bool = True,
         use_bird_mae: bool = False,
         use_audioprotopnet: bool = False,
+        skip_classifier: bool = False,
     ):
         """Load separation and classification models.
 
@@ -674,6 +675,7 @@ class ValidationPipeline:
                 additional classifier.
             use_bird_mae: If True, load the Bird-MAE-Base model as an additional classifier.
             use_audioprotopnet: If True, load the AudioProtoPNet-20-BirdSet-XCL model as an additional classifier.
+            skip_classifier: If True, skip loading any classifiers (useful for energy-only experiments).
         """
         sep_path = sep_checkpoint or self.SEP_CHECKPOINT
         cls_path = cls_weights or self.CLS_WEIGHTS
@@ -785,6 +787,25 @@ class ValidationPipeline:
         # no need to repeat it.)
 
         # ------------------------------------------------------------------
+        # Auto-detect COI synonyms early (needed even if skipping classifier)
+        # ------------------------------------------------------------------
+        if self.coi_synonyms is None:
+            self.coi_synonyms = get_coi_synonyms_for_classifier(classifier_type)
+            synonym_type = (
+                "AIRPLANE" if self.coi_synonyms == AIRPLANE_SYNONYMS else "BIRD"
+            )
+            print(
+                f"Auto-detected COI synonyms: {synonym_type}_SYNONYMS ({len(self.coi_synonyms)} terms)"
+            )
+
+        # ------------------------------------------------------------------
+        # Skip classifier loading if requested (for energy-only experiments)
+        # ------------------------------------------------------------------
+        if skip_classifier:
+            print("Skipping classifier loading (skip_classifier=True)")
+            return
+
+        # ------------------------------------------------------------------
         # Primary classifier (using new unified interface)
         # ------------------------------------------------------------------
         print(f"Loading primary {classifier_type} classifier...")
@@ -853,20 +874,6 @@ class ValidationPipeline:
         print(f"  Classifier sample rate: {self.classifier_sample_rate} Hz")
         print(f"  Classifier segment samples: {self.classifier_segment_samples}")
 
-        # ------------------------------------------------------------------
-        # Auto-detect COI synonyms based on classifier type if not provided
-        # ------------------------------------------------------------------
-        if self.coi_synonyms is None:
-            self.coi_synonyms = get_coi_synonyms_for_classifier(classifier_type)
-            synonym_type = (
-                "AIRPLANE" if self.coi_synonyms == AIRPLANE_SYNONYMS else "BIRD"
-            )
-            print(
-                f"  Auto-detected COI synonyms: {synonym_type}_SYNONYMS ({len(self.coi_synonyms)} terms)"
-            )
-        else:
-            print(f"  Using custom COI synonyms: {len(self.coi_synonyms)} terms")
-        
         # ------------------------------------------------------------------
         # Check for mismatch between separator training and classifier type
         # ------------------------------------------------------------------

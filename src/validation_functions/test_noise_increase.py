@@ -583,24 +583,24 @@ def main() -> None:
         print(f"Using TUSS model with prompts: COI='{TUSS_COI_PROMPT}', BG='{TUSS_BG_PROMPT}'")
         pipeline.load_models(
             sep_checkpoint=SEP_CHECKPOINT,
-            cls_weights=None,  # No classifier needed
             classifier_type=classifier_type,  # For COI synonym selection only
             use_tuss=True,
             tuss_coi_prompt=TUSS_COI_PROMPT,
             tuss_bg_prompt=TUSS_BG_PROMPT,
+            skip_classifier=True,  # Skip all classifier loading
         )
     else:
         print("Using SudoRM-RF model")
         pipeline.load_models(
             sep_checkpoint=SEP_CHECKPOINT,
-            cls_weights=None,  # No classifier needed
             classifier_type="plane", # Default classifier to get correct COI synonyms
             use_clapsep=False,
             use_tuss=False,
+            skip_classifier=True,  # Skip all classifier loading
         )
 
     print("Loading metadata CSV...")
-    df = pd.read_csv(DATA_CSV)
+    df = pd.read_csv(DATA_CSV, low_memory=False)
     if EXCLUDE_DATASETS and "dataset" in df.columns:
         df = df[~df["dataset"].isin(EXCLUDE_DATASETS)].copy()
     if "split" in df.columns:
