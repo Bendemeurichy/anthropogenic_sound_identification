@@ -36,7 +36,7 @@ data:
   df_path: ""
 
   sample_rate: 48000 # Hz – must match your audio files
-  segment_length: 4.0 # seconds per training crop
+  segment_length: 6.0 # seconds per training crop (matches base TUSS training)
 
   # SNR range (dB) when mixing a COI source on top of background
   snr_range: [-10, 10]
@@ -263,6 +263,12 @@ training:
   warmup_steps: 200
 
   clip_grad_norm: 5.0
+
+  # ReduceLROnPlateau scheduler settings (applied after each validation epoch,
+  # once the linear warmup is complete).
+  scheduler_patience: 5    # epochs without val-loss improvement before halving LR
+  scheduler_factor: 0.5    # multiplicative factor applied when reducing LR
+  scheduler_min_lr: 1.0e-7 # floor LR for all param groups
 
   # Differential learning rates for prompt extension
   # When resuming from a checkpoint, prompts that already exist will train at

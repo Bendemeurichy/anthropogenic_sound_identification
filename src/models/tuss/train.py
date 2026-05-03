@@ -349,6 +349,10 @@ class TrainingConfig:
     variable_prompts: bool = False  # Enable variable prompt configurations during training
     prompt_dropout_prob: float = 0.5  # Probability of dropping each COI prompt during training
     min_coi_prompts: int = 0  # Minimum number of COI prompts per sample (0 = allow background-only)
+    # ReduceLROnPlateau scheduler settings
+    scheduler_patience: int = 5    # epochs without improvement before reducing LR
+    scheduler_factor: float = 0.5  # multiplicative factor when reducing LR
+    scheduler_min_lr: float = 1e-7  # floor LR for all param groups
     # GPU augmentation settings (10-100x faster than CPU)
     use_gpu_augmentations: bool = True  # Apply augmentations on GPU instead of CPU
     gpu_aug_time_stretch_prob: float = 0.5
@@ -472,6 +476,63 @@ class COIWeightedSNRLoss(torch.nn.Module):
 
         weighted = (self.coi_weight * coi_loss + bg_loss) / (self.coi_weight + 1.0)
         return weighted.mean()
+
+
+# =============================================================================
+# Learning rate scheduler
+# =============================================================================
+
+
+class WarmupScheduler:
+    """Linear warm-up that scales each param group from 0 → its target LR.
+
+    After ``warmup_steps`` optimizer steps the scheduler becomes a no-op so
+    that ``ReduceLROnPlateau`` can take over without interference.
+
+    The per-group target LRs are captured from the optimizer at construction
+    time, so differential LRs (e.g. backbone at 0.05× base) are respected.
+    """
+
+    def __init__(self, optimizer: optim.Optimizer, warmup_steps: int):
+        self.optimizer = optimizer
+        self.warmup_steps = max(1, int(warmup_steps))
+        self._step_count = 0
+        # Capture per-group target LRs before we zero them out.
+        self.base_lrs = [g["lr"] for g in optimizer.param_groups]
+        # Start from zero so the first step sets lr = 1/warmup_steps × base.
+        for g in optimizer.param_groups:
+            g["lr"] = 0.0
+
+    def step(self) -> None:
+        """Advance by one optimizer step; no-op once warmup is complete."""
+        self._step_count += 1
+        if self._step_count <= self.warmup_steps:
+            scale = self._step_count / self.warmup_steps
+            for g, blr in zip(self.optimizer.param_groups, self.base_lrs):
+                g["lr"] = blr * scale
+        # After warmup: leave LR unchanged (ReduceLROnPlateau owns it).
+
+    @property
+    def done(self) -> bool:
+        return self._step_count >= self.warmup_steps
+
+    def state_dict(self) -> dict:
+        return {"step_count": self._step_count, "base_lrs": self.base_lrs}
+
+    def load_state_dict(self, state: dict) -> None:
+        self._step_count = state["step_count"]
+        self.base_lrs = state.get("base_lrs", self.base_lrs)
+        # Restore the current LR position.
+        if not self.done:
+            scale = self._step_count / self.warmup_steps
+            for g, blr in zip(self.optimizer.param_groups, self.base_lrs):
+                g["lr"] = blr * scale
+        else:
+            # Warmup finished: restore base_lrs (ReduceLROnPlateau may have
+            # reduced them further; its own state_dict handles that).
+            for g, blr in zip(self.optimizer.param_groups, self.base_lrs):
+                if g["lr"] == 0.0:
+                    g["lr"] = blr
 
 
 # =============================================================================
@@ -2584,7 +2645,7 @@ def train(config: Config, timestamp: str | None = None):
         optimizer_param_groups.append(
             {
                 "params": param_groups["continuing_prompts"],
-                "lr": base_lr,
+                "lr": base_lr * existing_lr_mult,
                 "name": "continuing_prompts",
             }
         )
@@ -2594,8 +2655,9 @@ def train(config: Config, timestamp: str | None = None):
             # Backbone is frozen, don't add to optimizer
             pass
         else:
+            backbone_lr_mult = getattr(config.training, "backbone_lr_multiplier", 0.05)
             optimizer_param_groups.append(
-                {"params": param_groups["backbone"], "lr": base_lr, "name": "backbone"}
+                {"params": param_groups["backbone"], "lr": base_lr * backbone_lr_mult, "name": "backbone"}
             )
 
     # If no parameter groups (shouldn't happen), fall back to old behavior
@@ -2610,44 +2672,25 @@ def train(config: Config, timestamp: str | None = None):
     optimizer = optim.AdamW(optimizer_param_groups, weight_decay=weight_decay)
 
     warmup_steps = int(config.training.warmup_steps)
+    stabilization_epochs = getattr(config.training, "stabilization_epochs", 0)
     steps_per_epoch = max(
         1, len(train_loader) // max(1, config.training.grad_accum_steps)
     )
-    total_steps = steps_per_epoch * config.training.num_epochs
-    stabilization_epochs = getattr(config.training, "stabilization_epochs", 0)
-    stabilization_steps = steps_per_epoch * stabilization_epochs
 
-    def base_lr_lambda(current_step: int) -> float:
-        if current_step < warmup_steps:
-            return current_step / max(1, warmup_steps)
-        progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    # Warm-up scheduler: linearly ramps each group from 0 → its target LR.
+    # Becomes a no-op once warmup_steps are done so ReduceLROnPlateau can own
+    # the LR afterwards without interference.
+    warmup_scheduler = WarmupScheduler(optimizer, warmup_steps)
 
-    def get_stabilization_lambda(multiplier: float):
-        def _lambda(current_step: int) -> float:
-            if current_step < stabilization_steps:
-                return 0.0
-            # Apply multiplier on top of base schedule
-            return base_lr_lambda(current_step) * multiplier
-
-        return _lambda
-
-    lambdas = []
-    for group in optimizer_param_groups:
-        name = group.get("name", "")
-        if name == "new_prompts":
-            lambdas.append(base_lr_lambda)
-        elif name == "continuing_prompts":
-            lambdas.append(get_stabilization_lambda(existing_lr_mult))
-        elif name == "backbone":
-            # Note: you may want to configure backbone LR independently.
-            # Defaulting to backbone_lr_multiplier (or 0.05).
-            mult = getattr(config.training, "backbone_lr_multiplier", 0.05)
-            lambdas.append(get_stabilization_lambda(mult))
-        else:
-            lambdas.append(base_lr_lambda)
-
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambdas)
+    # ReduceLROnPlateau: reduces LR when val loss stops improving.
+    # Mirrors the base TUSS training config (patience=5, factor=0.5).
+    plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        patience=int(getattr(config.training, "scheduler_patience", 5)),
+        factor=float(getattr(config.training, "scheduler_factor", 0.5)),
+        min_lr=float(getattr(config.training, "scheduler_min_lr", 1e-7)),
+    )
 
     use_amp = config.training.use_amp and str(config.training.device).startswith("cuda")
     # GradScaler is only needed for fp16; bf16 has sufficient dynamic range.
@@ -2738,23 +2781,28 @@ def train(config: Config, timestamp: str | None = None):
 
         history = ckpt.get("history", history)
 
-        # Restore scheduler state so the LR curve continues seamlessly.
-        if "scheduler_state_dict" in ckpt and not is_extending:
-            # Only restore scheduler if we're continuing (not extending)
-            # When extending, we want to start fresh with warmup
-            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-            print("  ✓ Loaded scheduler state")
+        # Restore scheduler states so the LR curve continues seamlessly.
+        if is_extending:
+            print(
+                "  ⚠️  Starting fresh schedulers (will apply warmup from beginning)"
+            )
         else:
-            if is_extending:
-                print(
-                    "  ⚠️  Starting fresh scheduler (will apply warmup from beginning)"
-                )
+            if "warmup_scheduler_state_dict" in ckpt:
+                warmup_scheduler.load_state_dict(ckpt["warmup_scheduler_state_dict"])
+                print("  ✓ Loaded warmup scheduler state")
             else:
-                # Fallback for checkpoints saved before scheduler state was added:
-                # replay steps so the LR is consistent with where training left off.
-                print("  ⚠ No scheduler state in checkpoint – replaying steps …")
-                for _ in range(global_step):
-                    scheduler.step()
+                # Legacy checkpoint: replay warmup steps manually.
+                print("  ⚠ No warmup scheduler state – replaying warmup steps …")
+                for _ in range(min(global_step, warmup_steps)):
+                    warmup_scheduler.step()
+
+            if "plateau_scheduler_state_dict" in ckpt:
+                plateau_scheduler.load_state_dict(ckpt["plateau_scheduler_state_dict"])
+                print("  ✓ Loaded plateau scheduler state")
+            elif "scheduler_state_dict" in ckpt:
+                # Legacy LambdaLR checkpoint: nothing meaningful to restore for
+                # ReduceLROnPlateau, just log and continue.
+                print("  ⚠ Legacy LambdaLR scheduler state found – skipping (not compatible with ReduceLROnPlateau)")
 
         # Restore GradScaler state (only relevant for fp16)
         if scaler is not None and "scaler_state_dict" in ckpt:
@@ -2786,7 +2834,7 @@ def train(config: Config, timestamp: str | None = None):
             use_amp=config.training.use_amp,
             snr_range=tuple(config.data.snr_range),
             scaler=scaler,
-            scheduler=scheduler,
+            scheduler=warmup_scheduler,
             # Variable prompts configuration
             variable_prompts=config.training.variable_prompts,
             coi_prompts=config.model.coi_prompts,
@@ -2831,6 +2879,14 @@ def train(config: Config, timestamp: str | None = None):
             history["val_loss"].append(val_loss)
             print(f"Train: {train_loss:.4f}  Val: {val_loss:.4f}")
 
+            # ReduceLROnPlateau: step with the validation loss so LR is
+            # reduced whenever improvement stalls.  Only starts acting once
+            # the warmup is complete to avoid fighting the ramp.
+            if warmup_scheduler.done:
+                plateau_scheduler.step(val_loss)
+                current_lr = optimizer.param_groups[0]["lr"]
+                print(f"  LR after plateau step: {current_lr:.2e}")
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 epochs_without_improvement = 0
@@ -2839,7 +2895,8 @@ def train(config: Config, timestamp: str | None = None):
                     "global_step": global_step,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
+                    "warmup_scheduler_state_dict": warmup_scheduler.state_dict(),
+                    "plateau_scheduler_state_dict": plateau_scheduler.state_dict(),
                     "val_loss": val_loss,
                     "config": config.to_dict(),
                     "history": history,
