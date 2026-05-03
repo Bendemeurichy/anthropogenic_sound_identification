@@ -1,0 +1,190 @@
+{
+  "config": {
+    "base_path": "D:\\Users\\bdmeuric\\masterproef\\datasets",
+    "data_csv": "D:\\Users\\bdmeuric\\masterproef\\anthropogenic_sound_identification\\src\\models\\tuss\\checkpoints\\20260503_161608\\separation_dataset.csv",
+    "sep_checkpoint": "D:\\Users\\bdmeuric\\masterproef\\anthropogenic_sound_identification\\src\\models\\tuss\\checkpoints\\multi_coi_29_04",
+    "model_type": "TUSS",
+    "split": "test",
+    "exclude_datasets": [
+      "risoux_test"
+    ],
+    "snr_levels_db": [
+      25.0,
+      20.0,
+      15.0,
+      10.0,
+      5.0,
+      0.0,
+      -5.0,
+      -10.0,
+      -15.0,
+      -20.0
+    ],
+    "seed": 42,
+    "noise_type": "artificial_white_noise",
+    "experiment_type": "energy_preservation",
+    "tuss_coi_prompt": "airplane",
+    "tuss_bg_prompt": "background"
+  },
+  "dataset_stats": {
+    "n_coi_samples": 107,
+    "n_background_total": 2601,
+    "n_background_clean": 2539,
+    "n_contaminated_removed": 62
+  },
+  "clean_baseline": {
+    "n_samples": 107,
+    "n_segments": 1368,
+    "mean_original_rms_db": -20.00003880053236,
+    "std_original_rms_db": 3.142328050657588e-05,
+    "mean_original_sel_db": -13.979438979897584,
+    "std_original_sel_db": 3.141211640059789e-05,
+    "mean_separated_rms_db": -73.35220153568781,
+    "std_separated_rms_db": 4.363771239456572,
+    "mean_separated_sel_db": -67.33155781065511,
+    "std_separated_sel_db": 4.363709068018241,
+    "mean_rms_preservation_db": -53.35216273515545,
+    "mean_sel_preservation_db": -53.35211883075753
+  },
+  "snr_results": [
+    {
+      "snr_db": 25.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -20.052534018517935,
+      "mean_mixture_sel_db": -14.031934128170125,
+      "mean_separated_noisy_rms_db": -48.8516558070629,
+      "mean_separated_noisy_sel_db": -42.83105580953129,
+      "mean_rms_degradation_db": -28.85161700653054,
+      "mean_sel_degradation_db": -28.851616829633713,
+      "std_rms_degradation_db": 2.7146980038517925,
+      "std_sel_degradation_db": 2.7146979309738795,
+      "mean_actual_snr_db": 24.998597452166486
+    },
+    {
+      "snr_db": 20.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -20.023581964230676,
+      "mean_mixture_sel_db": -14.00298211048221,
+      "mean_separated_noisy_rms_db": -45.13443823097742,
+      "mean_separated_noisy_sel_db": -39.11383826830234,
+      "mean_rms_degradation_db": -25.134399430445065,
+      "mean_sel_degradation_db": -25.134399288404754,
+      "std_rms_degradation_db": 1.7918073833308843,
+      "std_sel_degradation_db": 1.7918073863055775,
+      "mean_actual_snr_db": 19.999559443247946
+    },
+    {
+      "snr_db": 15.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -19.932607321711313,
+      "mean_mixture_sel_db": -13.912007446177522,
+      "mean_separated_noisy_rms_db": -40.84110041285119,
+      "mean_separated_noisy_sel_db": -34.82050047631849,
+      "mean_rms_degradation_db": -20.841061612318832,
+      "mean_sel_degradation_db": -20.84106149642091,
+      "std_rms_degradation_db": 1.1249647014273363,
+      "std_sel_degradation_db": 1.1249647765645727,
+      "mean_actual_snr_db": 14.999863555034002
+    },
+    {
+      "snr_db": 10.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -19.656360012571714,
+      "mean_mixture_sel_db": -13.635760135295099,
+      "mean_separated_noisy_rms_db": -36.16729083988402,
+      "mean_separated_noisy_sel_db": -30.146690905094147,
+      "mean_rms_degradation_db": -16.16725203935166,
+      "mean_sel_degradation_db": -16.167251925196563,
+      "std_rms_degradation_db": 0.7681426656919609,
+      "std_sel_degradation_db": 0.7681426789483184,
+      "mean_actual_snr_db": 9.999960050945393
+    },
+    {
+      "snr_db": 5.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -18.885041571151444,
+      "mean_mixture_sel_db": -12.864441711303087,
+      "mean_separated_noisy_rms_db": -31.300646430916256,
+      "mean_separated_noisy_sel_db": -25.28004663380963,
+      "mean_rms_degradation_db": -11.3006076303839,
+      "mean_sel_degradation_db": -11.300607653912047,
+      "std_rms_degradation_db": 0.646054066497635,
+      "std_sel_degradation_db": 0.6460540462492358,
+      "mean_actual_snr_db": 4.999990611397035
+    },
+    {
+      "snr_db": 0.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -17.104346561327315,
+      "mean_mixture_sel_db": -11.083746616080491,
+      "mean_separated_noisy_rms_db": -26.40328826611502,
+      "mean_separated_noisy_sel_db": -20.382688361824606,
+      "mean_rms_degradation_db": -6.403249465582664,
+      "mean_sel_degradation_db": -6.403249381927022,
+      "std_rms_degradation_db": 0.6573742048195119,
+      "std_sel_degradation_db": 0.6573742051197418,
+      "mean_actual_snr_db": -1.0804744733744519e-07
+    },
+    {
+      "snr_db": -5.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -14.481757820872536,
+      "mean_mixture_sel_db": -8.461157939674562,
+      "mean_separated_noisy_rms_db": -22.05933199639906,
+      "mean_separated_noisy_sel_db": -16.038732075551795,
+      "mean_rms_degradation_db": -2.059293195866702,
+      "mean_sel_degradation_db": -2.059293095654214,
+      "std_rms_degradation_db": 0.8869868591267457,
+      "std_sel_degradation_db": 0.8869869358957077,
+      "mean_actual_snr_db": -4.999996341808497
+    },
+    {
+      "snr_db": -10.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -13.955990239890696,
+      "mean_mixture_sel_db": -7.935390354771363,
+      "mean_separated_noisy_rms_db": -20.926775972397007,
+      "mean_separated_noisy_sel_db": -14.90617610383452,
+      "mean_rms_degradation_db": -0.926737171864649,
+      "mean_sel_degradation_db": -0.9267371239369375,
+      "std_rms_degradation_db": 0.6006471787908976,
+      "std_sel_degradation_db": 0.6006471580436047,
+      "mean_actual_snr_db": -9.999989381833384
+    },
+    {
+      "snr_db": -15.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -13.839435194842299,
+      "mean_mixture_sel_db": -7.818835314080032,
+      "mean_separated_noisy_rms_db": -20.743158049227898,
+      "mean_separated_noisy_sel_db": -14.722558131866288,
+      "mean_rms_degradation_db": -0.7431192486955408,
+      "mean_sel_degradation_db": -0.743119151968705,
+      "std_rms_degradation_db": 0.5205761901265985,
+      "std_sel_degradation_db": 0.5205762140085727,
+      "mean_actual_snr_db": -14.999966837509334
+    },
+    {
+      "snr_db": -20.0,
+      "n_segments": 1368,
+      "mean_mixture_rms_db": -13.822370547125912,
+      "mean_mixture_sel_db": -7.801770675077773,
+      "mean_separated_noisy_rms_db": -20.783874045687114,
+      "mean_separated_noisy_sel_db": -14.763274150982237,
+      "mean_rms_degradation_db": -0.7838352451547544,
+      "mean_sel_degradation_db": -0.783835171084655,
+      "std_rms_degradation_db": 0.5074982163720794,
+      "std_sel_degradation_db": 0.5074981815722038,
+      "mean_actual_snr_db": -19.999894634847752
+    }
+  ],
+  "summary": {
+    "total_segments": 15048,
+    "clean_baseline_segments": 1368,
+    "noisy_experiment_segments": 13680,
+    "max_rms_degradation_db": -0.7431192486955408,
+    "max_sel_degradation_db": -0.743119151968705,
+    "min_rms_degradation_db": -28.85161700653054,
+    "min_sel_degradation_db": -28.851616829633713
+  }
+}

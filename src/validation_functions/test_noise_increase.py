@@ -1,20 +1,26 @@
-"""Experiment that gradually adds artificial noise to COI samples and measures
-separation's effect on energy preservation (RMS and SEL).
+"""Experiment that gradually adds artificial white noise to COI+BG mixtures and
+measures separation's effect on energy preservation (RMS and SEL).
 
 This script measures how well separation preserves COI energy at different
-SNR levels by comparing clean baseline energy metrics with noisy separation results.
-Classification is not used since classifiers are not robust to the extreme noise
-levels tested here.
+white-noise SNR levels by comparing noisy separation results against a clean
+baseline that uses a realistic COI+background mixture.  Classification is not
+used since classifiers are not robust to the extreme noise levels tested here.
 
-Mixing formula (no peak-clipping):
-    mixture = coi_unit_rms + noise_unit_rms * 10^(−snr_db/20)
+Mixing formulae (no peak-clipping):
 
-This achieves SNR = snr_db exactly.  TUSS normalises the mixture internally
-by its std before passing it to the network, and rescales all outputs by the
-same std afterwards.  Any scalar applied to the mixture before TUSS (e.g.
-from peak-clipping) would therefore propagate to every separated output and
-introduce a systematic energy bias.  By omitting peak-clipping we ensure that
-a perfect separator would report 0 dB degradation at every SNR level.
+    Clean baseline (no added white noise):
+        mixture = coi_unit_rms + bg_unit_rms * 10^(−bg_snr_db/20)
+
+    Noisy sweep:
+        mixture = coi_unit_rms + bg_unit_rms * 10^(−bg_snr_db/20)
+                + noise_unit_rms * 10^(−snr_db/20)
+
+The BG SNR is fixed at ``BASELINE_BG_SNR_DB`` (default +10 dB, top of the TUSS
+training range [-10, +10] dB) so that separation is meaningful even in the
+clean condition.  TUSS normalises the full mixture internally by its std and
+rescales all outputs by the same std.  Any scalar applied to the mixture before
+TUSS propagates to every separated output, so omitting peak-clipping ensures
+that a perfect separator reports 0 dB degradation at every white-noise level.
 """
 
 from __future__ import annotations
@@ -223,15 +229,13 @@ def _preload_coi_segments(
     changes via ``noise_amplitude = 10 ** (−snr_db / 20)`` — so noise shape
     is identical across all comparisons.
 
-    Both the COI segment and the noise are normalised to unit RMS so that:
-        mixture = coi_unit_rms + noise_unit_rms * noise_amplitude
-        ⟹  SNR(mixture) = snr_db  (exactly, for zero-mean signals)
+    Both the COI segment and the noise are normalised to unit RMS.  The mixing
+    step (adding BG and noise) is performed in the downstream functions that
+    consume these caches, so the formula does not appear here.
 
-    This matches TUSS training: ``prepare_batch`` normalises the raw mixture
-    by ``(x − mean) / std``; for zero-mean audio ``mean ≈ 0`` so the operation
-    is equivalent to ``x / std``, i.e. unit-variance normalisation.
-    ``_prepare_rms_mixing_input`` produces unit-RMS ≈ unit-std (zero-mean),
-    which is therefore consistent with the training distribution.
+    This matches TUSS training: ``separate_batch`` normalises the raw mixture
+    by ``std`` only (no mean subtraction); for zero-mean audio ``std ≈ RMS``,
+    so unit-RMS inputs are consistent with the training distribution.
 
     Args:
         pipeline: ValidationPipeline instance.
@@ -287,23 +291,113 @@ def _preload_coi_segments(
     return segment_cache, noise_cache, filename_map, rec_seg_count
 
 
+def _assign_backgrounds(
+    pipeline: ValidationPipeline,
+    df_bg: pd.DataFrame,
+    rec_seg_count: Dict[int, int],
+    seed: int = 42,
+) -> Dict[Tuple[int, int], torch.Tensor]:
+    """Load background recordings and assign one unit-RMS segment to each COI slot.
+
+    Loads background audio from ``df_bg``, splits into model-sized segments,
+    normalises each to unit RMS, and assigns one background segment to every
+    ``(rec_idx, seg_idx)`` slot in *rec_seg_count*.  The same assignment is
+    reused across ``_compute_clean_baseline_energy`` and every SNR level in
+    ``run_noise_increase_experiment`` so the only thing that changes between
+    measurements is the white-noise amplitude.
+
+    Sampling is done with replacement when the background pool is smaller than
+    the number of COI slots.  Silent background segments (RMS < 1e-6) are
+    skipped to avoid normalisation artefacts.
+
+    Args:
+        pipeline: ValidationPipeline instance (used for audio loading helpers).
+        df_bg: DataFrame of background (non-COI) samples from the test split.
+        rec_seg_count: ``{rec_idx: n_segments}`` from ``_preload_coi_segments``.
+        seed: Random seed for reproducibility (uses ``seed + 1`` to stay
+            independent from the COI / noise seeds in ``_preload_coi_segments``).
+
+    Returns:
+        bg_assignment: ``{(rec_idx, seg_idx): unit-RMS BG tensor}``
+    """
+    rng = np.random.default_rng(seed + 1)
+    total_slots = sum(rec_seg_count.values())
+
+    bg_pool: List[torch.Tensor] = []
+    print(f"\nPre-loading background pool (need {total_slots} slots)...")
+
+    n_loaded = 0
+    for row in df_bg.itertuples(index=False):
+        if n_loaded % 100 == 0:
+            print(f"  Loading background recording {n_loaded}/{len(df_bg)}...")
+
+        try:
+            bg_full = pipeline._load_labeled_audio(
+                row.filename,
+                getattr(row, "start_time", None),
+                getattr(row, "end_time", None),
+            )
+        except Exception:
+            n_loaded += 1
+            continue
+
+        for seg in pipeline._split_into_segments(bg_full):
+            seg_rms = float(torch.sqrt(torch.mean(seg ** 2)))
+            if seg_rms < 1e-6:
+                continue  # skip silent segments to avoid normalisation artefacts
+            bg_pool.append(pipeline._prepare_rms_mixing_input(seg))
+
+        n_loaded += 1
+        # Gather at least 3× the required slots so sampling is well-mixed
+        if len(bg_pool) >= total_slots * 3:
+            break
+
+    if len(bg_pool) == 0:
+        raise ValueError(
+            "No usable background segments found — check that df_bg is non-empty "
+            "and that the background recordings are not silent."
+        )
+
+    print(
+        f"  Background pool: {len(bg_pool)} segments "
+        f"from {n_loaded} recordings (need {total_slots})."
+    )
+
+    n_pool = len(bg_pool)
+    bg_assignment: Dict[Tuple[int, int], torch.Tensor] = {}
+    for rec_idx in sorted(rec_seg_count.keys()):
+        for seg_idx in range(rec_seg_count[rec_idx]):
+            pool_idx = int(rng.integers(0, n_pool))
+            bg_assignment[(rec_idx, seg_idx)] = bg_pool[pool_idx]
+
+    return bg_assignment
+
+
 def _compute_clean_baseline_energy(
     pipeline: ValidationPipeline,
     segment_cache: Dict[Tuple[int, int], torch.Tensor],
+    bg_assignment: Dict[Tuple[int, int], torch.Tensor],
+    bg_snr_db: float,
     filename_map: Dict[int, str],
     rec_seg_count: Dict[int, int],
     batch_size: int = 16,
 ) -> Tuple[CleanBaselineStats, Dict[Tuple[int, int], SegmentEnergyMetrics]]:
-    """Compute baseline energy metrics on clean (noise-free) COI segments.
+    """Compute baseline energy metrics on COI+BG mixtures (no added white noise).
 
-    Uses pre-loaded unit-RMS segments from ``_preload_coi_segments`` so no
-    disk I/O is performed here.  Provides the reference point used to measure
-    energy degradation at each noise level.
+    Uses pre-loaded unit-RMS segments from ``_preload_coi_segments`` and the
+    fixed background assignment from ``_assign_backgrounds``.  Provides the
+    reference point used to measure energy degradation at each white-noise
+    level.  ``original_clean_rms_db`` tracks COI-only energy (not mixture
+    energy) to keep the energy-preservation metric interpretable.
 
     Args:
         pipeline: ValidationPipeline with loaded separator model.
         segment_cache: ``{(rec_idx, seg_idx): unit-RMS COI tensor}`` from
             ``_preload_coi_segments``.
+        bg_assignment: ``{(rec_idx, seg_idx): unit-RMS BG tensor}`` from
+            ``_assign_backgrounds``.
+        bg_snr_db: COI:BG SNR for the baseline mixture (dB).  Positive values
+            mean COI is louder than BG.
         filename_map: ``{rec_idx: filename}`` from ``_preload_coi_segments``.
         rec_seg_count: ``{rec_idx: n_segments}`` from ``_preload_coi_segments``.
         batch_size: Number of segments to separate in one GPU call.
@@ -317,21 +411,32 @@ def _compute_clean_baseline_energy(
     all_metrics: List[SegmentEnergyMetrics] = []
     baseline_map: Dict[Tuple[int, int], SegmentEnergyMetrics] = {}
 
+    bg_amp = 10 ** (-bg_snr_db / 20)
     n_recordings = len(rec_seg_count)
-    print(f"\nComputing clean baseline energy (no noise) on {n_recordings} recordings...")
+    print(
+        f"\nComputing clean baseline energy (COI+BG, BG SNR={bg_snr_db:.1f} dB) "
+        f"on {n_recordings} recordings..."
+    )
 
     for rec_idx in sorted(rec_seg_count.keys()):
         if rec_idx % 50 == 0:
             print(f"  Processing recording {rec_idx}/{n_recordings}...")
 
         n_segs = rec_seg_count[rec_idx]
+        if n_segs == 0:
+            continue
         filename = filename_map[rec_idx]
 
-        seg_tensors = [segment_cache[(rec_idx, s)] for s in range(n_segs)]
-        preprocessed_tensor = torch.stack(seg_tensors)
+        # Build COI+BG mixtures — no added white noise for the clean baseline.
+        mixture_tensors = []
+        for s in range(n_segs):
+            coi_norm = segment_cache[(rec_idx, s)]
+            bg_norm = bg_assignment[(rec_idx, s)]
+            mixture_tensors.append(coi_norm + bg_norm * bg_amp)
+        mixture_stack = torch.stack(mixture_tensors)
 
         for i in range(0, n_segs, batch_size):
-            batch = preprocessed_tensor[i : i + batch_size]
+            batch = mixture_stack[i : i + batch_size]
 
             separated_batch = pipeline._separate_batch(batch)
 
@@ -342,10 +447,11 @@ def _compute_clean_baseline_energy(
 
             for b_idx in range(len(batch)):
                 seg_idx = i + b_idx
-                coi_preprocessed = batch[b_idx]
+                # Reference energy: COI-only (unit-RMS, ~0 dBFS)
+                coi_only = segment_cache[(rec_idx, seg_idx)]
                 coi_est = coi_est_batch[b_idx]
 
-                orig_metrics = compute_energy_metrics(coi_preprocessed, pipeline.sample_rate)
+                orig_metrics = compute_energy_metrics(coi_only, pipeline.sample_rate)
                 sep_metrics = compute_energy_metrics(coi_est, pipeline.sample_rate)
 
                 rms_delta = sep_metrics["rms_db"] - orig_metrics["rms_db"]
@@ -355,7 +461,7 @@ def _compute_clean_baseline_energy(
                     filename=filename,
                     recording_idx=rec_idx,
                     segment_idx=seg_idx,
-                    snr_db=None,  # Clean baseline has no noise
+                    snr_db=None,  # Clean baseline has no added white noise
                     original_clean_rms_db=orig_metrics["rms_db"],
                     original_clean_sel_db=orig_metrics["sel_db"],
                     separated_clean_rms_db=sep_metrics["rms_db"],
@@ -407,26 +513,31 @@ def run_noise_increase_experiment(
     pipeline: ValidationPipeline,
     segment_cache: Dict[Tuple[int, int], torch.Tensor],
     noise_cache: Dict[Tuple[int, int], torch.Tensor],
+    bg_assignment: Dict[Tuple[int, int], torch.Tensor],
+    bg_snr_db: float,
     filename_map: Dict[int, str],
     rec_seg_count: Dict[int, int],
     baseline_map: Dict[Tuple[int, int], SegmentEnergyMetrics],
     snr_levels_db: List[float],
     batch_size: int = 16,
 ) -> Tuple[List[SegmentEnergyMetrics], List[SNREnergyStats]]:
-    """Run robustness sweep over SNR levels measuring separation degradation.
+    """Run robustness sweep over white-noise SNR levels measuring separation degradation.
 
-    For each SNR level, mixes pre-loaded unit-RMS COI segments with unit-RMS
-    white noise and measures how much the separated COI signal degrades
-    compared to clean separation (no noise).  This isolates the effect of
-    input noise on separation quality.
+    For each SNR level, mixes pre-loaded unit-RMS COI segments with a fixed
+    unit-RMS background and unit-RMS white noise, then measures how much the
+    separated COI signal degrades compared to the clean baseline (COI+BG,
+    no added noise).  This isolates the effect of white noise on separation
+    quality independently of the COI:BG balance.
 
     Mixture formula::
 
+        bg_amplitude   = 10 ** (−bg_snr_db / 20)
         noise_amplitude = 10 ** (−snr_db / 20)
-        mixture = coi_unit_rms + noise_unit_rms * noise_amplitude
+        mixture = coi_unit_rms + bg_unit_rms * bg_amplitude
+                + noise_unit_rms * noise_amplitude
 
-    Because both tensors have unit RMS, this gives
-    ``SNR(mixture) = snr_db`` exactly.
+    ``actual_snr_db`` is measured as COI power vs. white-noise power only (BG
+    is treated as the fixed acoustic context, not the swept variable).
 
     **Why no peak-clipping?**  TUSS ``_separate_batch`` normalises the
     mixture by its std and rescales all outputs by the same std.  A scalar
@@ -445,11 +556,15 @@ def run_noise_increase_experiment(
             ``_preload_coi_segments``.
         noise_cache: ``{(rec_idx, seg_idx): unit-RMS noise tensor}`` from
             ``_preload_coi_segments``.
+        bg_assignment: ``{(rec_idx, seg_idx): unit-RMS BG tensor}`` from
+            ``_assign_backgrounds``.
+        bg_snr_db: COI:BG SNR used in every mixture (same value as the clean
+            baseline so the BG component is unchanged across measurements).
         filename_map: ``{rec_idx: filename}`` from ``_preload_coi_segments``.
         rec_seg_count: ``{rec_idx: n_segments}`` from ``_preload_coi_segments``.
         baseline_map: ``{(rec_idx, seg_idx): SegmentEnergyMetrics}`` from
             ``_compute_clean_baseline_energy``.
-        snr_levels_db: List of SNR levels to test (in dB).
+        snr_levels_db: List of white-noise SNR levels to test (in dB).
         batch_size: Number of segments to separate in one GPU call.
 
     Returns:
@@ -465,20 +580,25 @@ def run_noise_increase_experiment(
     all_segment_metrics: List[SegmentEnergyMetrics] = []
     per_snr_stats: List[SNREnergyStats] = []
 
+    # BG amplitude is constant across all SNR levels
+    bg_amp = 10 ** (-bg_snr_db / 20)
+
     for idx, snr_db in enumerate(snr_levels_db, 1):
         print(f"\n[{idx}/{len(snr_levels_db)}] Processing SNR = {snr_db:.1f} dB...")
 
-        # Amplitude scale for noise: COI RMS = 1.0, so noise RMS = noise_amplitude
-        # gives the exact target SNR.
+        # Amplitude scale for white noise: COI RMS = 1.0, so noise_amplitude
+        # gives SNR(COI vs. white noise) = snr_db exactly.
         noise_amplitude = 10 ** (-snr_db / 20)
 
         snr_segment_metrics: List[SegmentEnergyMetrics] = []
 
         for rec_idx in sorted(rec_seg_count.keys()):
             n_segs = rec_seg_count[rec_idx]
+            if n_segs == 0:
+                continue
             filename = filename_map[rec_idx]
 
-            # Build mixtures (no peak-clipping — see docstring)
+            # Build COI+BG+noise mixtures (no peak-clipping — see docstring)
             mixtures: List[torch.Tensor] = []
             mixture_metrics_list: List[dict] = []
             actual_snrs: List[float] = []
@@ -486,10 +606,11 @@ def run_noise_increase_experiment(
             for seg_idx in range(n_segs):
                 coi_norm = segment_cache[(rec_idx, seg_idx)]
                 noise_norm = noise_cache[(rec_idx, seg_idx)]
+                bg_norm = bg_assignment[(rec_idx, seg_idx)]
 
-                mixture = coi_norm + noise_norm * noise_amplitude
+                mixture = coi_norm + bg_norm * bg_amp + noise_norm * noise_amplitude
 
-                # Verify actual SNR (should equal snr_db for ideal unit-RMS signals)
+                # Verify actual SNR: COI power vs. added white-noise power
                 sig_power = float(torch.mean(coi_norm ** 2))
                 noise_power = float(torch.mean((noise_norm * noise_amplitude) ** 2))
                 actual_snr = 10.0 * np.log10(sig_power / (noise_power + 1e-8))
@@ -643,6 +764,11 @@ def main() -> None:
     SPLIT = "test"
     EXCLUDE_DATASETS = ["risoux_test"]  # keep independent set out of this experiment
 
+    # Background SNR for the clean baseline mixture (COI:BG ratio in dB).
+    # +10 dB sits at the top of the TUSS training range [-10, +10] dB so
+    # separation is realistic without being pathologically easy.
+    BASELINE_BG_SNR_DB = 10.0
+
     # Experiment sweep
     # Extended range to -20 dB to test extreme noise conditions
     SNR_START = 25
@@ -700,10 +826,13 @@ def main() -> None:
 
     coi_syns = getattr(pipeline, "coi_synonyms", None)
     df_coi = _extract_coi_df(df, coi_synonyms=coi_syns)
+    df_bg = _extract_bg_df(df, coi_synonyms=coi_syns)
 
     print(f"\n{'=' * 60}")
     print("Dataset Statistics:")
     print(f"  COI samples:  {len(df_coi)} (split={SPLIT!r})")
+    print(f"  BG samples:   {len(df_bg)} (split={SPLIT!r})")
+    print(f"  BG SNR (baseline): {BASELINE_BG_SNR_DB:.1f} dB")
     print(f"  SNR sweep:    {[round(s, 1) for s in SNR_LEVELS_DB]}")
     print(f"{'=' * 60}\n")
 
@@ -715,10 +844,22 @@ def main() -> None:
         seed=SEED,
     )
 
-    # Compute clean baseline (separator run on noise-free unit-RMS signals)
+    # Assign one fixed unit-RMS background segment to every (rec_idx, seg_idx) slot.
+    # The same BG is reused for the clean baseline and every noisy SNR level so
+    # the only thing that varies between measurements is white-noise amplitude.
+    bg_assignment = _assign_backgrounds(
+        pipeline=pipeline,
+        df_bg=df_bg,
+        rec_seg_count=rec_seg_count,
+        seed=SEED,
+    )
+
+    # Compute clean baseline (separator run on COI+BG mixture, no white noise)
     clean_baseline_stats, baseline_map = _compute_clean_baseline_energy(
         pipeline=pipeline,
         segment_cache=segment_cache,
+        bg_assignment=bg_assignment,
+        bg_snr_db=BASELINE_BG_SNR_DB,
         filename_map=filename_map,
         rec_seg_count=rec_seg_count,
         batch_size=BATCH_SIZE,
@@ -729,6 +870,8 @@ def main() -> None:
         pipeline=pipeline,
         segment_cache=segment_cache,
         noise_cache=noise_cache,
+        bg_assignment=bg_assignment,
+        bg_snr_db=BASELINE_BG_SNR_DB,
         filename_map=filename_map,
         rec_seg_count=rec_seg_count,
         baseline_map=baseline_map,
@@ -779,6 +922,7 @@ def main() -> None:
             "coi_type": COI_TYPE,
             "split": SPLIT,
             "exclude_datasets": EXCLUDE_DATASETS,
+            "baseline_bg_snr_db": BASELINE_BG_SNR_DB,
             "snr_levels_db": SNR_LEVELS_DB,
             "batch_size": BATCH_SIZE,
             "seed": SEED,
@@ -788,6 +932,7 @@ def main() -> None:
         },
         "dataset_stats": {
             "n_coi_samples": len(df_coi),
+            "n_bg_samples": len(df_bg),
         },
         "clean_baseline": clean_baseline_stats.__dict__,
         "snr_results": [s.__dict__ for s in per_snr_stats],
