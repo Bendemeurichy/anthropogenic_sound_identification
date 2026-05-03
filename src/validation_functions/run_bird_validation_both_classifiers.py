@@ -54,7 +54,7 @@ SEP_CHECKPOINT = str(
     PROJECT_ROOT / "src/models/tuss/checkpoints/multi_coi_29_04/best_model.pt"
 )
 
-# Dataset CSV (using bird model's CSV with orig_label for re-binarization)
+# Dataset CSV (multi-COI training dataset; orig_label used for re-binarization)
 DATA_CSV = str(
     PROJECT_ROOT / "src/models/tuss/checkpoints/20260328_150704/separation_dataset.csv"
 )

@@ -69,6 +69,10 @@ BIRD_SYNONYMS: Set[str] = {
 # Can be overridden by passing custom synonym sets to functions
 COI_SYNONYMS: Set[str] = AIRPLANE_SYNONYMS
 
+# All known synonym sets, in priority order.  Used by _synonyms_for_targets()
+# to auto-detect the appropriate set when target_classes are provided.
+_ALL_SYNONYM_SETS: List[Set[str]] = [AIRPLANE_SYNONYMS, BIRD_SYNONYMS]
+
 
 # ============================================================================
 # LABEL NORMALIZATION & DETECTION
@@ -183,6 +187,40 @@ def _extract_label_atoms(label: Any) -> List[str]:
     return [str(label)]
 
 
+def _synonyms_for_targets(target_classes: List[str]) -> Set[str]:
+    """Derive the appropriate synonym set from a list of target class names.
+
+    For each class name in *target_classes*, checks every registered synonym
+    set (``_ALL_SYNONYM_SETS``) in order.  The first set that contains a
+    normalized form of the class name is used to expand **all** targets.
+    Classes that match no known set are kept as-is (exact match only).
+
+    This means:
+    * ``["airplane"]``   → :data:`AIRPLANE_SYNONYMS`
+    * ``["bird"]``       → :data:`BIRD_SYNONYMS`
+    * ``["cat"]``        → ``{"cat"}`` (no expansion, unknown class)
+    * ``["plane", "bird"]`` → ``AIRPLANE_SYNONYMS | BIRD_SYNONYMS``
+
+    Args:
+        target_classes: List of target class name strings.
+
+    Returns:
+        Set of synonyms to use for matching.
+    """
+    expanded: Set[str] = set()
+    for tc in target_classes:
+        norm_tc = normalize_label(tc)
+        matched = False
+        for known_set in _ALL_SYNONYM_SETS:
+            if norm_tc in known_set:
+                expanded.update(known_set)
+                matched = True
+                break
+        if not matched:
+            expanded.add(norm_tc)
+    return expanded
+
+
 def is_coi_label(label: Any, coi_synonyms: Set[str] = COI_SYNONYMS) -> bool:
     """Check if label matches any COI synonym.
 
@@ -254,8 +292,11 @@ def label_contains_coi(
         return False
 
     if use_synonyms:
-        # Use COI_SYNONYMS for comprehensive matching
-        return is_coi_label(labels, COI_SYNONYMS)
+        # Derive the correct synonym set from target_classes so that, e.g.,
+        # label_contains_coi("avian", ["bird"], use_synonyms=True) → True.
+        # Previously this hardcoded COI_SYNONYMS (= AIRPLANE_SYNONYMS), which
+        # meant bird target classes were silently never matched.
+        return is_coi_label(labels, _synonyms_for_targets(target_classes))
     else:
         # Only check exact matches against target_classes
         # Normalize target classes for comparison
@@ -346,23 +387,37 @@ def expand_target_classes_with_synonyms(
     """Expand a target class list to include all relevant synonyms.
 
     Given a list of target classes (e.g., ["plane", "airplane"]), returns
-    the full set of synonyms from coi_synonyms that match any of them.
+    the full set of synonyms that cover those classes.
+
+    When *coi_synonyms* is ``None`` (the default), the appropriate synonym set
+    is auto-detected from *target_classes* via :func:`_synonyms_for_targets`:
+    airplane targets expand to :data:`AIRPLANE_SYNONYMS`, bird targets expand
+    to :data:`BIRD_SYNONYMS`, etc.
+
+    When *coi_synonyms* is provided explicitly, only synonyms within that set
+    that match a target class are returned (original behavior).
 
     Args:
-        target_classes: List of target class names
-        coi_synonyms: Set of COI synonyms to use (defaults to COI_SYNONYMS)
+        target_classes: List of target class names.
+        coi_synonyms: Optional explicit synonym set to restrict expansion to.
+            Defaults to ``None`` (auto-detect from target_classes).
 
     Returns:
-        Set of all matching synonyms from coi_synonyms
+        Set of all matching synonyms.
 
     Examples:
         >>> expand_target_classes_with_synonyms(["plane"])
         {"plane", "planes", "airplane", "airplanes", ...}
+        >>> expand_target_classes_with_synonyms(["bird"])
+        {"bird", "birds", "avian", ...}
         >>> expand_target_classes_with_synonyms(["bird"], BIRD_SYNONYMS)
         {"bird", "birds", "avian", ...}
     """
     if coi_synonyms is None:
-        coi_synonyms = COI_SYNONYMS
+        # Derive the synonym set from target_classes rather than defaulting to
+        # the module-level COI_SYNONYMS (= AIRPLANE_SYNONYMS), which would
+        # silently ignore bird targets.
+        return _synonyms_for_targets(target_classes)
 
     expanded = set()
     for tc in target_classes:
@@ -445,6 +500,43 @@ def validate_coi_config():
         assert not is_coi_label(
             label, BIRD_SYNONYMS
         ), f"BIRD_SYNONYMS incorrectly detected '{label}' as COI"
+
+    # ---- label_contains_coi synonym-expansion tests ----
+
+    # Airplane path: a synonym not literally in target_classes should match
+    assert label_contains_coi("aircraft", ["plane"], use_synonyms=True), (
+        "label_contains_coi: 'aircraft' should match target=['plane'] with use_synonyms=True"
+    )
+    assert not label_contains_coi("aircraft", ["plane"], use_synonyms=False), (
+        "label_contains_coi: 'aircraft' should NOT match target=['plane'] with use_synonyms=False"
+    )
+
+    # Bird path: previously broken — was checking AIRPLANE_SYNONYMS instead of BIRD_SYNONYMS
+    assert label_contains_coi("avian", ["bird"], use_synonyms=True), (
+        "label_contains_coi: 'avian' should match target=['bird'] with use_synonyms=True"
+    )
+    assert label_contains_coi("birdsong", ["birds"], use_synonyms=True), (
+        "label_contains_coi: 'birdsong' should match target=['birds'] with use_synonyms=True"
+    )
+    assert not label_contains_coi("airplane", ["bird"], use_synonyms=True), (
+        "label_contains_coi: 'airplane' should NOT match target=['bird'] with use_synonyms=True"
+    )
+    assert not label_contains_coi("bird", ["plane"], use_synonyms=True), (
+        "label_contains_coi: 'bird' should NOT match target=['plane'] with use_synonyms=True"
+    )
+
+    # expand_target_classes_with_synonyms auto-detection
+    expanded_bird = expand_target_classes_with_synonyms(["bird"])
+    assert "avian" in expanded_bird, (
+        "expand_target_classes_with_synonyms(['bird']) should include 'avian'"
+    )
+    assert "airplane" not in expanded_bird, (
+        "expand_target_classes_with_synonyms(['bird']) should not include 'airplane'"
+    )
+    expanded_plane = expand_target_classes_with_synonyms(["plane"])
+    assert "aircraft" in expanded_plane, (
+        "expand_target_classes_with_synonyms(['plane']) should include 'aircraft'"
+    )
 
 
 # Run validation on import

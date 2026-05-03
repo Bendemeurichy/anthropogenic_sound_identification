@@ -1285,9 +1285,12 @@ class ValidationPipeline:
         This matches the source/noise preprocessing used by
         ``_create_mixture_rms`` so callers can generate consistent clean
         references and saved examples.
+        
+        Uses unit RMS (1.0) to match TUSS training normalization.
+        For SudoRM-RF, the inference code applies its own z-score normalization.
         """
         eps = 1e-8
-        target_rms = 0.1
+        target_rms = 1.0  # Unit RMS to match TUSS training (was 0.1, which was 100x too quiet)
 
         signal_rms = torch.sqrt(torch.mean(waveform**2)) + eps
         return waveform * (target_rms / signal_rms)
@@ -1319,7 +1322,7 @@ class ValidationPipeline:
         """
         eps = 1e-8
 
-        # Step 1: Normalize both to same RMS level (0.1 gives headroom)
+        # Step 1: Normalize both to same RMS level (unit RMS = 1.0)
         source_normalized = self._prepare_rms_mixing_input(source)
         noise_normalized = self._prepare_rms_mixing_input(noise)
 
