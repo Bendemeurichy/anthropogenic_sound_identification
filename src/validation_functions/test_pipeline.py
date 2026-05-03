@@ -252,6 +252,11 @@ class ClassificationMetrics:
     contaminated_backgrounds_removed: int = 0
     final_background_count: int = 0
     final_coi_count: int = 0
+    
+    # Class balancing statistics
+    classes_balanced: bool = False
+    original_coi_count: int = 0
+    original_background_count: int = 0
 
     def compute(
         self,
@@ -544,6 +549,15 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
                 ),
                 "final_background_count": int(self.final_background_count),
                 "final_coi_count": int(self.final_coi_count),
+            }
+        # Add class balancing stats if balancing was applied
+        if self.classes_balanced or self.original_coi_count > 0 or self.original_background_count > 0:
+            d["class_balancing"] = {
+                "balanced": bool(self.classes_balanced),
+                "original_coi_count": int(self.original_coi_count),
+                "original_background_count": int(self.original_background_count),
+                "final_coi_count": int(self.final_coi_count),
+                "final_background_count": int(self.final_background_count),
             }
         # Sanitize any remaining numpy/torch types recursively before returning
         return _sanitize(d)
@@ -2092,6 +2106,7 @@ class ValidationPipeline:
         exclude_datasets: Optional[List[str]] = None,
         skip_clean_tests: bool = False,
         save_false_negatives: bool = False,
+        balance_classes: bool = True,
     ) -> Dict[str, Dict[str, ClassificationMetrics]]:
         """Run full validation suite for every loaded classifier.
 
@@ -2132,6 +2147,10 @@ class ValidationPipeline:
             exclude_datasets: Optional list of dataset names to drop before
                 applying the split filter.
             skip_clean_tests: When ``True`` on normal test sets, steps 1 and 2 are skipped.
+            save_false_negatives: Whether to save detailed info about false negatives.
+            balance_classes: If True (default), downsample the majority class to match
+                the minority class count. This is recommended for confusion matrix
+                visualization and fair evaluation when classes are severely imbalanced.
 
         Returns:
             Nested dict ``{classifier_name: {test_name: ClassificationMetrics}}``.
@@ -2203,6 +2222,60 @@ class ValidationPipeline:
         df_bg, n_contaminated = _filter_contaminated_backgrounds(
             df_bg, coi_synonyms=self.coi_synonyms, verbose=True
         )
+
+        # ------------------------------------------------------------------
+        # Balance classes for fair evaluation (downsample majority class)
+        # ------------------------------------------------------------------
+        n_coi_before_balance = len(df_coi)
+        n_bg_before_balance = len(df_bg)
+        
+        if balance_classes:
+            n_coi = len(df_coi)
+            n_bg = len(df_bg)
+            
+            # Calculate imbalance ratio
+            if n_coi > 0 and n_bg > 0:
+                ratio = max(n_coi, n_bg) / min(n_coi, n_bg)
+                
+                # Only balance if significantly imbalanced (ratio > 2)
+                if ratio > 2.0:
+                    # Downsample majority class to match minority class
+                    if n_bg > n_coi:
+                        print(f"\n{'=' * 60}")
+                        print(f"CLASS BALANCING")
+                        print(f"{'=' * 60}")
+                        print(f"  Before: {n_coi} COI, {n_bg} background (ratio 1:{ratio:.1f})")
+                        df_bg = df_bg.sample(n=n_coi, random_state=seed).reset_index(drop=True)
+                        print(f"  After:  {len(df_coi)} COI, {len(df_bg)} background (ratio 1:1)")
+                        print(f"  ✓ Downsampled background from {n_bg} to {len(df_bg)} samples")
+                        print(f"{'=' * 60}\n")
+                    elif n_coi > n_bg:
+                        print(f"\n{'=' * 60}")
+                        print(f"CLASS BALANCING")
+                        print(f"{'=' * 60}")
+                        print(f"  Before: {n_coi} COI, {n_bg} background (ratio {ratio:.1f}:1)")
+                        df_coi = df_coi.sample(n=n_bg, random_state=seed).reset_index(drop=True)
+                        print(f"  After:  {len(df_coi)} COI, {len(df_bg)} background (ratio 1:1)")
+                        print(f"  ✓ Downsampled COI from {n_coi} to {len(df_coi)} samples")
+                        print(f"{'=' * 60}\n")
+                else:
+                    print(f"[Info] Classes are reasonably balanced (ratio 1:{ratio:.1f}) - no downsampling needed")
+            elif n_coi == 0:
+                print("[Warning] No COI samples available for evaluation!", file=sys.stderr)
+            elif n_bg == 0:
+                print("[Warning] No background samples available for evaluation!", file=sys.stderr)
+        else:
+            # If balancing is disabled, warn about severe imbalance
+            if len(df_coi) > 0 and len(df_bg) > 0:
+                ratio = max(len(df_coi), len(df_bg)) / min(len(df_coi), len(df_bg))
+                if ratio > 5.0:
+                    print(f"\n{'!' * 60}")
+                    print(f"⚠️  WARNING: SEVERE CLASS IMBALANCE")
+                    print(f"{'!' * 60}")
+                    print(f"  COI: {len(df_coi)}, Background: {len(df_bg)} (ratio 1:{ratio:.1f})")
+                    print(f"  Consider setting balance_classes=True for fair evaluation")
+                    print(f"  and confusion matrix visualization.")
+                    print(f"{'!' * 60}\n")
 
         # Human-readable label for logging and output filenames.
         run_label = only_dataset if only_dataset is not None else split
@@ -2418,9 +2491,14 @@ class ValidationPipeline:
                         file=sys.stderr,
                     )
 
-            # Set contamination stats on all metrics objects
+            # Set contamination and balancing stats on all metrics objects
             for metrics_obj in results.values():
                 metrics_obj.contaminated_backgrounds_removed = n_contaminated
+                metrics_obj.classes_balanced = balance_classes and (
+                    n_coi_before_balance != len(df_coi) or n_bg_before_balance != len(df_bg)
+                )
+                metrics_obj.original_coi_count = n_coi_before_balance
+                metrics_obj.original_background_count = n_bg_before_balance
 
             # Save per-classifier JSON results.
             if cls_output_dir:

@@ -577,10 +577,14 @@ def main() -> None:
     
     # Load ONLY separator model (no classifier needed for energy metrics)
     if USE_TUSS:
+        # Auto-detect classifier_type from TUSS prompt for correct COI synonym selection
+        classifier_type = "bird_mae" if TUSS_COI_PROMPT == "bird" else "plane"
+        
         print(f"Using TUSS model with prompts: COI='{TUSS_COI_PROMPT}', BG='{TUSS_BG_PROMPT}'")
         pipeline.load_models(
             sep_checkpoint=SEP_CHECKPOINT,
             cls_weights=None,  # No classifier needed
+            classifier_type=classifier_type,  # For COI synonym selection only
             use_tuss=True,
             tuss_coi_prompt=TUSS_COI_PROMPT,
             tuss_bg_prompt=TUSS_BG_PROMPT,
