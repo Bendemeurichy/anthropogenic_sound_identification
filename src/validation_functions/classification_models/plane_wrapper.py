@@ -91,3 +91,38 @@ class PlaneClassifierWrapper:
         conf = float(result["confidence"])
         
         return pred, conf
+    
+    def predict_batch(self, waveforms: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Classify a batch of audio waveforms for airplane presence.
+        
+        This method leverages TensorFlow's native batch processing for efficient inference.
+        
+        Args:
+            waveforms: Audio tensor of shape (B, T) at self.sample_rate Hz.
+                      Should be normalized to [-1, 1] range.
+        
+        Returns:
+            A tuple of (predictions, confidences) where:
+            - predictions: Binary tensor of shape (B,) with values 0 or 1
+            - confidences: Confidence tensor of shape (B,) in range [0.0, 1.0]
+        """
+        import tensorflow as tf
+        
+        # Convert torch tensor to numpy
+        if isinstance(waveforms, torch.Tensor):
+            wavs_np = waveforms.detach().cpu().numpy()
+        else:
+            wavs_np = np.asarray(waveforms)
+        
+        # Ensure shape is (B, T) - batch dimension should already be there
+        if len(wavs_np.shape) == 1:
+            wavs_np = np.expand_dims(wavs_np, 0)
+        
+        # Run batch inference using TensorFlow model (automatically handles batches)
+        logits = self.classifier.model(wavs_np, training=False)
+        probabilities = tf.sigmoid(logits).numpy().squeeze(-1)  # Shape: (B,)
+        
+        # Convert to predictions
+        predictions = (probabilities >= self.threshold).astype(np.int64)
+        
+        return torch.tensor(predictions, dtype=torch.long), torch.tensor(probabilities, dtype=torch.float32)

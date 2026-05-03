@@ -1477,83 +1477,49 @@ class ValidationPipeline:
         # Call the wrapper using unified interface
         return self.audioprotopnet_model(wav)
 
-    def _classify_bird_mae_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
-        """Batch classification using Bird-MAE model.
+    def _classify_batch_generic(self, waveforms: torch.Tensor, model: AudioClassifier, target_sample_rate: int) -> Tuple[List[int], List[float]]:
+        """Generic batch classification for any AudioClassifier that implements predict_batch.
         
         Args:
             waveforms: (B, T) batch of waveforms at self.sample_rate
+            model: The classifier model to use
+            target_sample_rate: Target sample rate for the classifier
             
         Returns:
             Tuple of (predictions, confidences) as lists
         """
-        if self.bird_mae_model is None:
-            raise RuntimeError(
-                "Bird-MAE model is not loaded. Call load_models(use_bird_mae=True)."
-            )
-        
         wavs = waveforms.detach().cpu()
-        bird_mae_sr = self.bird_mae_model.sample_rate
         
         # Resample if needed
-        if self.sample_rate != bird_mae_sr:
-            key = (self.sample_rate, bird_mae_sr)
+        if self.sample_rate != target_sample_rate:
+            key = (self.sample_rate, target_sample_rate)
             if key not in self._resamplers:
                 self._resamplers[key] = create_high_quality_resampler(
-                    self.sample_rate, bird_mae_sr
+                    self.sample_rate, target_sample_rate
                 )
             wavs = self._resamplers[key](wavs)
         
-        # Use batch prediction if available
-        if hasattr(self.bird_mae_model, 'predict_batch'):
-            preds_tensor, confs_tensor = self.bird_mae_model.predict_batch(wavs)
-            return [int(p.item()) for p in preds_tensor], [float(c.item()) for c in confs_tensor]
-        else:
-            # Fallback to single predictions
-            preds, confs = [], []
-            for wav in wavs:
-                p, c = self.bird_mae_model(wav)
-                preds.append(p)
-                confs.append(c)
-            return preds, confs
+        # Use batch prediction
+        preds_tensor, confs_tensor = model.predict_batch(wavs)
+        return [int(p.item()) for p in preds_tensor], [float(c.item()) for c in confs_tensor]
+
+    def _classify_bird_mae_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
+        """Batch classification using Bird-MAE model."""
+        if self.bird_mae_model is None:
+            raise RuntimeError("Bird-MAE model is not loaded. Call load_models(use_bird_mae=True).")
+        return self._classify_batch_generic(waveforms, self.bird_mae_model, self.bird_mae_model.sample_rate)
 
     def _classify_audioprotopnet_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
-        """Batch classification using AudioProtoPNet model.
-        
-        Args:
-            waveforms: (B, T) batch of waveforms at self.sample_rate
-            
-        Returns:
-            Tuple of (predictions, confidences) as lists
-        """
+        """Batch classification using AudioProtoPNet model."""
         if self.audioprotopnet_model is None:
-            raise RuntimeError(
-                "AudioProtoPNet model is not loaded. Call load_models(use_audioprotopnet=True)."
-            )
-        
-        wavs = waveforms.detach().cpu()
-        audioprotopnet_sr = self.audioprotopnet_model.sample_rate
-        
-        # Resample if needed
-        if self.sample_rate != audioprotopnet_sr:
-            key = (self.sample_rate, audioprotopnet_sr)
-            if key not in self._resamplers:
-                self._resamplers[key] = create_high_quality_resampler(
-                    self.sample_rate, audioprotopnet_sr
-                )
-            wavs = self._resamplers[key](wavs)
-        
-        # Use batch prediction if available
-        if hasattr(self.audioprotopnet_model, 'predict_batch'):
-            preds_tensor, confs_tensor = self.audioprotopnet_model.predict_batch(wavs)
-            return [int(p.item()) for p in preds_tensor], [float(c.item()) for c in confs_tensor]
-        else:
-            # Fallback to single predictions
-            preds, confs = [], []
-            for wav in wavs:
-                p, c = self.audioprotopnet_model(wav)
-                preds.append(p)
-                confs.append(c)
-            return preds, confs
+            raise RuntimeError("AudioProtoPNet model is not loaded. Call load_models(use_audioprotopnet=True).")
+        return self._classify_batch_generic(waveforms, self.audioprotopnet_model, self.audioprotopnet_model.sample_rate)
+
+    def _classify_ast_finetuned_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
+        """Batch classification using fine-tuned AST model."""
+        if self.ast_finetuned_model is None:
+            raise RuntimeError("Fine-tuned AST model is not loaded. Call load_models(use_ast_finetuned=True).")
+        return self._classify_batch_generic(waveforms, self.ast_finetuned_model, self.ast_finetuned_model.sample_rate)
 
     def _get_batch_classify_fn(self, classify_fn: Callable) -> Optional[Callable]:
         """Get the batch classification function for a given single-sample classify function.
@@ -1566,6 +1532,8 @@ class ValidationPipeline:
             return self._classify_bird_mae_batch
         elif classify_fn == self._classify_audioprotopnet:
             return self._classify_audioprotopnet_batch
+        elif classify_fn == self._classify_ast_finetuned:
+            return self._classify_ast_finetuned_batch
         return None
 
     def _classify_separated(

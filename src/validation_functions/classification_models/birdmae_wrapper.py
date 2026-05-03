@@ -61,7 +61,11 @@ class BirdMaeClassifierWrapper:
         self.model.eval()
         
         self._sample_rate = self.feature_extractor.sampling_rate
+        
+        # Verify model is PyTorch and on correct device
+        model_device = next(self.model.parameters()).device
         print(f"  Bird-MAE loaded successfully (sample_rate={self._sample_rate} Hz)")
+        print(f"  Model type: {type(self.model).__name__}, Device: {model_device}, Backend: PyTorch")
 
     @property
     def sample_rate(self) -> int:
