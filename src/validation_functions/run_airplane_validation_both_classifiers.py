@@ -41,13 +41,13 @@ if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
 from pathlib import Path
 import torch
 
-PROJECT_ROOT = Path(__file__).parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.validation_functions.test_pipeline import ValidationPipeline
 
 # ================== CONFIGURATION ==================
-BASE_PATH = str(PROJECT_ROOT.parent / "datasets")
+BASE_PATH = str(PROJECT_ROOT / "datasets")
 
 # Multi-COI separator checkpoint (trained on both birds and airplanes)
 SEP_CHECKPOINT = str(
