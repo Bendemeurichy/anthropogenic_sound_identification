@@ -139,9 +139,35 @@ def _extract_coi_df(df: pd.DataFrame, coi_synonyms: set = None) -> pd.DataFrame:
 
     out = df.copy()
 
-    # Prefer numeric label if available.
+    # Prefer numeric label if available
     if pd.api.types.is_numeric_dtype(out["label"]):
         out["label"] = out["label"].fillna(0)
+        
+        # If coi_class exists, use it for filtering (matches training behavior)
+        if "coi_class" in out.columns and coi_synonyms is not None:
+            from src.label_loading.coi_labels import get_coi_synonyms_for_classifier
+            # Map coi_synonyms to coi_class index
+            if coi_synonyms == get_coi_synonyms_for_classifier("plane"):
+                target_coi_class = 0
+            elif coi_synonyms == get_coi_synonyms_for_classifier("bird_mae"):
+                target_coi_class = 1
+            else:
+                target_coi_class = None
+            
+            if target_coi_class is not None:
+                coi = out[out["coi_class"] == target_coi_class].copy()
+                return coi.reset_index(drop=True)
+        
+        # Fallback: filter by orig_label matching coi_synonyms
+        if "orig_label" in out.columns and coi_synonyms is not None:
+            base_series = out["orig_label"]
+            mask = (out["label"] == 1) & base_series.apply(
+                lambda x: _is_coi_label(x, coi_synonyms)
+            )
+            coi = out[mask].copy()
+            return coi.reset_index(drop=True)
+        
+        # No filtering available, just use label=1
         coi = out[out["label"] == 1].copy()
         return coi.reset_index(drop=True)
 

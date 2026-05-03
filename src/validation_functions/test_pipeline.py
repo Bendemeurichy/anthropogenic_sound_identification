@@ -2221,6 +2221,37 @@ class ValidationPipeline:
             df_split["label"] = raw_series.apply(
                 lambda x: 1 if _is_coi_label(x, self.coi_synonyms) else 0
             )
+        else:
+            # Label is numeric. If coi_class column exists, use it to filter by COI type.
+            # Otherwise, re-binarize based on orig_label matching COI synonyms.
+            # This ensures we only get samples matching the configured COI type (bird/airplane).
+            if "coi_class" in df_split.columns:
+                # Map coi_synonyms to the correct coi_class index
+                # For now, assume: airplane=0, bird=1 (matches training)
+                # TODO: Make this more robust by checking which target_classes were used
+                if self.coi_synonyms == get_coi_synonyms_for_classifier("plane"):
+                    target_coi_class = 0
+                elif self.coi_synonyms == get_coi_synonyms_for_classifier("bird_mae"):
+                    target_coi_class = 1
+                else:
+                    # Unknown COI type, fall back to orig_label
+                    target_coi_class = None
+                
+                if target_coi_class is not None:
+                    # Set label=1 only for samples matching the target COI class
+                    df_split["label"] = (df_split["coi_class"] == target_coi_class).astype(int)
+                elif "orig_label" in df_split.columns:
+                    # Fallback: re-binarize based on orig_label
+                    raw_series = df_split["orig_label"]
+                    df_split["label"] = raw_series.apply(
+                        lambda x: 1 if _is_coi_label(x, self.coi_synonyms) else 0
+                    )
+            elif "orig_label" in df_split.columns:
+                # No coi_class column, re-binarize based on orig_label
+                raw_series = df_split["orig_label"]
+                df_split["label"] = raw_series.apply(
+                    lambda x: 1 if _is_coi_label(x, self.coi_synonyms) else 0
+                )
 
         df_coi = df_split[df_split["label"] == 1].reset_index(drop=True)
         df_bg = df_split[df_split["label"] == 0].reset_index(drop=True)
