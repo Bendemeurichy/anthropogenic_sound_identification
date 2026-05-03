@@ -621,9 +621,9 @@ class ValidationPipeline:
         classifier_type: str = "plane",
         use_clapsep: bool = False,
         use_tuss: bool = False,
-        tuss_coi_prompt: str = "airplane",
+        tuss_coi_prompt: str = None,
         tuss_bg_prompt: str = "background",
-        clapsep_text_pos: str = "train passing",
+        clapsep_text_pos: str = None,
         clapsep_text_neg: str = "",
         use_ast_finetuned: bool = True,
         use_bird_mae: bool = False,
@@ -642,9 +642,11 @@ class ValidationPipeline:
                 - "audioprotopnet": AudioProtoPNet-20-BirdSet-XCL (bird species detection)
             use_clapsep: If True, load the CLAPSep separator instead of SudoRM-RF.
             use_tuss: If True, load the TUSS separator instead of SudoRM-RF.
-            tuss_coi_prompt: Prompt name for TUSS Class of Interest (default: "airplane").
+            tuss_coi_prompt: Prompt name for TUSS Class of Interest. If None, auto-detected
+                from classifier_type ("airplane" for plane classifiers, "bird" for bird classifiers).
             tuss_bg_prompt: Prompt name for TUSS background (default: "background").
-            clapsep_text_pos: Positive text prompt for CLAPSep.
+            clapsep_text_pos: Positive text prompt for CLAPSep. If None, auto-detected
+                from classifier_type ("airplane" for plane classifiers, "bird" for bird classifiers).
             clapsep_text_neg: Negative text prompt for CLAPSep.
             use_ast_finetuned: If True (default), load the fine-tuned AST model as an
                 additional classifier.
@@ -658,11 +660,26 @@ class ValidationPipeline:
         self.sep_checkpoint_path = sep_path
         self.cls_checkpoint_path = cls_path
 
+        # Auto-detect prompts based on classifier type if not provided
+        if tuss_coi_prompt is None:
+            if classifier_type in ["bird_mae", "audioprotopnet"]:
+                tuss_coi_prompt = "bird"
+            else:
+                tuss_coi_prompt = "airplane"
+        
+        if clapsep_text_pos is None:
+            if classifier_type in ["bird_mae", "audioprotopnet"]:
+                clapsep_text_pos = "bird"
+            else:
+                clapsep_text_pos = "airplane"
+
         if use_tuss:
             print(f"Loading TUSS model from {sep_path}")
             print(
                 f"  COI prompt: '{tuss_coi_prompt}', Background prompt: '{tuss_bg_prompt}'"
             )
+            if tuss_coi_prompt in ["bird", "airplane"]:
+                print(f"  (auto-detected from classifier_type='{classifier_type}')")
             self.separator = TUSSInference.from_checkpoint(
                 sep_path,
                 device=self.device,
@@ -689,6 +706,8 @@ class ValidationPipeline:
                 f"Loading CLAPSep model from {ckpt_label} "
                 f"(text_pos='{clapsep_text_pos}', text_neg='{clapsep_text_neg}')"
             )
+            if clapsep_text_pos in ["bird", "airplane"]:
+                print(f"  (auto-detected from classifier_type='{classifier_type}')")
             self.separator = CLAPSepInference.from_pretrained(
                 model_ckpt_path=sep_path if sep_checkpoint else None,
                 device=self.device,
@@ -822,6 +841,43 @@ class ValidationPipeline:
             )
         else:
             print(f"  Using custom COI synonyms: {len(self.coi_synonyms)} terms")
+        
+        # ------------------------------------------------------------------
+        # Check for mismatch between separator training and classifier type
+        # ------------------------------------------------------------------
+        if self.target_classes is not None:
+            # Check if separator was trained for the classifier's COI type
+            separator_has_airplane = any(
+                tc.lower() in ['airplane', 'aeroplane', 'aircraft', 'plane'] 
+                for tc in self.target_classes
+            )
+            separator_has_bird = any(
+                tc.lower() in ['bird', 'avian'] 
+                for tc in self.target_classes
+            )
+            
+            # Determine classifier's COI type
+            classifier_is_airplane = (self.coi_synonyms == AIRPLANE_SYNONYMS)
+            
+            # Warn if classifier needs a COI type that separator wasn't trained for
+            if classifier_is_airplane and not separator_has_airplane:
+                print(f"\n{'!' * 60}")
+                print(f"⚠️  WARNING: COI MISMATCH DETECTED")
+                print(f"{'!' * 60}")
+                print(f"  Classifier is configured for: AIRPLANE")
+                print(f"  But separator target_classes: {self.target_classes}")
+                print(f"  does NOT include airplane-related classes.")
+                print(f"\n  The separator may not effectively separate airplane sounds.")
+                print(f"{'!' * 60}\n")
+            elif not classifier_is_airplane and not separator_has_bird:
+                print(f"\n{'!' * 60}")
+                print(f"⚠️  WARNING: COI MISMATCH DETECTED")
+                print(f"{'!' * 60}")
+                print(f"  Classifier is configured for: BIRD")
+                print(f"  But separator target_classes: {self.target_classes}")
+                print(f"  does NOT include bird-related classes.")
+                print(f"\n  The separator may not effectively separate bird sounds.")
+                print(f"{'!' * 60}\n")
 
         # ------------------------------------------------------------------
         # Optional: AST (Audio Spectrogram Transformer) fine-tuned classifier (as auxiliary)
