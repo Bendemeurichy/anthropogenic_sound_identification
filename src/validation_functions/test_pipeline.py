@@ -2813,6 +2813,7 @@ def main():
         classifier_type="bird_mae",
         use_clapsep=False,
         use_tuss=True,
+        tuss_coi_prompt="birds",  # multi_coi_29_04 uses "birds" not "bird"
     )
 
     # Pass 1: standard held-out test split (esc50, aerosonicdb, freesound)
