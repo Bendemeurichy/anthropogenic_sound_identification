@@ -525,6 +525,10 @@ def main() -> None:
     # ================== HARD-CODED CONFIG ==================
     BASE_PATH = str(PROJECT_ROOT.parent / "datasets")
     
+    # ---- Device selection ----
+    # Set to "cuda:0", "cuda:1", "cpu", etc. or None for auto-detection
+    DEVICE = None  # None = auto-select (prefers cuda:1, falls back to cuda:0, then cpu)
+    
     # ---- Model selection ----
     # Set USE_TUSS = True to test TUSS model instead of SudoRM-RF
     USE_TUSS = False
@@ -569,7 +573,7 @@ def main() -> None:
     # ======================================================
 
     print("Initializing pipeline...")
-    pipeline = ValidationPipeline(base_path=BASE_PATH)
+    pipeline = ValidationPipeline(base_path=BASE_PATH, device=DEVICE)
     
     # Load ONLY separator model (no classifier needed for energy metrics)
     if USE_TUSS:

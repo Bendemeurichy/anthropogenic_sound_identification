@@ -565,13 +565,16 @@ class ValidationPipeline:
     )
     DATA_CSV = PROJECT_ROOT / "src/models/sudormrf/checkpoints/separation_dataset.csv"
 
-    def __init__(self, base_path: str = None, coi_synonyms: set = None):
+    def __init__(self, base_path: str = None, coi_synonyms: set = None, device: str = None):
         """
         Args:
             base_path: Base path for audio files (to convert Windows paths in CSV)
             coi_synonyms: Set of COI (Class of Interest) synonyms to use for label matching.
                 If None, will be auto-detected based on classifier_type in load_models().
                 Can be AIRPLANE_SYNONYMS, BIRD_SYNONYMS, or a custom set.
+            device: Device to use for inference (e.g., "cuda:0", "cuda:1", "cpu").
+                If None, auto-selects: prefers cuda:1 with multiple GPUs, cuda:0 with one GPU,
+                or cpu if CUDA is unavailable.
         """
         self.base_path = base_path
         self.coi_synonyms = coi_synonyms  # Will be set in load_models() if None
@@ -582,16 +585,21 @@ class ValidationPipeline:
             self.classifier_sample_rate * self.segment_length
         )
         self.segment_samples = int(self.sample_rate * self.segment_length)
-        # Prefer cuda:1 when multiple GPUs are present; fall back to cuda:0 on
-        # a single-GPU machine; use CPU if no CUDA is available.
-        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            self.device = "cuda:1"
-        elif torch.cuda.is_available():
-            self.device = "cuda:0"
+        
+        # Device selection: use provided device or auto-select
+        if device is not None:
+            self.device = device
         else:
-            self.device = "cpu"
-            print(f"Cuda available: {torch.cuda.is_available()}")
-            print(f"Gpus available: {torch.cuda.device_count()}")
+            # Prefer cuda:1 when multiple GPUs are present; fall back to cuda:0 on
+            # a single-GPU machine; use CPU if no CUDA is available.
+            if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+                self.device = "cuda:1"
+            elif torch.cuda.is_available():
+                self.device = "cuda:0"
+            else:
+                self.device = "cpu"
+                print(f"Cuda available: {torch.cuda.is_available()}")
+                print(f"Gpus available: {torch.cuda.device_count()}")
         # report the choice so users can immediately see which hardware will be used
         print(f"ValidationPipeline using device: {self.device}")
         # will be populated when a separation checkpoint is loaded
@@ -846,14 +854,27 @@ class ValidationPipeline:
         # Check for mismatch between separator training and classifier type
         # ------------------------------------------------------------------
         if self.target_classes is not None:
+            # Flatten target_classes in case it contains nested lists
+            def flatten_target_classes(tc_list):
+                """Recursively flatten target_classes which may contain nested lists."""
+                flattened = []
+                for item in tc_list:
+                    if isinstance(item, (list, tuple)):
+                        flattened.extend(flatten_target_classes(item))
+                    elif isinstance(item, str):
+                        flattened.append(item)
+                return flattened
+            
+            flat_target_classes = flatten_target_classes(self.target_classes)
+            
             # Check if separator was trained for the classifier's COI type
             separator_has_airplane = any(
                 tc.lower() in ['airplane', 'aeroplane', 'aircraft', 'plane'] 
-                for tc in self.target_classes
+                for tc in flat_target_classes
             )
             separator_has_bird = any(
                 tc.lower() in ['bird', 'avian'] 
-                for tc in self.target_classes
+                for tc in flat_target_classes
             )
             
             # Determine classifier's COI type
