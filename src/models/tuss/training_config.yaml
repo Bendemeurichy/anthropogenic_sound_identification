@@ -168,7 +168,7 @@ data:
       ]
 
   # Probability that a training sample contains *only* background (no COI)
-  background_only_prob: 0.3
+  background_only_prob: 0.05
 
   # How many background clips to mix together per sample
   background_mix_n: 1
@@ -275,7 +275,7 @@ training:
 
   # After stabilization_epochs, if the backbone is not frozen (freeze_backbone=false),
   # it will train at lr * backbone_lr_multiplier
-  backbone_lr_multiplier: 0.05
+  backbone_lr_multiplier: 0.2
 
   # -----------------------------------------------------------------------
   # PROMPT VARIABILITY (like base TUSS model training)
@@ -305,8 +305,8 @@ training:
   min_coi_prompts: 1 # Minimum COI prompts per sample (always have at least 1 COI)
 
   # Loss weights
-  coi_weight: 1.3 # up-weight COI streams relative to background (reduced from 2.0 to improve BG separation)
-  zero_ref_loss_weight: 0.3 # penalty for estimating energy when target is silent (increased from 0.1)
+  coi_weight: 3.0 # up-weight COI streams relative to background (increased from 1.3 to break degenerate near-zero COI mask solution)
+  zero_ref_loss_weight: 0.1 # penalty for estimating energy when target is silent (matches base TUSS value; 0.3 was too high and caused training instability)
   snr_max: 30 # clip SNR loss at this value (dB)
 
   num_workers: 1
