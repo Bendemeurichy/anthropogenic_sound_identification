@@ -80,10 +80,6 @@ from src.validation_functions.classification_models.Classifier import (
 )
 from src.common.audio_utils import create_high_quality_resampler
 
-
-
-
-
 try:
     import src.models.base.sudo_rm_rf
 except Exception as e:
@@ -141,7 +137,7 @@ def _filter_contaminated_backgrounds(
     """
     if coi_synonyms is None:
         coi_synonyms = COI_SYNONYMS
-    
+
     if "orig_label" not in df_bg.columns:
         if verbose:
             print("[Info] No 'orig_label' column found - skipping contamination filter")
@@ -186,9 +182,6 @@ def _filter_contaminated_backgrounds(
 
     # Return filtered dataframe
     return df_bg[~contaminated_mask].reset_index(drop=True), n_contaminated
-
-
-
 
 
 # ============================================================================
@@ -239,7 +232,7 @@ class ClassificationMetrics:
     fp_raw_atomic_counts: Dict[str, int] = field(default_factory=dict)
     # Atomic false negative counts, split from any multi-label raw annotations.
     fn_raw_atomic_counts: Dict[str, int] = field(default_factory=dict)
-    
+
     # List of misclassified COI samples (false negatives) with metadata
     # Each entry is a dict with: filename, orig_label, confidence, (optional) start_time, end_time
     false_negative_samples: List[Dict[str, Any]] = field(default_factory=list)
@@ -363,7 +356,9 @@ class ClassificationMetrics:
                             fn_entry = {
                                 "filename": sample_info[idx].get("filename", ""),
                                 "orig_label": raw_key,
-                                "confidence": y_scores[idx] if y_scores is not None else 0.0,
+                                "confidence": (
+                                    y_scores[idx] if y_scores is not None else 0.0
+                                ),
                             }
                             # Add optional timing info if available
                             if "start_time" in sample_info[idx]:
@@ -749,12 +744,13 @@ class ValidationPipeline:
         # Primary classifier (using new unified interface)
         # ------------------------------------------------------------------
         print(f"Loading primary {classifier_type} classifier...")
-        
+
         if classifier_type == "plane":
             cls_path = cls_weights or self.CLS_WEIGHTS
             print(f"  from {cls_path}")
             config = TrainingConfig(
-                sample_rate=self.classifier_sample_rate, audio_duration=self.segment_length
+                sample_rate=self.classifier_sample_rate,
+                audio_duration=self.segment_length,
             )
             self.classifier = create_classifier(
                 "plane",
@@ -764,7 +760,7 @@ class ValidationPipeline:
             )
         elif classifier_type == "ast_finetuned":
             cls_path = cls_weights or (
-                PROJECT_ROOT 
+                PROJECT_ROOT
                 / "src/validation_functions/classification_models/plane_classifier_ast/checkpoints/final_model.pth"
             )
             print(f"  from {cls_path}")
@@ -776,7 +772,7 @@ class ValidationPipeline:
             self.classifier_sample_rate = self.classifier.sample_rate
         elif classifier_type == "pann_finetuned":
             cls_path = cls_weights or (
-                PROJECT_ROOT 
+                PROJECT_ROOT
                 / "src/validation_functions/classification_models/plane_classifier_pann/checkpoints/final_model.pth"
             )
             print(f"  from {cls_path}")
@@ -806,7 +802,7 @@ class ValidationPipeline:
                 f"Unknown classifier_type: {classifier_type}. "
                 f"Must be one of: 'plane', 'pann_finetuned', 'ast_finetuned', 'bird_mae', 'audioprotopnet'"
             )
-        
+
         self.classifier_segment_samples = int(
             self.classifier_sample_rate * self.segment_length
         )
@@ -818,8 +814,12 @@ class ValidationPipeline:
         # ------------------------------------------------------------------
         if self.coi_synonyms is None:
             self.coi_synonyms = get_coi_synonyms_for_classifier(classifier_type)
-            synonym_type = "AIRPLANE" if self.coi_synonyms == AIRPLANE_SYNONYMS else "BIRD"
-            print(f"  Auto-detected COI synonyms: {synonym_type}_SYNONYMS ({len(self.coi_synonyms)} terms)")
+            synonym_type = (
+                "AIRPLANE" if self.coi_synonyms == AIRPLANE_SYNONYMS else "BIRD"
+            )
+            print(
+                f"  Auto-detected COI synonyms: {synonym_type}_SYNONYMS ({len(self.coi_synonyms)} terms)"
+            )
         else:
             print(f"  Using custom COI synonyms: {len(self.coi_synonyms)} terms")
 
@@ -829,7 +829,10 @@ class ValidationPipeline:
         self.ast_finetuned_model = None
         if use_ast_finetuned and classifier_type != "ast_finetuned":
             try:
-                cls_path = PROJECT_ROOT / "src/validation_functions/classification_models/plane_classifier_ast/checkpoints/final_model.pth"
+                cls_path = (
+                    PROJECT_ROOT
+                    / "src/validation_functions/classification_models/plane_classifier_ast/checkpoints/final_model.pth"
+                )
                 self.ast_finetuned_model = create_classifier(
                     "ast_finetuned",
                     checkpoint_path=str(cls_path),
@@ -864,7 +867,7 @@ class ValidationPipeline:
                     f"[Warning] Failed to load Bird-MAE model: {e}",
                     file=sys.stderr,
                 )
-                
+
         # ------------------------------------------------------------------
         # Optional: AudioProtoPNet classifier (as auxiliary)
         # ------------------------------------------------------------------
@@ -1062,7 +1065,7 @@ class ValidationPipeline:
 
     def _classify(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Run classification using the primary classifier. Returns (prediction, confidence).
-        
+
         The classifier now handles resampling internally if needed, but we still
         resample here to ensure the waveform is at the correct sample rate.
         """
@@ -1085,6 +1088,48 @@ class ValidationPipeline:
 
         # Call the classifier using the unified interface
         return self.classifier(wav)
+
+    def _classify_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
+        """Run batch classification for better performance.
+        
+        Args:
+            waveforms: Batch of waveforms (B, T) at self.sample_rate
+            
+        Returns:
+            Tuple of (predictions, confidences) as lists
+        """
+        wavs = waveforms.detach().cpu()
+        
+        # Resample if needed
+        if self.classifier_sample_rate != self.sample_rate:
+            key = (self.sample_rate, self.classifier_sample_rate)
+            if key not in self._resamplers:
+                self._resamplers[key] = create_high_quality_resampler(
+                    self.sample_rate, self.classifier_sample_rate
+                )
+            wavs = self._resamplers[key](wavs)
+        
+        # Pad/truncate all waveforms to target length
+        batch_size, current_len = wavs.shape
+        if current_len < self.classifier_segment_samples:
+            wavs = torch.nn.functional.pad(
+                wavs, (0, self.classifier_segment_samples - current_len)
+            )
+        else:
+            wavs = wavs[:, :self.classifier_segment_samples]
+        
+        # Use batch prediction if available, otherwise fall back to loop
+        if hasattr(self.classifier, 'predict_batch'):
+            preds_tensor, confs_tensor = self.classifier.predict_batch(wavs)
+            return [int(p.item()) for p in preds_tensor], [float(c.item()) for c in confs_tensor]
+        else:
+            # Fallback to single predictions
+            preds, confs = [], []
+            for wav in wavs:
+                p, c = self.classifier(wav)
+                preds.append(p)
+                confs.append(c)
+            return preds, confs
 
     def _create_mixture(
         self,
@@ -1224,17 +1269,19 @@ class ValidationPipeline:
             return waveform
         return waveform / peak
 
-    def _normalize_for_saving(self, waveform: torch.Tensor, target_peak: float = 0.95) -> torch.Tensor:
+    def _normalize_for_saving(
+        self, waveform: torch.Tensor, target_peak: float = 0.95
+    ) -> torch.Tensor:
         """Peak-normalize a waveform for saving to disk (human listening).
-        
+
         Scales the audio so the peak amplitude is at target_peak (default 0.95)
         to ensure proper loudness for playback while leaving small headroom
         to prevent clipping artifacts in lossy formats.
-        
+
         Args:
             waveform: Input waveform tensor
             target_peak: Target peak level (0.0 to 1.0), default 0.95
-            
+
         Returns:
             Peak-normalized waveform at listening level
         """
@@ -1257,10 +1304,10 @@ class ValidationPipeline:
             raise RuntimeError(
                 "Fine-tuned AST model is not loaded. Call load_models(use_ast_finetuned=True)."
             )
-        
+
         wav = waveform.detach().cpu()
         ast_sr = self.ast_finetuned_model.sample_rate
-        
+
         if self.sample_rate != ast_sr:
             key = (self.sample_rate, ast_sr)
             if key not in self._resamplers:
@@ -1268,9 +1315,9 @@ class ValidationPipeline:
                     self.sample_rate, ast_sr
                 )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
-        
+
         return self.ast_finetuned_model(wav)
-    
+
     def _classify_bird_mae(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Classify using the Bird-MAE model.
 
@@ -1285,7 +1332,7 @@ class ValidationPipeline:
             raise RuntimeError(
                 "Bird-MAE model is not loaded. Call load_models(use_bird_mae=True)."
             )
-        
+
         wav = waveform.detach().cpu()
         bird_mae_sr = self.bird_mae_model.sample_rate
 
@@ -1314,7 +1361,7 @@ class ValidationPipeline:
             raise RuntimeError(
                 "AudioProtoPNet model is not loaded. Call load_models(use_audioprotopnet=True)."
             )
-        
+
         wav = waveform.detach().cpu()
         audioprotopnet_sr = self.audioprotopnet_model.sample_rate
 
@@ -1460,29 +1507,40 @@ class ValidationPipeline:
                     seg_si_snr, seg_sdr, seg_si_sdr = [], [], []
 
                     for i in range(0, len(segments_tensor), batch_size):
-                        batch_seg = segments_tensor[i:i+batch_size]
-                        
-                        separated_batch = self._separate_batch(batch_seg) # (B, n_sources, T) or (B, T)
-                        
+                        batch_seg = segments_tensor[i : i + batch_size]
+
+                        separated_batch = self._separate_batch(
+                            batch_seg
+                        )  # (B, n_sources, T) or (B, T)
+
                         # Get COI sources
                         if separated_batch.dim() == 2:
                             coi_est = separated_batch
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
-                            
-                        # Classify
-                        for s_est in coi_est:
-                            p, c = classify_fn(s_est)
-                            seg_preds.append(p)
-                            seg_confs.append(c)
-                                
+
+                        # Classify - use batch classification if available (much faster)
+                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
+                            # Use optimized batch classification
+                            batch_preds, batch_confs = self._classify_batch(coi_est)
+                            seg_preds.extend(batch_preds)
+                            seg_confs.extend(batch_confs)
+                        else:
+                            # Fallback to one-by-one classification
+                            for s_est in coi_est:
+                                p, c = classify_fn(s_est)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
+
                         # Metrics
                         for b_idx, s_est in enumerate(coi_est):
-                            snr, sdr_val, si_sdr_val = self._compute_signal_metrics(batch_seg[b_idx], s_est)
+                            snr, sdr_val, si_sdr_val = self._compute_signal_metrics(
+                                batch_seg[b_idx], s_est
+                            )
                             seg_si_snr.append(snr)
                             seg_sdr.append(sdr_val)
                             seg_si_sdr.append(si_sdr_val)
-                            
+
                         # Optionally save first segment (skipped here for brevity or done outside loop)
 
                     # A recording is classified as COI if ANY segment triggers a
@@ -1493,12 +1551,17 @@ class ValidationPipeline:
                     sdr_scores.append(float(np.mean(seg_sdr)))
                     si_sdr_scores.append(float(np.mean(seg_si_sdr)))
                 else:
-                    seg_preds = []
-                    seg_confs = []
-                    for seg in segments:
-                        seg_pred, seg_conf = classify_fn(seg)
-                        seg_preds.append(seg_pred)
-                        seg_confs.append(seg_conf)
+                    # Classify without separation - use batch if available
+                    segments_tensor = torch.stack(segments)
+                    if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
+                        seg_preds, seg_confs = self._classify_batch(segments_tensor)
+                    else:
+                        seg_preds = []
+                        seg_confs = []
+                        for seg in segments:
+                            seg_pred, seg_conf = classify_fn(seg)
+                            seg_preds.append(seg_pred)
+                            seg_confs.append(seg_conf)
                     pred = 1 if any(p == 1 for p in seg_preds) else 0
                     conf = max(seg_confs)
 
@@ -1506,7 +1569,7 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
                 raw_labels.append(getattr(row, "orig_label", row.label))
-                
+
                 # Collect sample info if tracking false negatives
                 if sample_info is not None:
                     info_entry = {"filename": row.filename}
@@ -1534,25 +1597,37 @@ class ValidationPipeline:
                 batch_size = 16
                 segments_tensor = torch.stack(segments)
                 seg_preds, seg_confs = [], []
-                
+
                 for i in range(0, len(segments_tensor), batch_size):
-                    batch_seg = segments_tensor[i:i+batch_size]
+                    batch_seg = segments_tensor[i : i + batch_size]
                     if use_separation:
                         separated_batch = self._separate_batch(batch_seg)
                         if separated_batch.dim() == 2:
                             coi_est = separated_batch
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
-                            
-                        for s_est in coi_est:
-                            p, c = classify_fn(s_est)
-                            seg_preds.append(p)
-                            seg_confs.append(c)
+
+                        # Use batch classification if available (much faster)
+                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
+                            batch_preds, batch_confs = self._classify_batch(coi_est)
+                            seg_preds.extend(batch_preds)
+                            seg_confs.extend(batch_confs)
+                        else:
+                            for s_est in coi_est:
+                                p, c = classify_fn(s_est)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
                     else:
-                        for seg in batch_seg:
-                            p, c = classify_fn(seg)
-                            seg_preds.append(p)
-                            seg_confs.append(c)
+                        # Classify without separation - use batch if available
+                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
+                            batch_preds, batch_confs = self._classify_batch(batch_seg)
+                            seg_preds.extend(batch_preds)
+                            seg_confs.extend(batch_confs)
+                        else:
+                            for seg in batch_seg:
+                                p, c = classify_fn(seg)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
 
                 pred = 1 if any(p == 1 for p in seg_preds) else 0
                 conf = max(seg_confs)
@@ -1560,7 +1635,7 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
                 raw_labels.append(getattr(row, "orig_label", row.label))
-                
+
                 # Collect sample info if tracking false negatives (to keep list aligned)
                 if sample_info is not None:
                     info_entry = {"filename": row.filename}
@@ -1686,7 +1761,7 @@ class ValidationPipeline:
                             coi_n_save = self._normalize_for_saving(coi_n)
                             bg_n_save = self._normalize_for_saving(bg_n)
                             mixture_save = self._normalize_for_saving(mixture)
-                            
+
                             torchaudio.save(
                                 str(save_dir / f"mixture_coi_clean_{k}.wav"),
                                 coi_n_save.unsqueeze(0).cpu(),
@@ -1750,7 +1825,9 @@ class ValidationPipeline:
                                 else:
                                     for s in range(separated.shape[0]):
                                         # Peak-normalize each source for proper listening level
-                                        src_save = self._normalize_for_saving(separated[s])
+                                        src_save = self._normalize_for_saving(
+                                            separated[s]
+                                        )
                                         torchaudio.save(
                                             str(
                                                 save_dir
@@ -1793,7 +1870,7 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
                 raw_labels.append(getattr(row, "orig_label", row.label))
-                
+
                 # Collect sample info if tracking false negatives
                 if sample_info is not None:
                     info_entry = {"filename": row.filename}
@@ -1821,16 +1898,16 @@ class ValidationPipeline:
                 batch_size = 16
                 segments_tensor = torch.stack(segments)
                 seg_preds, seg_confs = [], []
-                
+
                 for i in range(0, len(segments_tensor), batch_size):
-                    batch_seg = segments_tensor[i:i+batch_size]
+                    batch_seg = segments_tensor[i : i + batch_size]
                     if use_separation:
                         separated_batch = self._separate_batch(batch_seg)
                         if separated_batch.dim() == 2:
                             coi_est = separated_batch
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
-                            
+
                         for s_est in coi_est:
                             p, c = classify_fn(s_est)
                             seg_preds.append(p)
@@ -1847,7 +1924,7 @@ class ValidationPipeline:
                 y_pred.append(pred)
                 y_scores.append(conf)
                 raw_labels.append(getattr(row, "orig_label", row.label))
-                
+
                 # Collect sample info if tracking false negatives (to keep list aligned)
                 if sample_info is not None:
                     info_entry = {"filename": row.filename}
@@ -1934,7 +2011,7 @@ class ValidationPipeline:
             exclude_datasets: Optional list of dataset names to drop before
                 applying the split filter.
             skip_clean_tests: When ``True`` on normal test sets, steps 1 and 2 are skipped.
-            
+
         Returns:
             Nested dict ``{classifier_name: {test_name: ClassificationMetrics}}``.
         """
@@ -2030,7 +2107,9 @@ class ValidationPipeline:
         if self.classifier is not None:
             # Determine correct name based on the class of the primary classifier wrapper
             primary_name = "cnn"
-            if hasattr(self.classifier, "model") and hasattr(self.classifier.model, "__module__"):
+            if hasattr(self.classifier, "model") and hasattr(
+                self.classifier.model, "__module__"
+            ):
                 mod = self.classifier.model.__module__.lower()
                 if "birdmae" in mod:
                     primary_name = "bird_mae"
@@ -2045,7 +2124,7 @@ class ValidationPipeline:
             classifiers.append(("ast_finetuned", self._classify_ast_finetuned))
         if getattr(self, "bird_mae_model", None) is not None:
             classifiers.append(("bird_mae", self._classify_bird_mae))
-        
+
         if getattr(self, "audioprotopnet_model", None) is not None:
             classifiers.append(("audioprotopnet", self._classify_audioprotopnet))
 
@@ -2341,7 +2420,7 @@ def demo_two_wav_separation(
     mix_t = _prep_single(mixture)
     src_t = _prep_single(src)
     noise_t = _prep_single(noise)
-    
+
     # Prepare separated output (may be multi-source)
     sep_t = separated.detach().cpu()
     if sep_t.dim() == 1:
@@ -2398,9 +2477,7 @@ def demo_two_wav_separation(
 
 def main():
     # ============ CONFIGURE PATHS HERE ============
-    SEP_CHECKPOINT = (
-        PROJECT_ROOT / "src/models/sudormrf/checkpoints/20260316_191707/best_model.pt"
-    )
+    SEP_CHECKPOINT = PROJECT_ROOT / "src/models/tuss/checkpoints/multi_coi_29_04"
     CLS_WEIGHTS = (
         PROJECT_ROOT
         / "src/validation_functions/classification_models/plane_clasifier/results/checkpoints/final_model.weights.h5"
@@ -2408,7 +2485,7 @@ def main():
     # Trains
     DATA_CSV = (
         PROJECT_ROOT
-        / "src/models/sudormrf/checkpoints/20260316_191707/separation_dataset.csv"
+        / "src/models/tuss/checkpoints/20260316_191707/separation_dataset.csv"
     )
 
     # planes/ "src/models/sudormrf/checkpoints/20260129_113352/separation_dataset.csv"
@@ -2419,22 +2496,22 @@ def main():
     pipeline = ValidationPipeline(base_path=BASE_PATH)
     pipeline.load_models(
         sep_checkpoint=SEP_CHECKPOINT,
-        cls_weights=None, # Not needed for birdnet
+        cls_weights=None,  # Not needed for birdnet
         classifier_type="bird_mae",
         use_clapsep=False,
-        use_tuss=False,
+        use_tuss=True,
     )
 
     # Pass 1: standard held-out test split (esc50, aerosonicdb, freesound)
-    # pipeline.run(
-    #     split="test",
-    #     snr_range=(-5, 5),
-    #     data_csv=DATA_CSV,
-    #     output_dir="./validation_results",
-    #     save_examples_dir="./validation_examples_test",
-    #     save_n_examples=2,
-    #     exclude_datasets=["risoux_test"],
-    # )
+    pipeline.run(
+        split="test",
+        snr_range=(-5, 5),
+        data_csv=DATA_CSV,
+        output_dir="./validation_results",
+        save_examples_dir="./validation_examples_test",
+        save_n_examples=2,
+        exclude_datasets=["risoux_test"],
+    )
 
     # Pass 2: independent Risoux test set — kept separate because
     # load_risoux_test() assigns split="test" to all its rows, so it

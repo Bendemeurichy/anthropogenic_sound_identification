@@ -2,6 +2,7 @@ import torch
 import transformers
 from transformers import AutoFeatureExtractor, AutoModelForSequenceClassification
 from typing import Tuple
+import os
 
 def apply_monkeypatches():
     # Patch 1: torch.linspace crash on meta tensors
@@ -29,11 +30,38 @@ class BirdMaeClassifierWrapper:
         apply_monkeypatches()
         
         print(f"Loading Bird-MAE model from {self.model_id}...")
-        self.feature_extractor = AutoFeatureExtractor.from_pretrained(self.model_id, trust_remote_code=True)
-        self.model = AutoModelForSequenceClassification.from_pretrained(self.model_id, trust_remote_code=True).to(self.device)
+        
+        # Windows compatibility and performance: disable symlink warnings, try local first
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+        
+        # Try loading from cache first for faster startup
+        try:
+            self.feature_extractor = AutoFeatureExtractor.from_pretrained(
+                self.model_id,
+                trust_remote_code=True,
+                local_files_only=True
+            )
+            self.model = AutoModelForSequenceClassification.from_pretrained(
+                self.model_id,
+                trust_remote_code=True,
+                local_files_only=True
+            ).to(self.device)
+        except Exception:
+            # Fallback to downloading if not cached
+            print("  Model not cached locally, downloading from HuggingFace (this may take a while)...")
+            self.feature_extractor = AutoFeatureExtractor.from_pretrained(
+                self.model_id,
+                trust_remote_code=True
+            )
+            self.model = AutoModelForSequenceClassification.from_pretrained(
+                self.model_id,
+                trust_remote_code=True
+            ).to(self.device)
+        
         self.model.eval()
         
         self._sample_rate = self.feature_extractor.sampling_rate
+        print(f"  Bird-MAE loaded successfully (sample_rate={self._sample_rate} Hz)")
 
     @property
     def sample_rate(self) -> int:
@@ -41,25 +69,41 @@ class BirdMaeClassifierWrapper:
 
     @torch.inference_mode()
     def __call__(self, waveform: torch.Tensor) -> Tuple[int, float]:
+        """Single waveform inference."""
         preds, confs = self.predict_batch(waveform.unsqueeze(0))
         return int(preds[0].item()), float(confs[0].item())
 
     @torch.inference_mode()
     def predict_batch(self, waveforms: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # waveforms: (B, T)
-        waveforms = waveforms.cpu().numpy()
-        # The custom feature extractor returns a tensor directly
-        inputs = self.feature_extractor(waveforms)
+        """Batch inference for better performance.
+        
+        Args:
+            waveforms: (B, T) batch of waveforms
+            
+        Returns:
+            Tuple of (predictions, confidences) both shape (B,)
+        """
+        # Move to CPU and convert to numpy for feature extraction
+        waveforms_np = waveforms.cpu().numpy()
+        
+        # Feature extraction
+        inputs = self.feature_extractor(waveforms_np)
+        
+        # Handle different return types from custom feature extractor
         if isinstance(inputs, dict):
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             outputs = self.model(**inputs)
         else:
-            inputs = torch.tensor(inputs).to(self.device) if not isinstance(inputs, torch.Tensor) else inputs.to(self.device)
-            # The model expects input_values as kwargs or positional first argument
+            # Convert to tensor if needed and move to device
+            if not isinstance(inputs, torch.Tensor):
+                inputs = torch.tensor(inputs).to(self.device)
+            else:
+                inputs = inputs.to(self.device)
             outputs = self.model(inputs)
             
         logits = outputs.logits
-        # We take the max probability across all bird classes (if any class is > threshold)
+        
+        # Take max probability across all bird classes
         probs = torch.sigmoid(logits)
         max_probs, _ = torch.max(probs, dim=1)
         

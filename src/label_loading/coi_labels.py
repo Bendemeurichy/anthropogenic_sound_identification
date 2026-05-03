@@ -61,6 +61,8 @@ BIRD_SYNONYMS: Set[str] = {
     "waterfowl",
     "raptor",
     "raptors",
+    # Risoux-specific label (biophony = biological sounds, primarily birds in this dataset)
+    "biophony",
 }
 
 # Default COI synonyms (airplane for backwards compatibility)
