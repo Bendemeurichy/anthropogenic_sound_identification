@@ -13,8 +13,33 @@ COI configuration:
 - Other samples → label=0 (background)
 """
 
-from pathlib import Path
+import io
 import sys
+
+# Under pythonw there is no console and sys.stdout/stderr are None.
+# Wrap only when the underlying buffer actually exists and is not already wrapped properly.
+# This ensures proper UTF-8 encoding for Windows Start-Process / pythonw environments.
+if sys.stdout is not None and hasattr(sys.stdout, "buffer"):
+    # Only wrap if not already a TextIOWrapper with the correct encoding
+    if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != "utf-8":
+        try:
+            sys.stdout = io.TextIOWrapper(
+                sys.stdout.buffer, encoding="utf-8", line_buffering=True
+            )
+        except Exception:
+            pass  # Keep original stdout if wrapping fails
+            
+if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
+    if not isinstance(sys.stderr, io.TextIOWrapper) or sys.stderr.encoding != "utf-8":
+        try:
+            sys.stderr = io.TextIOWrapper(
+                sys.stderr.buffer, encoding="utf-8", line_buffering=True
+            )
+        except Exception:
+            pass  # Keep original stderr if wrapping fails
+
+from pathlib import Path
+import torch
 
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -60,8 +85,19 @@ def main():
     print(f"Expected test samples: 2,451 (from 20260328_150704 dataset)")
     print("=" * 70 + "\n")
     
+    # Device selection: prefer cuda:1 when multiple GPUs present
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        device = "cuda:1"
+    elif torch.cuda.is_available():
+        device = "cuda:0"
+    else:
+        device = "cpu"
+    print(f"Using device: {device}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"GPUs available: {torch.cuda.device_count()}\n")
+    
     # Initialize pipeline
-    pipeline = ValidationPipeline(base_path=BASE_PATH, device=None)
+    pipeline = ValidationPipeline(base_path=BASE_PATH, device=device)
     
     # Load models - will test BOTH bird classifiers
     # classifier_type sets COI synonyms to BIRD_SYNONYMS
