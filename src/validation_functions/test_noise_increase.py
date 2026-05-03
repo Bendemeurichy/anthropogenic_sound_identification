@@ -220,6 +220,9 @@ def _compute_clean_baseline_energy(
     
     print(f"\nComputing clean baseline energy (no noise) on {len(df_coi)} samples...")
     
+    # Process in batches for efficiency
+    batch_size = 16
+    
     for rec_idx, row in enumerate(df_coi.itertuples(index=False)):
         if rec_idx % 50 == 0:
             print(f"  Processing recording {rec_idx}/{len(df_coi)}...")
@@ -231,40 +234,59 @@ def _compute_clean_baseline_energy(
         )
         coi_segments = pipeline._split_into_segments(coi_full)
         
-        for seg_idx, coi_seg in enumerate(coi_segments):
-            # Use the same preprocessing as the RMS mixer in test_pipeline.py.
-            coi_preprocessed = pipeline._prepare_rms_mixing_input(coi_seg)
+        # Preprocess all segments
+        coi_preprocessed_list = [
+            pipeline._prepare_rms_mixing_input(seg) for seg in coi_segments
+        ]
+        
+        # Batch separate all segments for this recording
+        preprocessed_tensor = torch.stack(coi_preprocessed_list)
+        
+        for i in range(0, len(preprocessed_tensor), batch_size):
+            batch_preprocessed = preprocessed_tensor[i : i + batch_size]
+            batch_start_idx = i
             
-            # Compute energy on original clean signal
-            orig_metrics = compute_energy_metrics(coi_preprocessed, pipeline.sample_rate)
+            # Batch separation
+            separated_batch = pipeline._separate_batch(batch_preprocessed)
             
-            # Separate clean signal (even though there's no noise to remove)
-            separated = pipeline._separate(coi_preprocessed)
+            # Extract COI sources from batch
+            if separated_batch.dim() == 2:
+                coi_est_batch = separated_batch
+            else:
+                coi_est_batch = separated_batch[:, pipeline._get_coi_head_index()]
             
-            # Compute energy on the COI output only.
-            coi_est = _coi_source_from_separated(pipeline, separated)
-            sep_metrics = compute_energy_metrics(coi_est, pipeline.sample_rate)
-            
-            # Calculate energy preservation
-            rms_delta = sep_metrics["rms_db"] - orig_metrics["rms_db"]
-            sel_delta = sep_metrics["sel_db"] - orig_metrics["sel_db"]
-            
-            # Create segment metrics
-            seg_metrics = SegmentEnergyMetrics(
-                filename=row.filename,
-                recording_idx=rec_idx,
-                segment_idx=seg_idx,
-                snr_db=None,  # Clean baseline has no noise
-                original_clean_rms_db=orig_metrics["rms_db"],
-                original_clean_sel_db=orig_metrics["sel_db"],
-                separated_clean_rms_db=sep_metrics["rms_db"],
-                separated_clean_sel_db=sep_metrics["sel_db"],
-                clean_sep_rms_delta=rms_delta,
-                clean_sep_sel_delta=sel_delta,
-            )
-            
-            all_metrics.append(seg_metrics)
-            baseline_map[(rec_idx, seg_idx)] = seg_metrics
+            # Process each item in the batch
+            for b_idx in range(len(batch_preprocessed)):
+                seg_idx = batch_start_idx + b_idx
+                coi_preprocessed = batch_preprocessed[b_idx]
+                coi_est = coi_est_batch[b_idx]
+                
+                # Compute energy on original clean signal
+                orig_metrics = compute_energy_metrics(coi_preprocessed, pipeline.sample_rate)
+                
+                # Compute energy on the COI output only
+                sep_metrics = compute_energy_metrics(coi_est, pipeline.sample_rate)
+                
+                # Calculate energy preservation
+                rms_delta = sep_metrics["rms_db"] - orig_metrics["rms_db"]
+                sel_delta = sep_metrics["sel_db"] - orig_metrics["sel_db"]
+                
+                # Create segment metrics
+                seg_metrics = SegmentEnergyMetrics(
+                    filename=row.filename,
+                    recording_idx=rec_idx,
+                    segment_idx=seg_idx,
+                    snr_db=None,  # Clean baseline has no noise
+                    original_clean_rms_db=orig_metrics["rms_db"],
+                    original_clean_sel_db=orig_metrics["sel_db"],
+                    separated_clean_rms_db=sep_metrics["rms_db"],
+                    separated_clean_sel_db=sep_metrics["sel_db"],
+                    clean_sep_rms_delta=rms_delta,
+                    clean_sep_sel_delta=sel_delta,
+                )
+                
+                all_metrics.append(seg_metrics)
+                baseline_map[(rec_idx, seg_idx)] = seg_metrics
     
     # Compute aggregate statistics
     n_segs = len(all_metrics)
@@ -359,6 +381,7 @@ def run_noise_increase_experiment(
         print(f"\n[{idx}/{len(snr_levels_db)}] Processing SNR = {snr_db:.1f} dB...")
         
         snr_segment_metrics: List[SegmentEnergyMetrics] = []
+        batch_size = 16
 
         for rec_idx, row in enumerate(df_coi.itertuples(index=False)):
             coi_full = pipeline._load_labeled_audio(
@@ -369,6 +392,11 @@ def run_noise_increase_experiment(
 
             coi_segments = pipeline._split_into_segments(coi_full)
 
+            # Create all mixtures for this recording first
+            mixtures = []
+            baselines = []
+            mixture_metrics_list = []
+            
             for seg_idx, coi_seg in enumerate(coi_segments):
                 # Retrieve baseline metrics for comparison
                 baseline = baseline_map[(rec_idx, seg_idx)]
@@ -385,42 +413,65 @@ def run_noise_increase_experiment(
                 # Compute energy on noisy mixture
                 mixture_metrics = compute_energy_metrics(mixture, pipeline.sample_rate)
                 
-                # Separate noisy mixture
-                separated = pipeline._separate(mixture)
+                mixtures.append(mixture)
+                baselines.append((baseline, actual_snr))
+                mixture_metrics_list.append(mixture_metrics)
+            
+            # Batch separate all mixtures for this recording
+            mixtures_tensor = torch.stack(mixtures)
+            
+            for i in range(0, len(mixtures_tensor), batch_size):
+                batch_mix = mixtures_tensor[i : i + batch_size]
+                batch_start_idx = i
                 
-                # Compute energy on the COI output only.
-                coi_est = _coi_source_from_separated(pipeline, separated)
-                sep_noisy_metrics = compute_energy_metrics(coi_est, pipeline.sample_rate)
+                # Batch separation
+                separated_batch = pipeline._separate_batch(batch_mix)
                 
-                # Calculate energy degradation from clean baseline
-                noisy_rms_delta = sep_noisy_metrics["rms_db"] - baseline.original_clean_rms_db
-                noisy_sel_delta = sep_noisy_metrics["sel_db"] - baseline.original_clean_sel_db
+                # Extract COI sources from batch
+                if separated_batch.dim() == 2:
+                    coi_est_batch = separated_batch
+                else:
+                    coi_est_batch = separated_batch[:, pipeline._get_coi_head_index()]
                 
-                # Create segment metrics with all data
-                seg_metrics = SegmentEnergyMetrics(
-                    filename=row.filename,
-                    recording_idx=rec_idx,
-                    segment_idx=seg_idx,
-                    snr_db=float(snr_db),
-                    # Copy clean baseline values
-                    original_clean_rms_db=baseline.original_clean_rms_db,
-                    original_clean_sel_db=baseline.original_clean_sel_db,
-                    separated_clean_rms_db=baseline.separated_clean_rms_db,
-                    separated_clean_sel_db=baseline.separated_clean_sel_db,
-                    clean_sep_rms_delta=baseline.clean_sep_rms_delta,
-                    clean_sep_sel_delta=baseline.clean_sep_sel_delta,
-                    # Add noisy experiment values
-                    mixture_rms_db=mixture_metrics["rms_db"],
-                    mixture_sel_db=mixture_metrics["sel_db"],
-                    separated_noisy_rms_db=sep_noisy_metrics["rms_db"],
-                    separated_noisy_sel_db=sep_noisy_metrics["sel_db"],
-                    noisy_sep_rms_delta=noisy_rms_delta,
-                    noisy_sep_sel_delta=noisy_sel_delta,
-                    actual_snr_db=actual_snr,
-                )
-                
-                snr_segment_metrics.append(seg_metrics)
-                all_segment_metrics.append(seg_metrics)
+                # Process each item in the batch
+                for b_idx in range(len(batch_mix)):
+                    seg_idx = batch_start_idx + b_idx
+                    baseline, actual_snr = baselines[seg_idx]
+                    mixture_metrics = mixture_metrics_list[seg_idx]
+                    coi_est = coi_est_batch[b_idx]
+                    
+                    # Compute energy on the COI output only
+                    sep_noisy_metrics = compute_energy_metrics(coi_est, pipeline.sample_rate)
+                    
+                    # Calculate energy degradation from clean baseline
+                    noisy_rms_delta = sep_noisy_metrics["rms_db"] - baseline.original_clean_rms_db
+                    noisy_sel_delta = sep_noisy_metrics["sel_db"] - baseline.original_clean_sel_db
+                    
+                    # Create segment metrics with all data
+                    seg_metrics = SegmentEnergyMetrics(
+                        filename=row.filename,
+                        recording_idx=rec_idx,
+                        segment_idx=seg_idx,
+                        snr_db=float(snr_db),
+                        # Copy clean baseline values
+                        original_clean_rms_db=baseline.original_clean_rms_db,
+                        original_clean_sel_db=baseline.original_clean_sel_db,
+                        separated_clean_rms_db=baseline.separated_clean_rms_db,
+                        separated_clean_sel_db=baseline.separated_clean_sel_db,
+                        clean_sep_rms_delta=baseline.clean_sep_rms_delta,
+                        clean_sep_sel_delta=baseline.clean_sep_sel_delta,
+                        # Add noisy experiment values
+                        mixture_rms_db=mixture_metrics["rms_db"],
+                        mixture_sel_db=mixture_metrics["sel_db"],
+                        separated_noisy_rms_db=sep_noisy_metrics["rms_db"],
+                        separated_noisy_sel_db=sep_noisy_metrics["sel_db"],
+                        noisy_sep_rms_delta=noisy_rms_delta,
+                        noisy_sep_sel_delta=noisy_sel_delta,
+                        actual_snr_db=actual_snr,
+                    )
+                    
+                    snr_segment_metrics.append(seg_metrics)
+                    all_segment_metrics.append(seg_metrics)
         
         # Compute aggregate statistics for this SNR level
         n_segs = len(snr_segment_metrics)

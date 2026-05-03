@@ -1737,12 +1737,10 @@ class ValidationPipeline:
                 coi_segments = self._split_into_segments(coi_full)
                 bg_segments = self._split_into_segments(bg_full)
 
-                seg_preds: List[int] = []
-                seg_confs: List[float] = []
+                # Step 1: Create all mixtures for this recording
+                mixtures: List[torch.Tensor] = []
+                coi_normalized: List[torch.Tensor] = []
                 seg_snr_vals: List[float] = []
-                seg_si_snr: List[float] = []
-                seg_sdr: List[float] = []
-                seg_si_sdr: List[float] = []
 
                 for seg_idx, coi_seg in enumerate(coi_segments):
                     # Cycle through BG segments if fewer than COI segments.
@@ -1751,6 +1749,9 @@ class ValidationPipeline:
                     bg_n = self._prepare_rms_mixing_input(bg_seg)
                     snr = np.random.uniform(*snr_range)
                     mixture, actual_snr = self._create_mixture_rms(coi_seg, bg_seg, snr)
+                    
+                    mixtures.append(mixture)
+                    coi_normalized.append(coi_n)
                     seg_snr_vals.append(actual_snr)
 
                     # Save first segment of chosen examples.
@@ -1783,34 +1784,55 @@ class ValidationPipeline:
                                 file=sys.stderr,
                             )
 
-                    if use_separation:
-                        separated = self._separate(mixture)
-                        seg_pred, seg_conf = self._classify_separated(
-                            separated, classify_fn
-                        )
-                        seg_preds.append(seg_pred)
-                        seg_confs.append(seg_conf)
+                # Step 2: Process mixtures in batches
+                seg_preds: List[int] = []
+                seg_confs: List[float] = []
+                seg_si_snr: List[float] = []
+                seg_sdr: List[float] = []
+                seg_si_sdr: List[float] = []
 
-                        coi_est = (
-                            separated
-                            if separated.dim() == 1
-                            else separated[self._get_coi_head_index()]
-                        )
-                        si_snr_val, sdr_val, si_sdr_val = self._compute_signal_metrics(
-                            coi_n, coi_est
-                        )
-                        seg_si_snr.append(si_snr_val)
-                        seg_sdr.append(sdr_val)
-                        seg_si_sdr.append(si_sdr_val)
+                batch_size = 16
+                mixtures_tensor = torch.stack(mixtures)
+
+                for i in range(0, len(mixtures_tensor), batch_size):
+                    batch_mix = mixtures_tensor[i : i + batch_size]
+                    batch_coi_n = coi_normalized[i : i + batch_size]
+
+                    if use_separation:
+                        # Batched separation
+                        separated_batch = self._separate_batch(batch_mix)  # (B, n_sources, T) or (B, T)
+
+                        # Get COI sources
+                        if separated_batch.dim() == 2:
+                            coi_est_batch = separated_batch
+                        else:
+                            coi_est_batch = separated_batch[:, self._get_coi_head_index()]
+
+                        # Classify - use batch classification if available
+                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
+                            batch_preds, batch_confs = self._classify_batch(coi_est_batch)
+                            seg_preds.extend(batch_preds)
+                            seg_confs.extend(batch_confs)
+                        else:
+                            for s_est in coi_est_batch:
+                                p, c = classify_fn(s_est)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
+
+                        # Compute signal metrics for each item in batch
+                        for b_idx, s_est in enumerate(coi_est_batch):
+                            snr, sdr_val, si_sdr_val = self._compute_signal_metrics(
+                                batch_coi_n[b_idx], s_est
+                            )
+                            seg_si_snr.append(snr)
+                            seg_sdr.append(sdr_val)
+                            seg_si_sdr.append(si_sdr_val)
 
                         # Save separated outputs for first segment of chosen examples.
-                        if (
-                            save_dir is not None
-                            and idx in sample_choices
-                            and seg_idx == 0
-                        ):
+                        if save_dir is not None and idx in sample_choices and i == 0:
                             try:
                                 k = list(sample_choices).index(idx)
+                                separated = separated_batch[0]  # First item in first batch
                                 if separated.dim() == 1:
                                     # Peak-normalize for proper listening level
                                     sep_save = self._normalize_for_saving(separated)
@@ -1853,9 +1875,16 @@ class ValidationPipeline:
                                     file=sys.stderr,
                                 )
                     else:
-                        seg_pred, seg_conf = classify_fn(mixture)
-                        seg_preds.append(seg_pred)
-                        seg_confs.append(seg_conf)
+                        # Classification without separation - use batch if available
+                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
+                            batch_preds, batch_confs = self._classify_batch(batch_mix)
+                            seg_preds.extend(batch_preds)
+                            seg_confs.extend(batch_confs)
+                        else:
+                            for mix in batch_mix:
+                                seg_pred, seg_conf = classify_fn(mix)
+                                seg_preds.append(seg_pred)
+                                seg_confs.append(seg_conf)
 
                 # Aggregate across segments: positive if any segment detects COI.
                 pred = 1 if any(p == 1 for p in seg_preds) else 0
@@ -1908,15 +1937,27 @@ class ValidationPipeline:
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
 
-                        for s_est in coi_est:
-                            p, c = classify_fn(s_est)
-                            seg_preds.append(p)
-                            seg_confs.append(c)
+                        # Use batch classification if available
+                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
+                            batch_preds, batch_confs = self._classify_batch(coi_est)
+                            seg_preds.extend(batch_preds)
+                            seg_confs.extend(batch_confs)
+                        else:
+                            for s_est in coi_est:
+                                p, c = classify_fn(s_est)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
                     else:
-                        for seg in batch_seg:
-                            p, c = classify_fn(seg)
-                            seg_preds.append(p)
-                            seg_confs.append(c)
+                        # Classification without separation - use batch if available
+                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
+                            batch_preds, batch_confs = self._classify_batch(batch_seg)
+                            seg_preds.extend(batch_preds)
+                            seg_confs.extend(batch_confs)
+                        else:
+                            for seg in batch_seg:
+                                p, c = classify_fn(seg)
+                                seg_preds.append(p)
+                                seg_confs.append(c)
 
                 pred = 1 if any(p == 1 for p in seg_preds) else 0
                 conf = max(seg_confs)
