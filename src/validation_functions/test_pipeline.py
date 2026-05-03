@@ -694,6 +694,9 @@ class ValidationPipeline:
                 coi_prompt=tuss_coi_prompt,
                 bg_prompt=tuss_bg_prompt,
             )
+            # Remember which COI prompt we requested so _get_coi_head_index()
+            # can resolve the correct output head for multi-COI checkpoints.
+            self._tuss_coi_prompt = tuss_coi_prompt
             # Propagate sample_rate and segment_samples from TUSS model
             self.sample_rate = self.separator.sample_rate
             self.segment_samples = self.separator.segment_samples
@@ -1370,7 +1373,7 @@ class ValidationPipeline:
     def _get_coi_head_index(self) -> int:
         """Return the COI head index for the current separator model."""
         if isinstance(self.separator, TUSSInference):
-            return TUSS_COI_HEAD
+            return self.separator.target_coi_index
         if isinstance(self.separator, CLAPSepInference):
             return CLAPSEP_COI_HEAD
         return SUDORMRF_COI_HEAD
@@ -2212,7 +2215,7 @@ class ValidationPipeline:
         print(f"{'=' * 60}\n")
 
         if getattr(self, "target_classes", None):
-            print(f"Target classes: {self.target_classes}")
+            print(f"Separator target classes: {self.target_classes}")
         if only_dataset:
             print(f"[Independent test set] only_dataset={only_dataset!r}")
         if exclude_datasets:

@@ -2,27 +2,33 @@
 Inference module for trained TUSS separation model.
 
 This module provides inference capabilities for the TUSS model with prompt-based
-separation. The model outputs are guaranteed to have consistent head assignment:
-    - Head 0 (COI_HEAD_INDEX): Class of Interest (e.g., airplane) audio
-    - Head 1 (BACKGROUND_HEAD_INDEX): Background audio
+separation.  The model supports an arbitrary number of sources determined by the
+trained prompts:
 
-The interface mirrors SeparationInference from sudormrf so validation code works
-without modification.
+    prompts_list = coi_prompts + [bg_prompt]
+    output shape: (n_sources, T)  where n_sources = len(prompts_list)
+
+Output head assignment matches the order of ``prompts_list``:
+    - output[i, :] = audio for coi_prompts[i]
+    - output[-1, :] = background audio
+
+Use ``TUSSInference.target_coi_index`` to retrieve the correct head for the
+requested COI rather than relying on the legacy ``COI_HEAD_INDEX`` constant.
 
 Usage:
     from models.tuss.inference import TUSSInference
-    
+
     inferencer = TUSSInference.from_checkpoint(
         "path/to/checkpoint_dir",
         device="cuda",
-        coi_prompt="airplane",
+        coi_prompt="birds",   # must match the exact trained prompt name
         bg_prompt="background"
     )
-    
+
     # Separate a waveform
-    sources = inferencer.separate_waveform(waveform)  # (2, T) tensor
-    coi_audio = sources[0]  # airplane
-    bg_audio = sources[1]   # background
+    sources = inferencer.separate_waveform(waveform)  # (n_sources, T) tensor
+    coi_audio = sources[inferencer.target_coi_index]
+    bg_audio   = sources[-1]
 """
 
 import sys
@@ -46,10 +52,13 @@ for _p in [str(_BASE_DIR), str(_SRC_DIR)]:
 from common.audio_utils import resample_with_padding
 from nets.model_wrapper import SeparationModel
 
-# Head index constants for consistent output access (matching sudormrf interface)
-COI_HEAD_INDEX: int = 0
-BACKGROUND_HEAD_INDEX: int = 1
-NUM_SOURCES: int = 2
+# Legacy head-index constants kept for backward compatibility with code that
+# imports them.  For multi-COI checkpoints use TUSSInference.target_coi_index
+# instead; background is always at sources[-1] regardless of how many COIs
+# were trained.
+COI_HEAD_INDEX: int = 0       # only correct for single-COI (airplane) checkpoints
+BACKGROUND_HEAD_INDEX: int = 1  # only correct for 2-source (single-COI) checkpoints
+NUM_SOURCES: int = 2            # only correct for 2-source (single-COI) checkpoints
 
 
 def robust_load_audio(path: Union[str, Path]) -> Tuple[torch.Tensor, int]:
@@ -106,6 +115,7 @@ class TUSSInference:
         coi_prompt: Union[str, List[str]],
         bg_prompt: str,
         config: Optional[dict] = None,
+        target_coi: Optional[str] = None,
     ):
         """Initialize TUSSInference.
 
@@ -117,6 +127,10 @@ class TUSSInference:
             coi_prompt: Prompt name(s) for Class of Interest (e.g., "airplane" or ["airplane", "bird"])
             bg_prompt: Prompt name for background (e.g., "background")
             config: Optional training config dict for metadata
+            target_coi: The specific COI name to extract at inference time.  Used
+                to resolve ``target_coi_index`` via fuzzy name matching against
+                ``coi_prompts``.  If *None* the first element of ``coi_prompts``
+                is used.
         """
         self.model = model.to(device)
         self.model.eval()
@@ -138,10 +152,40 @@ class TUSSInference:
         
         # Dynamic number of sources
         self.num_sources = len(self.prompts_list)
+
+        # Resolve which COI head to return at inference time.
+        # ``target_coi`` may differ from the exact string in ``coi_prompts``
+        # (e.g. caller passes "bird" but checkpoint was trained with "birds"),
+        # so we use fuzzy prefix/substring matching with an exact-match preference.
+        _target = target_coi if target_coi is not None else self.coi_prompts[0]
+        self.target_coi_index: int = self._resolve_coi_index(_target)
         
         # Verify all model components are on the correct device
         self._verify_device_placement()
     
+    def _resolve_coi_index(self, requested: str) -> int:
+        """Resolve the COI head index by exact lower-case match against ``coi_prompts``.
+
+        Args:
+            requested: The COI name the caller wants (must match a trained prompt exactly).
+
+        Returns:
+            Index into ``self.coi_prompts`` for the requested COI.
+
+        Raises:
+            ValueError: If ``requested`` does not match any trained prompt.
+        """
+        req = requested.lower()
+        prompts_lower = [p.lower() for p in self.coi_prompts]
+
+        if req in prompts_lower:
+            return prompts_lower.index(req)
+
+        raise ValueError(
+            f"Requested COI '{requested}' not found in trained coi_prompts "
+            f"{self.coi_prompts}. Pass the exact trained prompt name."
+        )
+
     def _verify_device_placement(self):
         """Verify all model parameters and buffers are on self.device."""
         devices_found = set()
@@ -174,12 +218,23 @@ class TUSSInference:
         Args:
             checkpoint_path: Path to checkpoint directory or .pth file
             device: Device to load on (default: auto-detect cuda/cpu)
-            coi_prompt: Prompt name(s) for COI (default: "airplane" or list of strings)
+            coi_prompt: The desired COI prompt string (or list) used for head
+                selection at inference time.  When a training checkpoint
+                contains a ``coi_prompts`` list the model **always** runs with
+                the full trained prompt list; ``coi_prompt`` is only used to
+                determine *which head* to extract via fuzzy name matching.
             bg_prompt: Prompt name for background (default: "background")
 
         Returns:
             TUSSInference instance ready for separation
         """
+        # Preserve the caller's intent for head selection before any overrides.
+        if isinstance(coi_prompt, str):
+            requested_coi: str = coi_prompt
+        elif coi_prompt:
+            requested_coi = coi_prompt[0]
+        else:
+            requested_coi = "airplane"
         checkpoint_path = Path(checkpoint_path)
 
         if device is None:
@@ -351,11 +406,11 @@ class TUSSInference:
             ckpt_coi_prompts = checkpoint.get("coi_prompts", [])
             ckpt_bg_prompt = checkpoint.get("bg_prompt", "")
             
-            # If the user supplied the default 'airplane' or the config's default, we might override it with the ckpt's list
-            if ckpt_coi_prompts and (
-                (isinstance(coi_prompt, str) and coi_prompt == "airplane") or 
-                coi_prompt == config_coi_prompts
-            ):
+            # Always use the full trained prompt list from the checkpoint so
+            # the model runs with the embeddings it was actually trained on.
+            # The caller's original string (requested_coi) is used only for
+            # head selection via target_coi_index in __init__.
+            if ckpt_coi_prompts:
                 coi_prompt = ckpt_coi_prompts
                 
             if ckpt_bg_prompt and bg_prompt == config_bg_prompt:
@@ -412,6 +467,7 @@ class TUSSInference:
             coi_prompt=coi_prompt,
             bg_prompt=bg_prompt,
             config=config,
+            target_coi=requested_coi,
         )
 
     @torch.inference_mode()
