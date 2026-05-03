@@ -47,7 +47,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.validation_functions.test_pipeline import ValidationPipeline
 
 # ================== CONFIGURATION ==================
-BASE_PATH = str(PROJECT_ROOT / "datasets")
+BASE_PATH = str(PROJECT_ROOT.parent / "datasets")
 
 # Multi-COI separator checkpoint (trained on both birds and airplanes)
 SEP_CHECKPOINT = str(
