@@ -1308,10 +1308,21 @@ def prepare_batch(
     # Normalise each clean source with the mixture's mean/std.
     # Use mix_mean for all sources to preserve additivity:
     # mixture = sum(norm_cois) + norm_bg
+    #
+    # Bug-fix: subtracting mix_mean from a zero-amplitude (absent) COI channel
+    # produces a small DC offset (0 - mix_mean) / mix_std ≠ 0.  That phantom
+    # energy causes snr_with_zeroref_loss to treat the silent stream as active
+    # (ref_power > 0) and apply full SNR loss instead of the down-weighted
+    # zero-ref penalty.  Re-zero any channel that was silent before
+    # normalization so the loss function's coef mask fires correctly.
     norm_cois = []
     for c in cois:
+        # Capture silence before normalization (per sample in the batch).
+        was_silent = c.pow(2).mean(dim=-1, keepdim=True) < SILENCE_ENERGY_EPS  # (B, 1)
         normed = (c - mix_mean) / mix_std_safe
         normed = torch.where(is_silent, torch.zeros_like(normed), normed)
+        # Re-zero channels whose source was silent (not merely a silent mixture).
+        normed = torch.where(was_silent, torch.zeros_like(normed), normed)
         norm_cois.append(normed)
 
     norm_bg = (bg_scaled - mix_mean) / mix_std_safe
@@ -1510,7 +1521,18 @@ def train_epoch(
             # Background:   sources[:, -1:]  (last channel only)
             coi_sources = sources[:, :-1, :]  # (B, n_coi, T)
             bg_sources = sources[:, -1:, :]   # (B, 1, T)
-            
+
+            # Bug-fix: record which COI channels are silent (absent class) BEFORE
+            # augmentation.  add_noise_batch injects Gaussian noise at amplitude
+            # 0.001–0.01, giving per-sample energy ≈ 1e-6 – right at
+            # SILENCE_ENERGY_EPS.  Without this guard, ~50 % of absent-class
+            # channels cross the threshold and are incorrectly treated as active
+            # sources by snr_with_zeroref_loss and COIWeightedSNRLoss.
+            # Shape: (B, n_coi, 1) – True where the channel was all-zeros.
+            silent_coi_mask = (
+                coi_sources.pow(2).mean(dim=-1, keepdim=True) < SILENCE_ENERGY_EPS
+            )
+
             # Augment only COI channels
             coi_sources = GpuAudioAugmentations.random_augment_batch(
                 coi_sources,
@@ -1520,7 +1542,16 @@ def train_epoch(
                 shift_prob=gpu_aug_shift_prob,
                 lpf_prob=gpu_aug_lpf_prob,
             )
-            
+
+            # Restore exact zeros for channels that were silent before augmentation
+            # so that downstream silence detection (SILENCE_ENERGY_EPS threshold)
+            # continues to work correctly.
+            coi_sources = torch.where(
+                silent_coi_mask.expand_as(coi_sources),
+                torch.zeros_like(coi_sources),
+                coi_sources,
+            )
+
             # Recombine: augmented COI + original background
             sources = torch.cat([coi_sources, bg_sources], dim=1)
         
