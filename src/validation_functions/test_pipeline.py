@@ -1477,6 +1477,97 @@ class ValidationPipeline:
         # Call the wrapper using unified interface
         return self.audioprotopnet_model(wav)
 
+    def _classify_bird_mae_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
+        """Batch classification using Bird-MAE model.
+        
+        Args:
+            waveforms: (B, T) batch of waveforms at self.sample_rate
+            
+        Returns:
+            Tuple of (predictions, confidences) as lists
+        """
+        if self.bird_mae_model is None:
+            raise RuntimeError(
+                "Bird-MAE model is not loaded. Call load_models(use_bird_mae=True)."
+            )
+        
+        wavs = waveforms.detach().cpu()
+        bird_mae_sr = self.bird_mae_model.sample_rate
+        
+        # Resample if needed
+        if self.sample_rate != bird_mae_sr:
+            key = (self.sample_rate, bird_mae_sr)
+            if key not in self._resamplers:
+                self._resamplers[key] = create_high_quality_resampler(
+                    self.sample_rate, bird_mae_sr
+                )
+            wavs = self._resamplers[key](wavs)
+        
+        # Use batch prediction if available
+        if hasattr(self.bird_mae_model, 'predict_batch'):
+            preds_tensor, confs_tensor = self.bird_mae_model.predict_batch(wavs)
+            return [int(p.item()) for p in preds_tensor], [float(c.item()) for c in confs_tensor]
+        else:
+            # Fallback to single predictions
+            preds, confs = [], []
+            for wav in wavs:
+                p, c = self.bird_mae_model(wav)
+                preds.append(p)
+                confs.append(c)
+            return preds, confs
+
+    def _classify_audioprotopnet_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
+        """Batch classification using AudioProtoPNet model.
+        
+        Args:
+            waveforms: (B, T) batch of waveforms at self.sample_rate
+            
+        Returns:
+            Tuple of (predictions, confidences) as lists
+        """
+        if self.audioprotopnet_model is None:
+            raise RuntimeError(
+                "AudioProtoPNet model is not loaded. Call load_models(use_audioprotopnet=True)."
+            )
+        
+        wavs = waveforms.detach().cpu()
+        audioprotopnet_sr = self.audioprotopnet_model.sample_rate
+        
+        # Resample if needed
+        if self.sample_rate != audioprotopnet_sr:
+            key = (self.sample_rate, audioprotopnet_sr)
+            if key not in self._resamplers:
+                self._resamplers[key] = create_high_quality_resampler(
+                    self.sample_rate, audioprotopnet_sr
+                )
+            wavs = self._resamplers[key](wavs)
+        
+        # Use batch prediction if available
+        if hasattr(self.audioprotopnet_model, 'predict_batch'):
+            preds_tensor, confs_tensor = self.audioprotopnet_model.predict_batch(wavs)
+            return [int(p.item()) for p in preds_tensor], [float(c.item()) for c in confs_tensor]
+        else:
+            # Fallback to single predictions
+            preds, confs = [], []
+            for wav in wavs:
+                p, c = self.audioprotopnet_model(wav)
+                preds.append(p)
+                confs.append(c)
+            return preds, confs
+
+    def _get_batch_classify_fn(self, classify_fn: Callable) -> Optional[Callable]:
+        """Get the batch classification function for a given single-sample classify function.
+        
+        Returns None if no batch function is available.
+        """
+        if classify_fn == self._classify:
+            return self._classify_batch if hasattr(self.classifier, 'predict_batch') else None
+        elif classify_fn == self._classify_bird_mae:
+            return self._classify_bird_mae_batch
+        elif classify_fn == self._classify_audioprotopnet:
+            return self._classify_audioprotopnet_batch
+        return None
+
     def _classify_separated(
         self,
         separated: torch.Tensor,
@@ -1621,9 +1712,10 @@ class ValidationPipeline:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
 
                         # Classify - use batch classification if available (much faster)
-                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
+                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
+                        if batch_classify_fn is not None:
                             # Use optimized batch classification
-                            batch_preds, batch_confs = self._classify_batch(coi_est)
+                            batch_preds, batch_confs = batch_classify_fn(coi_est)
                             seg_preds.extend(batch_preds)
                             seg_confs.extend(batch_confs)
                         else:
@@ -1653,12 +1745,19 @@ class ValidationPipeline:
                     si_sdr_scores.append(float(np.mean(seg_si_sdr)))
                 else:
                     # Classify without separation - use batch if available
+                    batch_size = 16
                     segments_tensor = torch.stack(segments)
-                    if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
-                        seg_preds, seg_confs = self._classify_batch(segments_tensor)
+                    seg_preds, seg_confs = [], []
+                    batch_classify_fn = self._get_batch_classify_fn(classify_fn)
+                    
+                    if batch_classify_fn is not None:
+                        # Process in batches to avoid memory issues
+                        for i in range(0, len(segments_tensor), batch_size):
+                            batch_seg = segments_tensor[i : i + batch_size]
+                            batch_preds, batch_confs = batch_classify_fn(batch_seg)
+                            seg_preds.extend(batch_preds)
+                            seg_confs.extend(batch_confs)
                     else:
-                        seg_preds = []
-                        seg_confs = []
                         for seg in segments:
                             seg_pred, seg_conf = classify_fn(seg)
                             seg_preds.append(seg_pred)
@@ -1709,8 +1808,9 @@ class ValidationPipeline:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
 
                         # Use batch classification if available (much faster)
-                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
-                            batch_preds, batch_confs = self._classify_batch(coi_est)
+                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
+                        if batch_classify_fn is not None:
+                            batch_preds, batch_confs = batch_classify_fn(coi_est)
                             seg_preds.extend(batch_preds)
                             seg_confs.extend(batch_confs)
                         else:
@@ -1720,8 +1820,9 @@ class ValidationPipeline:
                                 seg_confs.append(c)
                     else:
                         # Classify without separation - use batch if available
-                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
-                            batch_preds, batch_confs = self._classify_batch(batch_seg)
+                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
+                        if batch_classify_fn is not None:
+                            batch_preds, batch_confs = batch_classify_fn(batch_seg)
                             seg_preds.extend(batch_preds)
                             seg_confs.extend(batch_confs)
                         else:
@@ -1910,8 +2011,9 @@ class ValidationPipeline:
                             coi_est_batch = separated_batch[:, self._get_coi_head_index()]
 
                         # Classify - use batch classification if available
-                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
-                            batch_preds, batch_confs = self._classify_batch(coi_est_batch)
+                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
+                        if batch_classify_fn is not None:
+                            batch_preds, batch_confs = batch_classify_fn(coi_est_batch)
                             seg_preds.extend(batch_preds)
                             seg_confs.extend(batch_confs)
                         else:
@@ -1977,8 +2079,9 @@ class ValidationPipeline:
                                 )
                     else:
                         # Classification without separation - use batch if available
-                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
-                            batch_preds, batch_confs = self._classify_batch(batch_mix)
+                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
+                        if batch_classify_fn is not None:
+                            batch_preds, batch_confs = batch_classify_fn(batch_mix)
                             seg_preds.extend(batch_preds)
                             seg_confs.extend(batch_confs)
                         else:
@@ -2039,8 +2142,9 @@ class ValidationPipeline:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
 
                         # Use batch classification if available
-                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
-                            batch_preds, batch_confs = self._classify_batch(coi_est)
+                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
+                        if batch_classify_fn is not None:
+                            batch_preds, batch_confs = batch_classify_fn(coi_est)
                             seg_preds.extend(batch_preds)
                             seg_confs.extend(batch_confs)
                         else:
@@ -2050,8 +2154,9 @@ class ValidationPipeline:
                                 seg_confs.append(c)
                     else:
                         # Classification without separation - use batch if available
-                        if classify_fn == self._classify and hasattr(self.classifier, 'predict_batch'):
-                            batch_preds, batch_confs = self._classify_batch(batch_seg)
+                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
+                        if batch_classify_fn is not None:
+                            batch_preds, batch_confs = batch_classify_fn(batch_seg)
                             seg_preds.extend(batch_preds)
                             seg_confs.extend(batch_confs)
                         else:

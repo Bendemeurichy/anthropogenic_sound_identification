@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+from transformers import AutoFeatureExtractor, AutoModelForSequenceClassification
 from typing import Tuple
 import os
 
@@ -25,19 +25,19 @@ class AudioProtoPNetClassifierWrapper:
                 trust_remote_code=True,
                 local_files_only=True
             )
-            self.model = AutoModelForAudioClassification.from_pretrained(
+            self.model = AutoModelForSequenceClassification.from_pretrained(
                 self.model_id,
                 trust_remote_code=True,
                 local_files_only=True
             ).to(self.device)
-        except Exception:
+        except Exception as e:
             # Fallback to downloading if not cached
-            print("  Model not cached locally, downloading from HuggingFace (this may take a while)...")
+            print(f"  Model not cached locally (error: {e}), downloading from HuggingFace (this may take a while)...")
             self.feature_extractor = AutoFeatureExtractor.from_pretrained(
                 self.model_id,
                 trust_remote_code=True
             )
-            self.model = AutoModelForAudioClassification.from_pretrained(
+            self.model = AutoModelForSequenceClassification.from_pretrained(
                 self.model_id,
                 trust_remote_code=True
             ).to(self.device)
