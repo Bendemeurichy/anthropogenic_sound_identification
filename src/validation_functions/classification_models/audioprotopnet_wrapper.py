@@ -78,10 +78,14 @@ class AudioProtoPNetClassifierWrapper:
             return_tensors="pt",
             padding=True
         )
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
-        # Model inference
-        outputs = self.model(**inputs)
+        # The custom AudioProtoPNet feature extractor may return a raw Tensor
+        # instead of a dict-like BatchEncoding, so handle both cases.
+        if isinstance(inputs, torch.Tensor):
+            inputs = inputs.to(self.device)
+            outputs = self.model(inputs)
+        else:
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            outputs = self.model(**inputs)
         logits = outputs.logits
         
         # Take max probability across all bird classes
