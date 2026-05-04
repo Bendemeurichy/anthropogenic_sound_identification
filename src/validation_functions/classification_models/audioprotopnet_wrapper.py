@@ -71,9 +71,10 @@ class AudioProtoPNetClassifierWrapper:
         waveforms_np = waveforms.cpu().numpy()
         
         # Feature extraction (handles batching internally)
+        # Note: AudioProtoNetFeatureExtractor does not accept sampling_rate as a
+        # __call__ argument; the rate is fixed at init time via feature_extractor.sampling_rate
         inputs = self.feature_extractor(
             waveforms_np,
-            sampling_rate=self.sample_rate,
             return_tensors="pt",
             padding=True
         )

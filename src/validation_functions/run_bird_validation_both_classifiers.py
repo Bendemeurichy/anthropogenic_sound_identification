@@ -60,7 +60,8 @@ DATA_CSV = str(
 )
 
 # Primary classifier for COI synonym detection
-PRIMARY_CLASSIFIER = "bird_mae"
+# PRIMARY_CLASSIFIER = "bird_mae"  # disabled for audioprotopnet-only rerun
+PRIMARY_CLASSIFIER = "audioprotopnet"
 
 # Evaluation settings
 SPLIT = "test"
@@ -111,8 +112,8 @@ def main():
         tuss_bg_prompt="background",
         use_clapsep=False,
         use_ast_finetuned=False,  # Airplane classifier
-        use_bird_mae=False,  # Already primary, don't duplicate
-        use_audioprotopnet=True,  # Load as secondary classifier
+        use_bird_mae=False,  # Disabled for audioprotopnet-only rerun
+        use_audioprotopnet=False,  # Already primary, don't duplicate
     )
     
     print("\n" + "=" * 70)
