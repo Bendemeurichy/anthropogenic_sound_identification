@@ -1580,8 +1580,17 @@ class ValidationPipeline:
         ref = ref[:min_len]
         est = est[:min_len]
 
+        # Guard against silent/near-zero signals that cause torch.linalg.solve
+        # to fail with a singular-matrix error inside the SDR metric.
+        _EPS = 1e-8
+        if est.abs().max() < _EPS or ref.abs().max() < _EPS:
+            return float("nan"), float("nan"), float("nan")
+
         si_snr = self._si_snr(est.unsqueeze(0), ref.unsqueeze(0)).item()
-        sdr = self._sdr(est.unsqueeze(0), ref.unsqueeze(0)).item()
+        try:
+            sdr = self._sdr(est.unsqueeze(0), ref.unsqueeze(0)).item()
+        except Exception:
+            sdr = float("nan")
         si_sdr = self._si_sdr(est.unsqueeze(0), ref.unsqueeze(0)).item()
         return si_snr, sdr, si_sdr
 
