@@ -182,6 +182,7 @@ def main():
             save_n_examples=5,
             skip_clean_tests=True,
             save_false_negatives=True,
+            balance_classes=False,  # Evaluate Risoux as-is, no downsampling
         )
         
         print("\nRisoux Results:")
