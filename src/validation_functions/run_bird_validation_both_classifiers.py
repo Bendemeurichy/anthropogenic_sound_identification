@@ -60,8 +60,7 @@ DATA_CSV = str(
 )
 
 # Primary classifier for COI synonym detection
-# PRIMARY_CLASSIFIER = "bird_mae"  # disabled for audioprotopnet-only rerun
-PRIMARY_CLASSIFIER = "audioprotopnet"
+PRIMARY_CLASSIFIER = "bird_mae"
 
 # Evaluation settings
 SPLIT = "test"
@@ -106,14 +105,14 @@ def main():
     pipeline.load_models(
         sep_checkpoint=SEP_CHECKPOINT,
         cls_weights=None,  # Not needed for bird_mae/audioprotopnet
-        classifier_type=PRIMARY_CLASSIFIER,  # Sets COI=BIRD_SYNONYMS
+        classifier_type=PRIMARY_CLASSIFIER,  # Sets COI=BIRD_SYNONYMS; loads bird_mae as primary
         use_tuss=True,
         tuss_coi_prompt="birds",  # Multi-COI model uses "birds" not "bird"
         tuss_bg_prompt="background",
         use_clapsep=False,
         use_ast_finetuned=False,  # Airplane classifier
-        use_bird_mae=False,  # Disabled for audioprotopnet-only rerun
-        use_audioprotopnet=False,  # Already primary, don't duplicate
+        use_bird_mae=False,       # Already loaded as primary; avoid duplication
+        use_audioprotopnet=True,  # Load as secondary classifier
     )
     
     print("\n" + "=" * 70)
