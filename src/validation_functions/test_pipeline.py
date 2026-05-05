@@ -2314,8 +2314,30 @@ class ValidationPipeline:
                     target_coi_class = None
                 
                 if target_coi_class is not None:
-                    # Set label=1 only for samples matching the target COI class
-                    df_split["label"] = (df_split["coi_class"] == target_coi_class).astype(int)
+                    # coi_class == -1 is a sentinel for independent test set rows
+                    # (e.g. Risoux) that were appended to the training CSV without
+                    # a meaningful class index.  Those rows must be re-binarized
+                    # from orig_label; rows with a real coi_class use the index.
+                    known_mask = df_split["coi_class"] != -1
+                    new_labels = (df_split["coi_class"] == target_coi_class).astype(int)
+                    unknown_mask = ~known_mask
+                    if unknown_mask.any():
+                        if "orig_label" in df_split.columns:
+                            fallback = df_split.loc[unknown_mask, "orig_label"].apply(
+                                lambda x: 1 if _is_coi_label(x, self.coi_synonyms) else 0
+                            )
+                            new_labels = new_labels.copy()
+                            new_labels.loc[unknown_mask] = fallback
+                            n_fallback_coi = int(fallback.sum())
+                            n_fallback_total = int(unknown_mask.sum())
+                            print(
+                                f"[Info] {n_fallback_total} row(s) with coi_class=-1 "
+                                f"re-binarized from orig_label → "
+                                f"{n_fallback_coi} COI, "
+                                f"{n_fallback_total - n_fallback_coi} background."
+                            )
+                        # else: no orig_label fallback; those rows remain label=0
+                    df_split["label"] = new_labels
                 elif "orig_label" in df_split.columns:
                     # Fallback: re-binarize based on orig_label
                     raw_series = df_split["orig_label"]
@@ -2332,10 +2354,42 @@ class ValidationPipeline:
         df_coi = df_split[df_split["label"] == 1].reset_index(drop=True)
         df_bg = df_split[df_split["label"] == 0].reset_index(drop=True)
 
-        # Filter contaminated backgrounds (only when orig_label exists)
-        df_bg, n_contaminated = _filter_contaminated_backgrounds(
-            df_bg, coi_synonyms=self.coi_synonyms, verbose=True
-        )
+        # Filter contaminated backgrounds.
+        #
+        # For independent test sets (e.g. Risoux) we skip this step entirely.
+        # Those datasets carry ground-truth field annotations — every sample
+        # that is not labeled with the current COI is a legitimate negative
+        # example (a real soundscape, not a mislabeled training clip).  The
+        # concept of "contamination" (a background clip that accidentally
+        # contains the COI due to incomplete synonym matching during dataset
+        # creation) does not apply here.  Running the filter would risk
+        # discarding valid negatives such as Risoux recordings that contain
+        # airplane sounds when evaluating bird classification, or vice-versa.
+        #
+        # For normal training-domain splits the filter uses self.coi_synonyms,
+        # which is always classifier-specific (AIRPLANE_SYNONYMS for plane/AST,
+        # BIRD_SYNONYMS for bird_mae/audioprotopnet).  This means only the
+        # current COI class is checked — samples of the *other* COI (e.g.
+        # airplane recordings in a bird-validation background pool, or biophony
+        # recordings in an airplane-validation background pool) are never
+        # touched and correctly remain as negative examples.
+        if only_dataset is None:
+            df_bg, n_contaminated = _filter_contaminated_backgrounds(
+                df_bg, coi_synonyms=self.coi_synonyms, verbose=True
+            )
+        else:
+            n_contaminated = 0
+            if len(df_bg) == 0:
+                print(
+                    f"[Info] Independent dataset '{only_dataset}': "
+                    f"no background samples found (all samples are COI)."
+                )
+            else:
+                print(
+                    f"[Info] Independent dataset '{only_dataset}': "
+                    f"contamination filter skipped — {len(df_bg)} background "
+                    f"sample(s) kept as ground-truth negatives."
+                )
 
         # ------------------------------------------------------------------
         # Balance classes for fair evaluation (downsample majority class)
