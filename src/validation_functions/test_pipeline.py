@@ -2414,8 +2414,9 @@ class ValidationPipeline:
             if n_coi > 0 and n_bg > 0:
                 ratio = max(n_coi, n_bg) / min(n_coi, n_bg)
                 
-                # Only balance if significantly imbalanced (ratio > 2)
-                if ratio > 2.0:
+                # Always balance when counts differ to ensure equal positive/negative
+                # samples in the confusion matrix.
+                if n_bg != n_coi:
                     # Downsample majority class to match minority class
                     if n_bg > n_coi:
                         print(f"\n{'=' * 60}")
@@ -2436,7 +2437,7 @@ class ValidationPipeline:
                         print(f"  ✓ Downsampled COI from {n_coi} to {len(df_coi)} samples")
                         print(f"{'=' * 60}\n")
                 else:
-                    print(f"[Info] Classes are reasonably balanced (ratio 1:{ratio:.1f}) - no downsampling needed")
+                    print(f"[Info] Classes are already balanced ({n_coi} COI, {n_bg} background)")
             elif n_coi == 0:
                 print("[Warning] No COI samples available for evaluation!", file=sys.stderr)
             elif n_bg == 0:
