@@ -1908,13 +1908,32 @@ class ValidationPipeline:
                     getattr(row, "start_time", None),
                     getattr(row, "end_time", None),
                 )
-                bg_idx = np.random.randint(len(bg_records))
-                bg_rec = bg_records[bg_idx]
-                bg_full = self._load_labeled_audio(
-                    bg_rec["filename"],
-                    bg_rec.get("start_time"),
-                    bg_rec.get("end_time"),
-                )
+                _bg_zero_power_threshold = 1e-10
+                _bg_max_retries = 10
+                bg_full = None
+                for _bg_attempt in range(_bg_max_retries):
+                    bg_idx = np.random.randint(len(bg_records))
+                    bg_rec = bg_records[bg_idx]
+                    _bg_candidate = self._load_labeled_audio(
+                        bg_rec["filename"],
+                        bg_rec.get("start_time"),
+                        bg_rec.get("end_time"),
+                    )
+                    if _bg_candidate.numel() > 0 and torch.mean(_bg_candidate**2).item() > _bg_zero_power_threshold:
+                        bg_full = _bg_candidate
+                        break
+                    print(
+                        f"Warning: background record '{bg_rec['filename']}' has near-zero power "
+                        f"(attempt {_bg_attempt + 1}/{_bg_max_retries}), resampling.",
+                        file=sys.stderr,
+                    )
+                if bg_full is None:
+                    print(
+                        f"Warning: could not find valid background after {_bg_max_retries} attempts; "
+                        f"skipping COI record '{row.filename}'.",
+                        file=sys.stderr,
+                    )
+                    continue
 
                 coi_segments = self._split_into_segments(coi_full)
                 bg_segments = self._split_into_segments(bg_full)
@@ -1927,6 +1946,30 @@ class ValidationPipeline:
                 for seg_idx, coi_seg in enumerate(coi_segments):
                     # Cycle through BG segments if fewer than COI segments.
                     bg_seg = bg_segments[seg_idx % len(bg_segments)]
+                    # Guard: if this specific segment is near-zero power, find a
+                    # replacement segment from another random background record.
+                    if torch.mean(bg_seg**2).item() <= _bg_zero_power_threshold:
+                        _replaced = False
+                        for _seg_attempt in range(_bg_max_retries):
+                            _alt_idx = np.random.randint(len(bg_records))
+                            _alt_rec = bg_records[_alt_idx]
+                            _alt_full = self._load_labeled_audio(
+                                _alt_rec["filename"],
+                                _alt_rec.get("start_time"),
+                                _alt_rec.get("end_time"),
+                            )
+                            _alt_segs = self._split_into_segments(_alt_full)
+                            _alt_seg = _alt_segs[0] if _alt_segs else bg_seg
+                            if torch.mean(_alt_seg**2).item() > _bg_zero_power_threshold:
+                                bg_seg = _alt_seg
+                                _replaced = True
+                                break
+                        if not _replaced:
+                            print(
+                                f"Warning: could not replace near-zero BG segment for "
+                                f"'{row.filename}' seg {seg_idx}; SNR will be unreliable.",
+                                file=sys.stderr,
+                            )
                     coi_n = self._prepare_rms_mixing_input(coi_seg)
                     bg_n = self._prepare_rms_mixing_input(bg_seg)
                     snr = np.random.uniform(*snr_range)
