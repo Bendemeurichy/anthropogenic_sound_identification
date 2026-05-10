@@ -425,7 +425,7 @@ class COICLAPSep(pl.LightningModule):
             weight_decay=1e-5,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.3, patience=10, verbose=True, min_lr=1e-6
+            optimizer, mode="min", factor=0.3, patience=10, min_lr=1e-6
         )
         return {
             "optimizer": optimizer,
