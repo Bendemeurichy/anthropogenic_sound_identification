@@ -475,9 +475,9 @@ class SeparationInference:
     def _separate_segment(self, segment: torch.Tensor) -> torch.Tensor:
         """Separate a single segment.
 
-        The model was trained with independently normalized sources, so outputs
-        are normalized waveforms. We rescale using mixture statistics to get
-        outputs in a reasonable amplitude range matching the input.
+        The model is trained with joint normalization: all sources are normalized
+        using the mixture's mean and std, preserving additivity (sum of sources
+        = mixture). Outputs are rescaled by mixture std to restore amplitude.
 
         Returns: (n_sources, T)
         """

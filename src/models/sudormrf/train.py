@@ -1090,15 +1090,38 @@ def prepare_batch(
     bg_scaling = torch.clamp(bg_scaling, min=BG_SCALE_MIN, max=BG_SCALE_MAX)
 
     bg_scaled = bg * bg_scaling
-    mixture = normalize_tensor_wav(
-        total_coi + bg_scaled, eps=eps, min_std=NORMALIZE_MIN_STD
-    )
 
-    # Normalize each source independently
-    normalized_cois = [
-        normalize_tensor_wav(c, eps=eps, min_std=NORMALIZE_MIN_STD) for c in cois
-    ]
-    normalized_bg = normalize_tensor_wav(bg_scaled, eps=eps, min_std=NORMALIZE_MIN_STD)
+    # ---- Joint normalisation ------------------------------------------------
+    # Compute statistics from the raw mixture and apply the *same* transform
+    # to every source so that additivity is preserved:
+    #   sum(clean_sources) ≈ mixture
+    # Independent per-source normalisation breaks this property and lets the
+    # model trivially achieve high SI-SNR by outputting a scaled copy of the
+    # mixture for every head.
+    raw_mixture = total_coi + bg_scaled  # (B, T)
+    mix_mean = raw_mixture.mean(dim=-1, keepdim=True)  # (B, 1)
+    mix_std = raw_mixture.std(dim=-1, keepdim=True)    # (B, 1)
+    is_silent = mix_std < NORMALIZE_MIN_STD
+    mix_std_safe = torch.where(is_silent, torch.ones_like(mix_std), mix_std) + eps
+
+    mixture = (raw_mixture - mix_mean) / mix_std_safe
+    mixture = torch.where(is_silent, torch.zeros_like(mixture), mixture)
+
+    # Normalise each clean source with the mixture's mean/std.
+    # Re-zero any COI channel that was silent before normalisation — subtracting
+    # mix_mean from a zero-amplitude channel produces a phantom DC offset that
+    # the loss treats as active signal, poisoning the gradient.
+    normalized_cois = []
+    for c in cois:
+        was_silent = c.pow(2).mean(dim=-1, keepdim=True) < SILENCE_ENERGY_EPS  # (B, 1)
+        normed = (c - mix_mean) / mix_std_safe
+        normed = torch.where(is_silent, torch.zeros_like(normed), normed)
+        normed = torch.where(was_silent, torch.zeros_like(normed), normed)
+        normalized_cois.append(normed)
+
+    normalized_bg = (bg_scaled - mix_mean) / mix_std_safe
+    normalized_bg = torch.where(is_silent, torch.zeros_like(normalized_bg), normalized_bg)
+
     clean_wavs = torch.stack(normalized_cois + [normalized_bg], dim=1)
 
     return mixture, clean_wavs
