@@ -369,7 +369,11 @@ class COICLAPSep(pl.LightningModule):
         return torch.stack(separated, dim=1)
 
     def training_step(self, batch, batch_idx):
-        mixture, sources = batch
+        # WebDataset yields a plain sources tensor; file-based yields (mixture, sources)
+        if isinstance(batch, (list, tuple)) and len(batch) == 2:
+            _, sources = batch
+        else:
+            sources = batch
 
         # Prepare batch with SNR mixing (sources: B, n_src, T)
         snr_range = (-5, 5)
@@ -387,7 +391,11 @@ class COICLAPSep(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        mixture, sources = batch
+        # WebDataset yields a plain sources tensor; file-based yields (mixture, sources)
+        if isinstance(batch, (list, tuple)) and len(batch) == 2:
+            _, sources = batch
+        else:
+            sources = batch
 
         snr_range = (-5, 5)
         mixture, clean_wavs = prepare_batch(sources, snr_range, deterministic=True)
