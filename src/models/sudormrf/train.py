@@ -1468,29 +1468,43 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
     """
     # Check if we should use WebDataset
     use_webdataset = getattr(config.data, "use_webdataset", False)
-    webdataset_path = getattr(config.data, "webdataset_path", "")
+    raw_webdataset_path = str(getattr(config.data, "webdataset_path", "") or "")
+    webdataset_path = os.path.expanduser(os.path.expandvars(raw_webdataset_path)).strip()
     
     if use_webdataset:
         if not webdataset_path:
             raise ValueError("webdataset_path must be set when use_webdataset=True")
-        
+
         from src.common.webdataset_utils import COIWebDatasetWrapper
         from src.label_loading.metadata_loader import get_webdataset_paths
-        
+
+        # Persist the resolved path so checkpoints/logging reflect the actual HPC path.
+        config.data.webdataset_path = webdataset_path
+
         print(f"Using WebDataset loading from: {webdataset_path}")
-        
-        tar_paths = get_webdataset_paths(webdataset_path, split)
-        
+
+        # Prefer a concrete list of shard files over brace-expansion patterns.
+        # This avoids silent empty datasets when environment-variable expansion or
+        # brace expansion is not handled the same way across systems.
+        _tar_pattern = get_webdataset_paths(webdataset_path, split)
+        tar_paths = sorted(str(p) for p in Path(webdataset_path).glob(f"{split}-*.tar"))
+        if not tar_paths:
+            raise FileNotFoundError(
+                f"No {split} shards found in resolved WebDataset directory: "
+                f"{webdataset_path} (pattern from manifest: {_tar_pattern})"
+            )
+        print(f"  Resolved {len(tar_paths)} {split} shard(s)")
+
         # Get target_classes for filtering
         target_classes = getattr(config.data, "target_classes", [])
         if not target_classes:
             print("  Warning: No target_classes specified, using all label==1 as COI")
         else:
             print(f"  Filtering COI by labels: {target_classes}")
-        
+
         # Get seed for reproducibility
         seed = getattr(config.training, "seed", 42)
-        
+
         dataset = COIWebDatasetWrapper(
             tar_paths=tar_paths,
             split=split,
@@ -1511,12 +1525,12 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
             coi_ratio=0.25,  # Could be added to config if needed
             seed=seed,
         )
-        
+
         num_workers = int(getattr(config.training, "num_workers", 0))
         pin_memory = (
             getattr(config.training, "pin_memory", False) and torch.cuda.is_available()
         )
-        
+
         # WebDataset is an IterableDataset - different DataLoader settings
         loader = DataLoader(
             dataset,
@@ -1526,7 +1540,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
             # No shuffle for IterableDataset - handled internally
             # No drop_last for IterableDataset
         )
-        
+
         return loader, dataset
     
     # File-based mode (original behavior)

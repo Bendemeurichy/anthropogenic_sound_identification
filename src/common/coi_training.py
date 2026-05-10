@@ -15,6 +15,8 @@ Expected dataframe structure:
     - 'coi_class' (optional): class index for multi-class COI
 """
 
+import os
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -816,17 +818,31 @@ def create_coi_dataloader(
 
         from .webdataset_utils import COIWebDatasetWrapper
 
-        # Get shard paths for the split
+        resolved_webdataset_path = os.path.expanduser(
+            os.path.expandvars(str(webdataset_path))
+        ).strip()
+        if not resolved_webdataset_path:
+            raise ValueError("Resolved webdataset_path is empty")
+
+        # Get concrete shard paths for the split
         from src.label_loading.metadata_loader import get_webdataset_paths
 
-        tar_paths = get_webdataset_paths(webdataset_path, split)
-        
+        _tar_pattern = get_webdataset_paths(resolved_webdataset_path, split)
+        tar_paths = sorted(
+            str(p) for p in Path(resolved_webdataset_path).glob(f"{split}-*.tar")
+        )
+        if not tar_paths:
+            raise FileNotFoundError(
+                f"No {split} shards found in {resolved_webdataset_path} "
+                f"(pattern from manifest: {_tar_pattern})"
+            )
+
         # Log filtering configuration
         if target_classes:
             print(f"  Filtering COI by labels: {target_classes}")
         else:
             print("  Warning: No target_classes specified, using all label==1 as COI")
-        
+
         if dataset_filter:
             print(f"  Filtering by dataset: {dataset_filter}")
 
@@ -846,6 +862,10 @@ def create_coi_dataloader(
             coi_ratio=coi_ratio,
             seed=seed,
         )
+
+        # WebDataset decoding is more stable on the HPC nodes without
+        # DataLoader worker subprocesses.
+        num_workers = 0
 
         # WebDataset is an IterableDataset - different DataLoader settings
         loader = DataLoader(
