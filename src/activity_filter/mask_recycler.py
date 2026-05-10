@@ -75,6 +75,7 @@ class MaskRecycler:
         # Statistics
         self.hits = 0
         self.misses = 0
+        self._last_was_hit: bool = False
     
     def check_cache(
         self,
@@ -98,6 +99,7 @@ class MaskRecycler:
         # Empty cache
         if not self.cache:
             self.misses += 1
+            self._last_was_hit = False
             return False, None
         
         # Check if segment is silent (avoid division by zero in cosine sim)
@@ -105,6 +107,7 @@ class MaskRecycler:
         if rms < 1e-6:
             # Silent segment - always run inference (don't cache silent audio)
             self.misses += 1
+            self._last_was_hit = False
             return False, None
         
         # Compare with cached segments (check most recent first)
@@ -116,10 +119,12 @@ class MaskRecycler:
             
             if similarity >= self.similarity_threshold:
                 self.hits += 1
+                self._last_was_hit = True
                 return True, cached.sources.clone()
         
         # No match found
         self.misses += 1
+        self._last_was_hit = False
         return False, None
     
     def update_cache(
@@ -208,6 +213,12 @@ class MaskRecycler:
         """Reset statistics counters (hits and misses)."""
         self.hits = 0
         self.misses = 0
+        self._last_was_hit = False
+
+    @property
+    def last_was_hit(self) -> bool:
+        """True if the most recent check_cache call was a cache hit."""
+        return self._last_was_hit
     
     def clear_cache(self):
         """Clear all cached segments."""

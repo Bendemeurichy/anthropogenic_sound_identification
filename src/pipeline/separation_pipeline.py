@@ -251,6 +251,16 @@ class SeparationPipeline:
         if self.recycler:
             return self.recycler.get_stats()
         return None
+
+    @property
+    def last_segment_was_cache_hit(self) -> bool:
+        """True if the most recently processed segment was a cache hit.
+
+        Returns False when mask recycling is disabled.
+        """
+        if self.recycler is None:
+            return False
+        return self.recycler.last_was_hit
     
     def reset_stats(self):
         """Reset mask recycling statistics counters."""

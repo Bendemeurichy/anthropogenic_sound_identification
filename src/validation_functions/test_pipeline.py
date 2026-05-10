@@ -246,6 +246,18 @@ class ClassificationMetrics:
     mean_sdr: Optional[float] = None
     mean_si_sdr: Optional[float] = None
 
+    # SI-SNR improvement over the mixture baseline (separation gain)
+    si_snri_scores: List[float] = field(default_factory=list)
+    mean_si_snri: Optional[float] = None
+
+    # Energy-level error metrics: separated vs. clean reference
+    # RMS error in dB: 20*log10(rms_separated / rms_clean)
+    rms_error_scores: List[float] = field(default_factory=list)
+    mean_rms_error_db: Optional[float] = None
+    # SEL error in dB: 10*log10(sel_separated / sel_clean)
+    sel_error_scores: List[float] = field(default_factory=list)
+    mean_sel_error_db: Optional[float] = None
+
     # Actual SNR values achieved after clamping (for mixture experiments)
     actual_snrs: List[float] = field(default_factory=list)
 
@@ -380,6 +392,12 @@ class ClassificationMetrics:
             self.mean_sdr = float(np.mean(self.sdr_scores))
         if self.si_sdr_scores:
             self.mean_si_sdr = float(np.mean(self.si_sdr_scores))
+        if self.si_snri_scores:
+            self.mean_si_snri = float(np.mean(self.si_snri_scores))
+        if self.rms_error_scores:
+            self.mean_rms_error_db = float(np.mean(self.rms_error_scores))
+        if self.sel_error_scores:
+            self.mean_sel_error_db = float(np.mean(self.sel_error_scores))
 
     def __str__(self):
         s = f"""
@@ -427,10 +445,15 @@ MCC: {self.matthews_corrcoef:.4f}"""
             si_sdr_str = (
                 f"{self.mean_si_sdr:+.2f} dB" if self.mean_si_sdr is not None else "n/a"
             )
+            si_snri_str = f"{self.mean_si_snri:+.2f} dB" if self.mean_si_snri is not None else "n/a"
+            rms_err_str = f"{self.mean_rms_error_db:+.2f} dB" if self.mean_rms_error_db is not None else "n/a"
+            sel_err_str = f"{self.mean_sel_error_db:+.2f} dB" if self.mean_sel_error_db is not None else "n/a"
             s += f"""
 
 Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
-  SI-SNR: {self.mean_si_snr:+.2f} dB    SDR: {sdr_str}    SI-SDR: {si_sdr_str}"""
+  SI-SNR: {self.mean_si_snr:+.2f} dB    SDR: {sdr_str}    SI-SDR: {si_sdr_str}
+  SI-SNRi (improvement): {si_snri_str}
+  RMS error: {rms_err_str}    SEL error: {sel_err_str}"""
 
         if self.actual_snrs:
             s += f"""
@@ -501,6 +524,12 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
                 "mean_si_sdr_db": float(self.mean_si_sdr),
                 "n_signal_samples": int(len(self.si_snr_scores)),
             }
+            if self.mean_si_snri is not None:
+                d["signal_metrics"]["mean_si_snri_db"] = float(self.mean_si_snri)
+            if self.mean_rms_error_db is not None:
+                d["signal_metrics"]["mean_rms_error_db"] = float(self.mean_rms_error_db)
+            if self.mean_sel_error_db is not None:
+                d["signal_metrics"]["mean_sel_error_db"] = float(self.mean_sel_error_db)
         if self.actual_snrs:
             d["actual_snr_stats"] = {
                 "min": float(min(self.actual_snrs)),
@@ -1615,16 +1644,23 @@ class ValidationPipeline:
         return fn(coi_source)
 
     def _compute_signal_metrics(
-        self, reference: torch.Tensor, estimate: torch.Tensor
-    ) -> Tuple[float, float, float]:
+        self,
+        reference: torch.Tensor,
+        estimate: torch.Tensor,
+        mixture: Optional[torch.Tensor] = None,
+    ) -> Tuple[float, float, float, float, float, float]:
         """Compute signal-level separation quality metrics.
 
         Args:
             reference: Clean reference signal (T,)
             estimate:  Separated estimate signal (T,)
+            mixture:   Optional mixture signal (T,) used to compute SI-SNRi.
+                       When provided, SI-SNRi = SI-SNR(estimate, reference)
+                       − SI-SNR(mixture, reference).
 
         Returns:
-            (si_snr, sdr, si_sdr) in dB
+            (si_snr, sdr, si_sdr, si_snri, rms_error_db, sel_error_db) in dB.
+            si_snri / rms_error_db / sel_error_db are NaN when not computable.
         """
         ref = reference.detach().cpu().float()
         est = estimate.detach().cpu().float()
@@ -1637,7 +1673,7 @@ class ValidationPipeline:
         # to fail with a singular-matrix error inside the SDR metric.
         _EPS = 1e-8
         if est.abs().max() < _EPS or ref.abs().max() < _EPS:
-            return float("nan"), float("nan"), float("nan")
+            return float("nan"), float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
 
         si_snr = self._si_snr(est.unsqueeze(0), ref.unsqueeze(0)).item()
         try:
@@ -1645,7 +1681,30 @@ class ValidationPipeline:
         except Exception:
             sdr = float("nan")
         si_sdr = self._si_sdr(est.unsqueeze(0), ref.unsqueeze(0)).item()
-        return si_snr, sdr, si_sdr
+
+        # SI-SNRi: improvement over the mixture baseline
+        si_snri = float("nan")
+        if mixture is not None:
+            mix = mixture.detach().cpu().float()[:min_len]
+            if mix.abs().max() >= _EPS:
+                si_snr_mix = self._si_snr(mix.unsqueeze(0), ref.unsqueeze(0)).item()
+                si_snri = si_snr - si_snr_mix
+
+        # RMS error: 20*log10(rms_est / rms_ref)  — indicates energy gain/loss
+        rms_error_db = float("nan")
+        rms_ref = torch.sqrt(torch.mean(ref ** 2))
+        rms_est = torch.sqrt(torch.mean(est ** 2))
+        if rms_ref > _EPS and rms_est > _EPS:
+            rms_error_db = float(20.0 * torch.log10(rms_est / rms_ref).item())
+
+        # SEL error: 10*log10(sum(est^2) / sum(ref^2)) — total energy error
+        sel_error_db = float("nan")
+        sel_ref = torch.sum(ref ** 2)
+        sel_est = torch.sum(est ** 2)
+        if sel_ref > _EPS and sel_est > _EPS:
+            sel_error_db = float(10.0 * torch.log10(sel_est / sel_ref).item())
+
+        return si_snr, sdr, si_sdr, si_snri, rms_error_db, sel_error_db
 
     def validate_clean(
         self,
@@ -1677,6 +1736,7 @@ class ValidationPipeline:
         raw_labels = []
         sample_info = [] if save_false_negatives else None
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
+        si_snri_scores, rms_error_scores, sel_error_scores = [], [], []
         desc = "Clean (sep+cls)" if use_separation else "Clean (cls only)"
 
         # Prepare optional example saving: choose up to save_n_examples distinct indices
@@ -1730,6 +1790,7 @@ class ValidationPipeline:
                     segments_tensor = torch.stack(segments)
                     seg_preds, seg_confs = [], []
                     seg_si_snr, seg_sdr, seg_si_sdr = [], [], []
+                    seg_si_snri, seg_rms_error, seg_sel_error = [], [], []
 
                     for i in range(0, len(segments_tensor), batch_size):
                         batch_seg = segments_tensor[i : i + batch_size]
@@ -1760,12 +1821,15 @@ class ValidationPipeline:
 
                         # Metrics
                         for b_idx, s_est in enumerate(coi_est):
-                            snr, sdr_val, si_sdr_val = self._compute_signal_metrics(
+                            snr, sdr_val, si_sdr_val, snri, rms_err, sel_err = self._compute_signal_metrics(
                                 batch_seg[b_idx], s_est
                             )
                             seg_si_snr.append(snr)
                             seg_sdr.append(sdr_val)
                             seg_si_sdr.append(si_sdr_val)
+                            seg_si_snri.append(snri)
+                            seg_rms_error.append(rms_err)
+                            seg_sel_error.append(sel_err)
 
                         # Optionally save first segment (skipped here for brevity or done outside loop)
 
@@ -1776,6 +1840,9 @@ class ValidationPipeline:
                     si_snr_scores.append(float(np.mean(seg_si_snr)))
                     sdr_scores.append(float(np.mean(seg_sdr)))
                     si_sdr_scores.append(float(np.mean(seg_si_sdr)))
+                    si_snri_scores.append(float(np.nanmean(seg_si_snri)))
+                    rms_error_scores.append(float(np.nanmean(seg_rms_error)))
+                    sel_error_scores.append(float(np.nanmean(seg_sel_error)))
                 else:
                     # Classify without separation - use batch if available
                     batch_size = 16
@@ -1889,6 +1956,9 @@ class ValidationPipeline:
         metrics.si_snr_scores = si_snr_scores
         metrics.sdr_scores = sdr_scores
         metrics.si_sdr_scores = si_sdr_scores
+        metrics.si_snri_scores = si_snri_scores
+        metrics.rms_error_scores = rms_error_scores
+        metrics.sel_error_scores = sel_error_scores
         metrics.final_coi_count = len(df_coi)
         metrics.final_background_count = len(df_bg)
         metrics.compute(
@@ -1931,6 +2001,7 @@ class ValidationPipeline:
         raw_labels = []
         sample_info = [] if save_false_negatives else None
         si_snr_scores, sdr_scores, si_sdr_scores = [], [], []
+        si_snri_scores, rms_error_scores, sel_error_scores = [], [], []
         actual_snrs: List[float] = []
         desc = "Mixtures (sep+cls)" if use_separation else "Mixtures (cls only)"
         # Keep per-row timing info so background clips are also sliced from
@@ -2068,6 +2139,9 @@ class ValidationPipeline:
                 seg_si_snr: List[float] = []
                 seg_sdr: List[float] = []
                 seg_si_sdr: List[float] = []
+                seg_si_snri: List[float] = []
+                seg_rms_error: List[float] = []
+                seg_sel_error: List[float] = []
 
                 batch_size = 16
                 mixtures_tensor = torch.stack(mixtures)
@@ -2100,12 +2174,16 @@ class ValidationPipeline:
 
                         # Compute signal metrics for each item in batch
                         for b_idx, s_est in enumerate(coi_est_batch):
-                            snr, sdr_val, si_sdr_val = self._compute_signal_metrics(
-                                batch_coi_n[b_idx], s_est
+                            snr, sdr_val, si_sdr_val, snri, rms_err, sel_err = self._compute_signal_metrics(
+                                batch_coi_n[b_idx], s_est,
+                                mixture=batch_mix[b_idx],
                             )
                             seg_si_snr.append(snr)
                             seg_sdr.append(sdr_val)
                             seg_si_sdr.append(si_sdr_val)
+                            seg_si_snri.append(snri)
+                            seg_rms_error.append(rms_err)
+                            seg_sel_error.append(sel_err)
 
                         # Save separated outputs for first segment of chosen examples.
                         if save_dir is not None and idx in sample_choices and i == 0:
@@ -2174,6 +2252,9 @@ class ValidationPipeline:
                     si_snr_scores.append(float(np.mean(seg_si_snr)))
                     sdr_scores.append(float(np.mean(seg_sdr)))
                     si_sdr_scores.append(float(np.mean(seg_si_sdr)))
+                    si_snri_scores.append(float(np.nanmean(seg_si_snri)))
+                    rms_error_scores.append(float(np.nanmean(seg_rms_error)))
+                    sel_error_scores.append(float(np.nanmean(seg_sel_error)))
 
                 y_true.append(1)
                 y_pred.append(pred)
@@ -2266,6 +2347,9 @@ class ValidationPipeline:
         metrics.si_snr_scores = si_snr_scores
         metrics.sdr_scores = sdr_scores
         metrics.si_sdr_scores = si_sdr_scores
+        metrics.si_snri_scores = si_snri_scores
+        metrics.rms_error_scores = rms_error_scores
+        metrics.sel_error_scores = sel_error_scores
         metrics.actual_snrs = actual_snrs
         metrics.final_coi_count = len(df_coi)
         metrics.final_background_count = len(df_bg)
