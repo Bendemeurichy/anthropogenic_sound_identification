@@ -133,15 +133,16 @@ class COICLAPSepDecoder(nn.Module):
     def __init__(
         self,
         decoder: nn.Module,
-        embed_dim: int = 1024,
+        embed_dim: int = 512,
         num_sources: int = 2,
     ):
         super().__init__()
         self.decoder = decoder
         self.num_sources = num_sources
 
-        # Learnable embeddings for COI and background
-        # These replace the text/audio embeddings from CLAP
+        # Learnable embeddings for COI and background.
+        # Each is embed_dim so that concatenation (pos+neg) gives 2*embed_dim,
+        # which must equal the decoder's lan_embed_dim (default 1024).
         self.coi_embedding = nn.Parameter(torch.randn(1, embed_dim))
         self.bg_embedding = nn.Parameter(torch.randn(1, embed_dim))
 
@@ -571,10 +572,11 @@ def train(
         conv=False,
     )
 
-    # Wrap decoder for COI separation
+    # Wrap decoder for COI separation.
+    # embed_dim=512 so that cat([coi, bg], dim=-1) → 1024 == lan_embed_dim.
     coi_decoder = COICLAPSepDecoder(
         decoder=base_decoder,
-        embed_dim=1024,
+        embed_dim=512,
         num_sources=2,
     )
 
