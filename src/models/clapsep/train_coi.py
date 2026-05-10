@@ -221,14 +221,11 @@ class COICLAPSep(pl.LightningModule):
         self.use_lora = use_lora
         self.lora_rank = lora_rank
 
-        # CLAP model (always frozen, only used for reference)
-        self.clap_model = clap_model
-        for p in self.clap_model.parameters():
-            p.requires_grad = False
-
-        # Copy audio branch for fine-tuning
+        # Copy audio branch for fine-tuning, then discard the full CLAP model
         import copy
-        self.audio_branch = copy.deepcopy(self.clap_model.model.audio_branch)
+        self.audio_branch = copy.deepcopy(clap_model.model.audio_branch)
+        # Don't store clap_model as a submodule — it's large and never used after init
+        del clap_model
 
         if freeze_encoder:
             # Mode 1: Completely frozen encoder
@@ -348,8 +345,15 @@ class COICLAPSep(pl.LightningModule):
 
         # Get features from audio encoder
         mixture_resampled = self.resampler(mixture)
-        with torch.no_grad():
+        if self.use_lora or not all(
+            not p.requires_grad for p in self.audio_branch.parameters()
+        ):
+            # Encoder has trainable parameters — run with gradients
             self.audio_branch({"waveform": mixture_resampled})
+        else:
+            # Encoder fully frozen — skip gradient tracking for efficiency
+            with torch.no_grad():
+                self.audio_branch({"waveform": mixture_resampled})
 
         # Generate masks using COI decoder
         masks = self.decoder(
@@ -630,6 +634,7 @@ def train(
                 monitor="val_loss",
                 patience=30,
                 mode="min",
+                check_on_train_epoch_end=False,
             ),
         ],
     )
