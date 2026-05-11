@@ -230,3 +230,4 @@ validation_examples*
 *cnn/
 */pann/
 *meeting_*/
+!src/validation_functions/classification_models/plane_classifier_ast/
