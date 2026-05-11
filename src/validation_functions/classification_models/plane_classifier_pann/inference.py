@@ -13,9 +13,9 @@ import argparse
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent.parent))
 
-from model_loader import load_trained_model
-from config import TrainingConfig
-from common.audio_utils import create_high_quality_resampler
+from .model_loader import load_trained_model
+from .config import TrainingConfig
+from src.common.audio_utils import create_high_quality_resampler
 
 
 class PlaneClassifierInference:

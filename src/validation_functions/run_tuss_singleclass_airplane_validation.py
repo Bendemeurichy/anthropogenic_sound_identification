@@ -51,7 +51,7 @@ DATA_CSV = str(
     PROJECT_ROOT / "src/models/tuss/checkpoints/20260328_150704/separation_dataset.csv"
 )
 
-PRIMARY_CLASSIFIER = "plane"
+PRIMARY_CLASSIFIER = "pann_finetuned"
 SPLIT = "test"
 SNR_RANGE = (-5, 5)
 SEED = 42

@@ -52,7 +52,7 @@ DATA_CSV = str(
     PROJECT_ROOT / "src/models/tuss/checkpoints/20260328_150704/separation_dataset.csv"
 )
 
-PRIMARY_CLASSIFIER = "plane"
+PRIMARY_CLASSIFIER = "pann_finetuned"
 SPLIT = "test"
 SNR_RANGE = (-5, 5)
 SEED = 42
@@ -115,9 +115,15 @@ def main():
     for cls_name, cls_results in results.items():
         print(f"\nClassifier: {cls_name}")
         for test_name, metrics in cls_results.items():
-            print(f"  {test_name}: F1={metrics.f1_score:.4f}  Recall={metrics.recall:.4f}  Precision={metrics.precision:.4f}")
+            print(
+                f"  {test_name}: F1={metrics.f1_score:.4f}  Recall={metrics.recall:.4f}  Precision={metrics.precision:.4f}"
+            )
             if metrics.mean_si_snr is not None:
-                snri = f"{metrics.mean_si_snri:+.2f}" if metrics.mean_si_snri is not None else "n/a"
+                snri = (
+                    f"{metrics.mean_si_snri:+.2f}"
+                    if metrics.mean_si_snri is not None
+                    else "n/a"
+                )
                 print(f"    SI-SNR={metrics.mean_si_snr:+.2f} dB  SI-SNRi={snri} dB")
 
     # Risoux independent test set
