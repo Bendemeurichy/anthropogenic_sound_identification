@@ -50,7 +50,7 @@ echo ""
 #   - Set checkpoint_dir to $VSC_DATA/checkpoints/clapsep (under training: section)
 #
 # The command-line flags below will override the config file values
-python -u src/models/clapsep/train_coi.py \
+python -u src/models/clapsep/train_text_coi.py \
     --df-path data/aircraft_data.csv \
     --clap-checkpoint src/models/clapsep/checkpoint/CLAPSep/model/music_audioset_epoch_15_esc_90.14.pt \
     --checkpoint-dir $VSC_DATA/checkpoints/clapsep \
