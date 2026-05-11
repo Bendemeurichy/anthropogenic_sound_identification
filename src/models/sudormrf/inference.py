@@ -475,9 +475,12 @@ class SeparationInference:
     def _separate_segment(self, segment: torch.Tensor) -> torch.Tensor:
         """Separate a single segment.
 
-        The model is trained with joint normalization: all sources are normalized
-        using the mixture's mean and std, preserving additivity (sum of sources
-        = mixture). Outputs are rescaled by mixture std to restore amplitude.
+        The model is trained with independent normalization: the mixture input
+        is normalized to zero-mean unit-variance, and each target source is
+        also independently normalized to zero-mean unit-variance. Outputs are
+        rescaled by the mixture std to restore a reasonable amplitude level.
+        Note: relative amplitude between COI and background outputs is not
+        preserved — both are scaled to roughly mixture energy.
 
         Returns: (n_sources, T)
         """
@@ -488,11 +491,9 @@ class SeparationInference:
         x = ((segment - mean) / std).unsqueeze(0).unsqueeze(0).to(self.device)
 
         estimates = self.model(x)
-        # estimates shape: (1, n_sources, T) - each source is normalized
+        # estimates shape: (1, n_sources, T) - each source is unit-variance
 
-        # The model outputs normalized sources. To get usable audio:
-        # Scale by mixture std to restore reasonable amplitude.
-        # Don't add mean since sources should be zero-mean signals.
+        # Rescale by mixture std to restore amplitude to input level.
         sources = estimates[0].cpu() * std
         
 

@@ -595,8 +595,8 @@ def prepare_batch_mono(
         deterministic: If True, use linspace SNRs; otherwise random
 
     Returns:
-        mixture: (B, T) normalized mixture
-        clean_wavs: (B, n_src, T) jointly normalized sources (sum == mixture)
+        mixture: (B, T) normalized mixture (zero-mean, unit-variance)
+        clean_wavs: (B, n_src, T) independently normalized sources (each unit-variance)
     """
     B, n_src, T = sources.shape
 
@@ -624,32 +624,20 @@ def prepare_batch_mono(
 
     bg_scaled = bg * bg_scaling
 
-    # Joint normalisation: apply the mixture's mean/std to every source so that
-    # sum(clean_sources) = mixture. Independent per-source normalisation breaks
-    # additivity and lets the model trivially achieve high SI-SNR by outputting
-    # a scaled copy of the mixture for every head.
+    # Normalize mixture input to zero-mean unit-variance.
     raw_mixture = total_coi + bg_scaled  # (B, T)
-    mix_mean = raw_mixture.mean(dim=-1, keepdim=True)
-    mix_std = raw_mixture.std(dim=-1, keepdim=True)
-    is_silent = mix_std < 1e-3
-    mix_std_safe = torch.where(is_silent, torch.ones_like(mix_std), mix_std) + eps
+    mixture = normalize_tensor_wav(raw_mixture)
 
-    mixture = (raw_mixture - mix_mean) / mix_std_safe
-    mixture = torch.where(is_silent, torch.zeros_like(mixture), mixture)
-
-    # Re-zero COI channels that were silent before normalisation — subtracting
-    # mix_mean from a zero-amplitude channel produces a phantom DC offset that
-    # the loss treats as active signal.
+    # Independently normalize each target source to zero-mean unit-variance.
+    # Silent COI channels are explicitly zeroed to avoid phantom DC offsets.
     normalized_cois = []
     for c in cois:
         was_silent = c.pow(2).mean(dim=-1, keepdim=True) < 1e-8
-        normed = (c - mix_mean) / mix_std_safe
-        normed = torch.where(is_silent, torch.zeros_like(normed), normed)
+        normed = normalize_tensor_wav(c)
         normed = torch.where(was_silent, torch.zeros_like(normed), normed)
         normalized_cois.append(normed)
 
-    normalized_bg = (bg_scaled - mix_mean) / mix_std_safe
-    normalized_bg = torch.where(is_silent, torch.zeros_like(normalized_bg), normalized_bg)
+    normalized_bg = normalize_tensor_wav(bg_scaled)
     clean_wavs = torch.stack(normalized_cois + [normalized_bg], dim=1)
 
     return mixture, clean_wavs
@@ -669,8 +657,8 @@ def prepare_batch_stereo(
         deterministic: If True, use linspace SNRs; otherwise random
 
     Returns:
-        mixture: (B, C, T) normalized mixture
-        clean_wavs: (B, n_src, C, T) jointly normalized sources (sum == mixture)
+        mixture: (B, C, T) normalized mixture (zero-mean, unit-variance)
+        clean_wavs: (B, n_src, C, T) independently normalized sources (each unit-variance)
     """
     B, n_src, C, T = sources.shape
 
@@ -697,26 +685,31 @@ def prepare_batch_stereo(
 
     bg_scaled = bg * bg_scaling
 
-    # Joint normalisation across channels (C, T dims).
+    # Normalize mixture input to zero-mean unit-variance (across C and T dims).
     raw_mixture = total_coi + bg_scaled  # (B, C, T)
     mix_mean = raw_mixture.mean(dim=(-2, -1), keepdim=True)
     mix_std = raw_mixture.std(dim=(-2, -1), keepdim=True)
-    is_silent = mix_std < 1e-3
-    mix_std_safe = torch.where(is_silent, torch.ones_like(mix_std), mix_std) + eps
-
+    is_mix_silent = mix_std < 1e-3
+    mix_std_safe = torch.where(is_mix_silent, torch.ones_like(mix_std), mix_std) + eps
     mixture = (raw_mixture - mix_mean) / mix_std_safe
-    mixture = torch.where(is_silent, torch.zeros_like(mixture), mixture)
+    mixture = torch.where(is_mix_silent, torch.zeros_like(mixture), mixture)
 
+    # Independently normalize each target source (across C and T dims).
+    # Silent COI channels are explicitly zeroed.
     normalized_cois = []
     for c in cois:
         was_silent = c.pow(2).mean(dim=(-2, -1), keepdim=True) < 1e-8
-        normed = (c - mix_mean) / mix_std_safe
-        normed = torch.where(is_silent, torch.zeros_like(normed), normed)
+        c_mean = c.mean(dim=(-2, -1), keepdim=True)
+        c_std = c.std(dim=(-2, -1), keepdim=True)
+        c_std_safe = torch.where(c_std < 1e-3, torch.ones_like(c_std), c_std) + eps
+        normed = (c - c_mean) / c_std_safe
         normed = torch.where(was_silent, torch.zeros_like(normed), normed)
         normalized_cois.append(normed)
 
-    normalized_bg = (bg_scaled - mix_mean) / mix_std_safe
-    normalized_bg = torch.where(is_silent, torch.zeros_like(normalized_bg), normalized_bg)
+    bg_mean = bg_scaled.mean(dim=(-2, -1), keepdim=True)
+    bg_std = bg_scaled.std(dim=(-2, -1), keepdim=True)
+    bg_std_safe = torch.where(bg_std < 1e-3, torch.ones_like(bg_std), bg_std) + eps
+    normalized_bg = (bg_scaled - bg_mean) / bg_std_safe
     clean_wavs = torch.stack(normalized_cois + [normalized_bg], dim=1)
 
     return mixture, clean_wavs

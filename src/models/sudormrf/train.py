@@ -1055,14 +1055,23 @@ def prepare_batch(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Prepare mixture and clean targets from source tensor.
 
+    Follows the same convention as the base SuDORMRF training script:
+      - The mixture input is normalized to zero-mean unit-variance.
+      - Each target source is normalized independently to zero-mean unit-variance.
+      - SI-SNR is scale-invariant, so additivity (sum(targets) == mixture) is
+        NOT required and NOT enforced. Enforcing it (joint normalization) was
+        found to create an easy local minimum where the model outputs the mixture
+        for all heads and still achieves artificially high SI-SNR on training
+        batches, while failing to separate on validation.
+
     Args:
         sources: (B, n_src, T) tensor with COI sources and background (last channel)
         snr_range: (min_snr, max_snr) in dB
         deterministic: If True, use linspace SNRs; otherwise random
 
     Returns:
-        mixture: (B, T) normalized mixture
-        clean_wavs: (B, n_src, T) independently normalized sources
+        mixture: (B, T) normalized mixture (zero-mean, unit-variance)
+        clean_wavs: (B, n_src, T) independently normalized target sources
     """
     B, n_src, T = sources.shape
     eps = ENERGY_EPS
@@ -1091,36 +1100,23 @@ def prepare_batch(
 
     bg_scaled = bg * bg_scaling
 
-    # ---- Joint normalisation ------------------------------------------------
-    # Compute statistics from the raw mixture and apply the *same* transform
-    # to every source so that additivity is preserved:
-    #   sum(clean_sources) ≈ mixture
-    # Independent per-source normalisation breaks this property and lets the
-    # model trivially achieve high SI-SNR by outputting a scaled copy of the
-    # mixture for every head.
+    # ---- Normalize mixture input -------------------------------------------
+    # The model input is the normalized mixture (zero-mean, unit-variance).
     raw_mixture = total_coi + bg_scaled  # (B, T)
-    mix_mean = raw_mixture.mean(dim=-1, keepdim=True)  # (B, 1)
-    mix_std = raw_mixture.std(dim=-1, keepdim=True)    # (B, 1)
-    is_silent = mix_std < NORMALIZE_MIN_STD
-    mix_std_safe = torch.where(is_silent, torch.ones_like(mix_std), mix_std) + eps
+    mixture = normalize_tensor_wav(raw_mixture)
 
-    mixture = (raw_mixture - mix_mean) / mix_std_safe
-    mixture = torch.where(is_silent, torch.zeros_like(mixture), mixture)
-
-    # Normalise each clean source with the mixture's mean/std.
-    # Re-zero any COI channel that was silent before normalisation — subtracting
-    # mix_mean from a zero-amplitude channel produces a phantom DC offset that
-    # the loss treats as active signal, poisoning the gradient.
+    # ---- Independently normalize each target source ------------------------
+    # Each target is normalized to zero-mean unit-variance independently.
+    # Silent COI channels (background-only samples) are explicitly zeroed to
+    # avoid phantom DC offsets from normalizing a zero signal.
     normalized_cois = []
     for c in cois:
-        was_silent = c.pow(2).mean(dim=-1, keepdim=True) < SILENCE_ENERGY_EPS  # (B, 1)
-        normed = (c - mix_mean) / mix_std_safe
-        normed = torch.where(is_silent, torch.zeros_like(normed), normed)
+        was_silent = c.pow(2).mean(dim=-1, keepdim=True) < SILENCE_ENERGY_EPS
+        normed = normalize_tensor_wav(c)
         normed = torch.where(was_silent, torch.zeros_like(normed), normed)
         normalized_cois.append(normed)
 
-    normalized_bg = (bg_scaled - mix_mean) / mix_std_safe
-    normalized_bg = torch.where(is_silent, torch.zeros_like(normalized_bg), normalized_bg)
+    normalized_bg = normalize_tensor_wav(bg_scaled)
 
     clean_wavs = torch.stack(normalized_cois + [normalized_bg], dim=1)
 
