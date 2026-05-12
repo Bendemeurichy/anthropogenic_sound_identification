@@ -5,8 +5,7 @@ Tests the CLAPSep separator with:
 - plane (primary classifier)
 - ast_finetuned (secondary classifier)
 
-The CLAPSep positive text prompt is auto-detected as "airplane" from
-classifier_type="plane" in test_pipeline.py.
+The CLAPSep positive text prompt is set to "airplane flying over".
 
 COI configuration:
 - Airplane samples (orig_label) → label=1 (COI)
@@ -69,7 +68,7 @@ def main():
     print("AIRPLANE VALIDATION — CLAPSep SEPARATOR, BOTH CLASSIFIERS")
     print("=" * 70)
     print(f"Separator: CLAPSep ({SEP_CHECKPOINT})")
-    print(f"Positive text prompt: 'airplane' (auto-detected)")
+    print(f"Positive text prompt: 'airplane flying over'")
     print(f"Primary Classifier: {PRIMARY_CLASSIFIER}")
     print(f"Secondary Classifier: ast_finetuned")
     print(f"Dataset: {DATA_CSV}")
@@ -91,7 +90,8 @@ def main():
         classifier_type=PRIMARY_CLASSIFIER,
         use_tuss=False,
         use_clapsep=True,
-        # clapsep_text_pos auto-detected as "airplane" from classifier_type
+        clapsep_text_pos="airplane flying over",
+        # clapsep_text_pos overrides auto-detection
         use_ast_finetuned=True,
         use_bird_mae=False,
         use_audioprotopnet=False,
