@@ -2509,7 +2509,16 @@ class ValidationPipeline:
                     # from orig_label; rows with a real coi_class use the index.
                     known_mask = df_split["coi_class"] != -1
                     new_labels = (df_split["coi_class"] == target_coi_class).astype(int)
-                    unknown_mask = ~known_mask
+                    # Restrict the orig_label fallback to risoux_test rows only.
+                    # Other datasets (freesound, esc50, aerosonicdb) with coi_class=-1
+                    # are explicit background samples whose multi-tag orig_labels
+                    # (e.g. '["birds","planes","wind"]') must NOT be interpreted as
+                    # COI positives via substring matching.  risoux_test rows appended
+                    # without a coi_class index are the only ones that need this path.
+                    if "dataset" in df_split.columns:
+                        unknown_mask = ~known_mask & (df_split["dataset"] == "risoux_test")
+                    else:
+                        unknown_mask = ~known_mask
                     if unknown_mask.any():
                         if "orig_label" in df_split.columns:
                             fallback = df_split.loc[unknown_mask, "orig_label"].apply(
