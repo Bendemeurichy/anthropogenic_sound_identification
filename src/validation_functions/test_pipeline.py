@@ -756,7 +756,7 @@ class ValidationPipeline:
             tuss_model = TUSSInference.from_checkpoint(
                 sep_path,
                 device=self.device,
-                coi_prompts=coi_prompts,
+                coi_prompt=coi_prompts,
                 bg_prompt=tuss_bg_prompt,
             )
             # Remember which COI prompt we requested so _get_coi_head_index()
