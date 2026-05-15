@@ -32,12 +32,15 @@ from plotly.subplots import make_subplots
 SCRIPT_DIR = Path(__file__).parent
 FINAL_RESULTS_DIR = SCRIPT_DIR / "final_results"
 
-CONDITION_ORDER = ["clean_cls", "mix_cls", "clean_sep_cls", "mix_sep_cls"]
+CONDITION_ORDER = ["clean_cls", "mix_cls", "clean_sep_cls", "mix_sep_cls",
+                   "as_is_cls", "as_is_sep_cls"]
 CONDITION_LABELS = {
     "clean_cls":     "Clean COI · classifier only",
     "mix_cls":       "Mixture · classifier only",
     "clean_sep_cls": "Clean COI · separation + classifier",
     "mix_sep_cls":   "Mixture · separation + classifier",
+    "as_is_cls":     "As-is field recording · classifier only",
+    "as_is_sep_cls": "As-is field recording · separation + classifier",
 }
 
 CLS_DISPLAY = {
@@ -104,28 +107,23 @@ def build_cm_figure(results: dict, title: str) -> go.Figure:
     if not conditions:
         raise ValueError("No condition contains a confusion_matrix")
 
-    # Pad to 2x2 layout regardless of how many conditions exist
-    grid = conditions + [None] * (4 - len(conditions))
-    grid = grid[:4]
+    # Layout: at most 2 columns; rows grow as needed.
+    n = len(conditions)
+    n_cols = 2 if n > 1 else 1
+    n_rows = (n + n_cols - 1) // n_cols
 
-    titles = [CONDITION_LABELS.get(c, c) if c else "" for c in grid]
+    titles = [CONDITION_LABELS.get(c, c) for c in conditions]
     fig = make_subplots(
-        rows=2, cols=2,
+        rows=n_rows, cols=n_cols,
         subplot_titles=titles,
         horizontal_spacing=0.18,
         vertical_spacing=0.20,
     )
 
-    # Shared colour scale for visual comparability
-    z_max = max(
-        max(results[c]["confusion_matrix"].values())
-        for c in conditions
-    )
+    z_max = max(max(results[c]["confusion_matrix"].values()) for c in conditions)
 
-    for idx, cond in enumerate(grid):
-        if cond is None:
-            continue
-        r, c = idx // 2 + 1, idx % 2 + 1
+    for idx, cond in enumerate(conditions):
+        r, c = idx // n_cols + 1, idx % n_cols + 1
         cm = results[cond]["confusion_matrix"]
         tp, tn, fp, fn = cm["tp"], cm["tn"], cm["fp"], cm["fn"]
         z = np.array([[tn, fp], [fn, tp]])
@@ -156,7 +154,7 @@ def build_cm_figure(results: dict, title: str) -> go.Figure:
     fig.update_layout(
         title=dict(text=f"<b>{title}</b>", font=dict(size=15)),
         template=TEMPLATE, font=FONT,
-        width=900, height=780,
+        width=900, height=max(420, 380 * n_rows),
         margin=dict(l=70, r=40, t=80, b=50),
     )
     return fig

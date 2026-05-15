@@ -611,9 +611,23 @@ class TUSSInference:
     def _separate_long(
         self, waveform: torch.Tensor, original_length: int
     ) -> torch.Tensor:
-        """Process long audio with overlap-add.
+        """Process long audio with weighted overlap-add (WOLA).
 
-        Uses Hann windowing with 50% overlap for smooth transitions.
+        Uses a Hann analysis window with 75% overlap (hop = segment_samples // 4).
+        The reconstruction follows the standard weighted-OLA formula
+
+            y[n] = Σ_k (x_k[n] * hann[n-kH]) / Σ_k hann[n-kH]^2
+
+        which is the minimum-norm inverse for redundant Hann frames. The Σhann²
+        denominator is COLA-flat in the steady-state interior at hop ≤ N/2.
+
+        Edge handling: the input is reflect-padded by ``segment_samples - hop``
+        on both sides before the OLA loop, so that the first and last output
+        samples are covered by the same number of overlapping windows as the
+        interior. The padded region is cropped after normalization. This
+        eliminates the boundary attenuation (and the corresponding edge boost
+        caused by dividing by a small Σhann² near n=0 and n=T-1) that the
+        previous unpadded implementation suffered from.
 
         Args:
             waveform: Input waveform (T,) where T > segment_samples
@@ -624,33 +638,66 @@ class TUSSInference:
                     sources[0:len(coi_prompts)] = COI classes
                     sources[-1] = background
         """
-        hop = self.segment_samples // 2
-        window = torch.hann_window(self.segment_samples)
+        N = self.segment_samples
+        hop = max(1, N // 4)
+        # Pad both ends by N - hop so every original sample is covered by the
+        # full count of overlapping Hann windows (flat Σhann² denominator).
+        pad = N - hop
+        if waveform.dim() != 1:
+            raise ValueError(
+                f"_separate_long expects a 1-D waveform, got shape {tuple(waveform.shape)}"
+            )
+        # Reflect padding gives smoother edge behavior than zero padding;
+        # fall back to zero padding for very short signals where reflect is
+        # not defined (pad >= signal length).
+        if waveform.shape[0] > pad:
+            padded = torch.nn.functional.pad(
+                waveform.unsqueeze(0).unsqueeze(0), (pad, pad), mode="reflect"
+            ).squeeze(0).squeeze(0)
+        else:
+            padded = torch.nn.functional.pad(waveform, (pad, pad))
+        padded_len = padded.shape[0]
 
-        # Initialize output buffers
-        output = torch.zeros(self.num_sources, original_length)
-        weight = torch.zeros(original_length)
+        window = torch.hann_window(N)
 
-        # Process overlapping segments
-        for start in range(0, waveform.shape[0], hop):
-            chunk = waveform[start : start + self.segment_samples]
-            if chunk.shape[0] < self.segment_samples:
-                chunk = torch.nn.functional.pad(
-                    chunk, (0, self.segment_samples - chunk.shape[0])
-                )
+        # Allocate buffers covering the padded length; we crop at the end.
+        output = torch.zeros(self.num_sources, padded_len)
+        weight = torch.zeros(padded_len)
 
-            # Separate this segment
-            sources = self._separate_segment(chunk)  # (n_sources, segment_samples)
+        # Iterate window starts so the LAST window ends at padded_len. We add
+        # a final start at (padded_len - N) when the regular grid does not
+        # already cover the tail, ensuring full coverage without launching
+        # mostly-padded windows past the end.
+        last_start = max(0, padded_len - N)
+        starts = list(range(0, last_start + 1, hop))
+        if not starts or starts[-1] != last_start:
+            starts.append(last_start)
 
-            end = min(start + self.segment_samples, original_length)
-            length = end - start
+        for start in starts:
+            chunk = padded[start : start + N]
+            if chunk.shape[0] < N:
+                chunk = torch.nn.functional.pad(chunk, (0, N - chunk.shape[0]))
 
-            # Add windowed segment (broadcast window across sources)
-            output[:, start:end] += sources[:, :length] * window[:length]
-            weight[start:end] += window[:length]
+            # Separate this segment (returned on CPU by _separate_segment)
+            sources = self._separate_segment(chunk)  # (n_sources, N)
 
-        # Normalize by overlap weight
-        return output / (weight + 1e-8)
+            end = start + N
+            # Apply Hann to the source AND accumulate Hann² as the weight,
+            # implementing the weighted-OLA reconstruction Σ(x·w)/Σw².
+            output[:, start:end] += sources * window
+            weight[start:end] += window * window
+
+        # Normalize by accumulated Σhann². With the reflective padding above
+        # this is essentially constant across the entire interior.
+        normalized = output / (weight + 1e-8)
+
+        # Crop the padded region and trim/pad to the requested original length.
+        normalized = normalized[:, pad : pad + original_length]
+        if normalized.shape[1] < original_length:
+            normalized = torch.nn.functional.pad(
+                normalized, (0, original_length - normalized.shape[1])
+            )
+        return normalized
 
     def get_coi_audio(self, sources: torch.Tensor) -> torch.Tensor:
         """Extract the Class of Interest audio from separated sources.

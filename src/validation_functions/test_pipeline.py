@@ -809,8 +809,25 @@ class ValidationPipeline:
                 text_pos=clapsep_text_pos,
                 text_neg=clapsep_text_neg,
             )
+            # Propagate sample_rate AND segment_samples from CLAPSep so the
+            # pipeline operates at the separator's native chunk length
+            # (DEFAULT_CHUNK_SAMPLES = 320000 = 10 s @ 32 kHz). Previously the
+            # pipeline kept its hardcoded 5 s default, which silently truncated
+            # CLAPSep input chunks to half their native length and left
+            # classifier_segment_samples derived from the wrong window.
             self.sample_rate = self.separator.sample_rate
-            self.segment_samples = int(self.sample_rate * self.segment_length)
+            self.segment_samples = self.separator.segment_samples
+            self.segment_length = self.segment_samples / self.sample_rate
+            print(
+                f"CLAPSep config: sample_rate={self.sample_rate} Hz, "
+                f"segment_length={self.segment_length:.2f} s "
+                f"({self.segment_samples} samples)"
+            )
+            # Re-derive classifier segment size using the (now updated) segment_length
+            # so the classifier window stays consistent with the separator window.
+            self.classifier_segment_samples = int(
+                self.classifier_sample_rate * self.segment_length
+            )
         else:
             print(f"Loading separation model from {sep_path}")
             self.separator = SeparationInference.from_checkpoint(
@@ -1578,6 +1595,53 @@ class ValidationPipeline:
             return waveform
         return waveform * (target_peak / peak)
 
+    def _concat_with_crossfade(
+        self,
+        chunks: List[torch.Tensor],
+        fade_ms: float = 10.0,
+    ) -> torch.Tensor:
+        """Concatenate 1-D segments with a short Hann cross-fade at each join.
+
+        Used only when writing example WAVs to disk so that the saved full
+        recording does not contain hard discontinuities at segment boundaries.
+        Per-segment metrics are computed *before* this and are unaffected.
+
+        The cross-fade length is clipped to half the shortest involved chunk so
+        that very short trailing chunks (e.g. a zero-padded last segment) do
+        not consume an entire neighbour.
+
+        Args:
+            chunks: List of 1-D float tensors, all on CPU.
+            fade_ms: Cross-fade duration in milliseconds. Default 10 ms.
+
+        Returns:
+            A single 1-D tensor whose length is
+                sum(len(c) for c in chunks) - fade_samples * (len(chunks) - 1).
+        """
+        if not chunks:
+            return torch.zeros(0)
+        if len(chunks) == 1:
+            return chunks[0].detach().cpu().contiguous()
+
+        fade_samples = int(round(fade_ms * 1e-3 * self.sample_rate))
+        if fade_samples <= 0:
+            return torch.cat([c.detach().cpu().contiguous() for c in chunks], dim=0)
+
+        out = chunks[0].detach().cpu().contiguous().clone()
+        for nxt in chunks[1:]:
+            nxt = nxt.detach().cpu().contiguous()
+            f = min(fade_samples, out.shape[0] // 2, nxt.shape[0] // 2)
+            if f <= 0:
+                out = torch.cat([out, nxt], dim=0)
+                continue
+            # Equal-power Hann cross-fade.
+            ramp = torch.hann_window(2 * f, periodic=False)
+            fade_out = ramp[f:]            # 1 → 0
+            fade_in = ramp[:f]             # 0 → 1
+            tail = out[-f:] * fade_out + nxt[:f] * fade_in
+            out = torch.cat([out[:-f], tail, nxt[f:]], dim=0)
+        return out
+
     def _get_coi_head_index(self) -> int:
         """Return the COI head index for the current separator model."""
         sep = self.separator
@@ -1872,15 +1936,19 @@ class ValidationPipeline:
                 )
                 segments = self._split_into_segments(waveform_full)
 
-                # Optionally save the first segment of selected examples.
+                # Optionally save the COMPLETE clean COI recording (all segments concatenated).
                 if save_dir is not None and idx in sample_choices:
                     try:
                         k = list(sample_choices).index(idx)
-                        # Peak-normalize for proper listening level
-                        seg_normalized = self._normalize_for_saving(segments[0])
+                        # Concatenate all segments to recover the full (padded) recording
+                        # that is fed to the model, then peak-normalize for listening.
+                        full_clean = self._concat_with_crossfade(
+                            [s.cpu() for s in segments]
+                        )
+                        full_clean = self._normalize_for_saving(full_clean)
                         torchaudio.save(
                             str(save_dir / f"clean_coi_{k}.wav"),
-                            seg_normalized.unsqueeze(0).cpu(),
+                            full_clean.unsqueeze(0).cpu(),
                             self.sample_rate,
                         )
                     except Exception:
@@ -1923,7 +1991,14 @@ class ValidationPipeline:
                             seg_sel_error.append(sel_err)
 
                     # Concatenate all COI estimates into one waveform and classify
-                    coi_full = torch.cat(coi_chunks, dim=0).view(-1)
+                    # Cross-fade across separator-segment boundaries before
+                    # passing to the classifier (matches the audio that gets
+                    # saved for example WAVs and avoids hard discontinuities).
+                    _seg_list_cls: List[torch.Tensor] = []
+                    for _c in coi_chunks:
+                        for _b in range(_c.shape[0]):
+                            _seg_list_cls.append(_c[_b])
+                    coi_full = self._concat_with_crossfade(_seg_list_cls)
                     pred, conf = self._classify_recording(coi_full, classify_fn)
 
                     si_snr_scores.append(float(np.mean(seg_si_snr)))
@@ -1977,7 +2052,14 @@ class ValidationPipeline:
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
                         coi_chunks.append(coi_est.cpu())
-                    coi_full = torch.cat(coi_chunks, dim=0).view(-1)
+                    # Cross-fade across separator-segment boundaries before
+                    # passing to the classifier (matches the audio that gets
+                    # saved for example WAVs and avoids hard discontinuities).
+                    _seg_list_cls: List[torch.Tensor] = []
+                    for _c in coi_chunks:
+                        for _b in range(_c.shape[0]):
+                            _seg_list_cls.append(_c[_b])
+                    coi_full = self._concat_with_crossfade(_seg_list_cls)
                     pred, conf = self._classify_recording(coi_full, classify_fn)
                 else:
                     pred, conf = self._classify_recording(waveform_full, classify_fn)
@@ -2116,6 +2198,7 @@ class ValidationPipeline:
                 # Step 1: Create all mixtures for this recording
                 mixtures: List[torch.Tensor] = []
                 coi_normalized: List[torch.Tensor] = []
+                bg_normalized: List[torch.Tensor] = []
                 seg_snr_vals: List[float] = []
 
                 for seg_idx, coi_seg in enumerate(coi_segments):
@@ -2149,40 +2232,51 @@ class ValidationPipeline:
                     bg_n = self._prepare_rms_mixing_input(bg_seg)
                     snr = np.random.uniform(*snr_range)
                     mixture, actual_snr = self._create_mixture_rms(coi_seg, bg_seg, snr)
-                    
+
                     mixtures.append(mixture)
                     coi_normalized.append(coi_n)
+                    bg_normalized.append(bg_n)
                     seg_snr_vals.append(actual_snr)
 
-                    # Save first segment of chosen examples.
-                    if save_dir is not None and idx in sample_choices and seg_idx == 0:
-                        try:
-                            k = list(sample_choices).index(idx)
-                            # Peak-normalize for proper listening level
-                            coi_n_save = self._normalize_for_saving(coi_n)
-                            bg_n_save = self._normalize_for_saving(bg_n)
-                            mixture_save = self._normalize_for_saving(mixture)
+                # Save the COMPLETE recordings (all segments concatenated) for
+                # chosen examples — full clean COI, full clean BG, and full mixture.
+                if save_dir is not None and idx in sample_choices:
+                    try:
+                        k = list(sample_choices).index(idx)
+                        full_coi_n = self._concat_with_crossfade(
+                            [t.cpu() for t in coi_normalized]
+                        )
+                        full_bg_n = self._concat_with_crossfade(
+                            [t.cpu() for t in bg_normalized]
+                        )
+                        full_mixture = self._concat_with_crossfade(
+                            [t.cpu() for t in mixtures]
+                        )
 
-                            torchaudio.save(
-                                str(save_dir / f"mixture_coi_clean_{k}.wav"),
-                                coi_n_save.unsqueeze(0).cpu(),
-                                self.sample_rate,
-                            )
-                            torchaudio.save(
-                                str(save_dir / f"mixture_bg_clean_{k}.wav"),
-                                bg_n_save.unsqueeze(0).cpu(),
-                                self.sample_rate,
-                            )
-                            torchaudio.save(
-                                str(save_dir / f"mixture_created_{k}.wav"),
-                                mixture_save.unsqueeze(0).cpu(),
-                                self.sample_rate,
-                            )
-                        except Exception:
-                            print(
-                                f"Warning: failed to save mixture example for {row.filename}",
-                                file=sys.stderr,
-                            )
+                        coi_n_save = self._normalize_for_saving(full_coi_n)
+                        bg_n_save = self._normalize_for_saving(full_bg_n)
+                        mixture_save = self._normalize_for_saving(full_mixture)
+
+                        torchaudio.save(
+                            str(save_dir / f"mixture_coi_clean_{k}.wav"),
+                            coi_n_save.unsqueeze(0).cpu(),
+                            self.sample_rate,
+                        )
+                        torchaudio.save(
+                            str(save_dir / f"mixture_bg_clean_{k}.wav"),
+                            bg_n_save.unsqueeze(0).cpu(),
+                            self.sample_rate,
+                        )
+                        torchaudio.save(
+                            str(save_dir / f"mixture_created_{k}.wav"),
+                            mixture_save.unsqueeze(0).cpu(),
+                            self.sample_rate,
+                        )
+                    except Exception:
+                        print(
+                            f"Warning: failed to save mixture example for {row.filename}",
+                            file=sys.stderr,
+                        )
 
                 # Step 2: Process mixtures in batches
                 seg_si_snr: List[float] = []
@@ -2195,6 +2289,10 @@ class ValidationPipeline:
                 batch_size = 16
                 mixtures_tensor = torch.stack(mixtures)
                 coi_chunks_mix: List[torch.Tensor] = []
+                # When use_separation is True we also accumulate the FULL separator
+                # output (all sources) across every segment, so the saved example
+                # file covers the entire recording rather than just the first batch.
+                separated_chunks_full: List[torch.Tensor] = []  # each: (B, n_sources, T) or (B, T)
 
                 for i in range(0, len(mixtures_tensor), batch_size):
                     batch_mix = mixtures_tensor[i : i + batch_size]
@@ -2211,6 +2309,9 @@ class ValidationPipeline:
                             coi_est_batch = separated_batch[:, self._get_coi_head_index()]
 
                         coi_chunks_mix.append(coi_est_batch.cpu())
+                        # Keep the full separator output for end-of-recording saving.
+                        if save_dir is not None and idx in sample_choices:
+                            separated_chunks_full.append(separated_batch.detach().cpu())
 
                         # Compute signal metrics for each item in batch
                         for b_idx, s_est in enumerate(coi_est_batch):
@@ -2225,60 +2326,94 @@ class ValidationPipeline:
                             seg_rms_error.append(rms_err)
                             seg_sel_error.append(sel_err)
 
-                        # Save separated outputs for first segment of chosen examples.
-                        if save_dir is not None and idx in sample_choices and i == 0:
-                            try:
-                                k = list(sample_choices).index(idx)
-                                separated = separated_batch[0]  # First item in first batch
-                                if separated.dim() == 1:
-                                    # Peak-normalize for proper listening level
-                                    sep_save = self._normalize_for_saving(separated)
-                                    torchaudio.save(
-                                        str(
-                                            save_dir
-                                            / f"mixture_separated_coi_est_{k}.wav"
-                                        ),
-                                        sep_save.unsqueeze(0).cpu(),
-                                        self.sample_rate,
-                                    )
-                                else:
-                                    for s in range(separated.shape[0]):
-                                        # Peak-normalize each source for proper listening level
-                                        src_save = self._normalize_for_saving(
-                                            separated[s]
-                                        )
-                                        torchaudio.save(
-                                            str(
-                                                save_dir
-                                                / f"mixture_separated_src{s}_{k}.wav"
-                                            ),
-                                            src_save.unsqueeze(0).cpu(),
-                                            self.sample_rate,
-                                        )
-                                    # Also save the COI head specifically
-                                    coi_head = separated[self._get_coi_head_index()]
-                                    coi_head_save = self._normalize_for_saving(coi_head)
-                                    torchaudio.save(
-                                        str(
-                                            save_dir
-                                            / f"mixture_separated_coi_head_{k}.wav"
-                                        ),
-                                        coi_head_save.unsqueeze(0).cpu(),
-                                        self.sample_rate,
-                                    )
-                            except Exception:
-                                print(
-                                    f"Warning: failed to save separated outputs for mixture {row.filename}",
-                                    file=sys.stderr,
+                # Save COMPLETE separated outputs (concatenation across all batches
+                # and segments) for chosen examples. This covers the entire mixture
+                # recording rather than just the first segment of the first batch.
+                if (
+                    save_dir is not None
+                    and idx in sample_choices
+                    and use_separation
+                    and separated_chunks_full
+                ):
+                    try:
+                        k = list(sample_choices).index(idx)
+                        # separated_chunks_full[i] has shape (B, n_sources, T) or (B, T).
+                        # We want, per-source, the time-concatenation across all
+                        # segments of this recording (taking item 0 of each batch
+                        # would skip segments inside the batch — instead we
+                        # concatenate every segment in order).
+                        first = separated_chunks_full[0]
+                        if first.dim() == 2:
+                            # Single-source separator: each chunk is (B, T) where
+                            # the B dimension carries successive segments of this
+                            # recording. Build the per-segment list and cross-fade
+                            # across segment boundaries when concatenating.
+                            seg_list: List[torch.Tensor] = []
+                            for c in separated_chunks_full:
+                                for b in range(c.shape[0]):
+                                    seg_list.append(c[b])
+                            full_sep = self._concat_with_crossfade(seg_list)
+                            sep_save = self._normalize_for_saving(full_sep)
+                            torchaudio.save(
+                                str(save_dir / f"mixture_separated_coi_est_{k}.wav"),
+                                sep_save.unsqueeze(0).cpu(),
+                                self.sample_rate,
+                            )
+                        else:
+                            # Multi-source separator: each chunk is (B, n_sources, T).
+                            # For each source s we want one full waveform that is
+                            # the time-concatenation of every (segment) batch element.
+                            n_sources = first.shape[1]
+                            for s in range(n_sources):
+                                # Per chunk: (B, T) → list of B per-segment tensors;
+                                # cross-fade across segment boundaries.
+                                seg_list = []
+                                for c in separated_chunks_full:
+                                    for b in range(c.shape[0]):
+                                        seg_list.append(c[b, s, :])
+                                full_src = self._concat_with_crossfade(seg_list)
+                                src_save = self._normalize_for_saving(full_src)
+                                torchaudio.save(
+                                    str(save_dir / f"mixture_separated_src{s}_{k}.wav"),
+                                    src_save.unsqueeze(0).cpu(),
+                                    self.sample_rate,
                                 )
+                            # Also save the COI head specifically for convenience.
+                            coi_idx = self._get_coi_head_index()
+                            seg_list = []
+                            for c in separated_chunks_full:
+                                for b in range(c.shape[0]):
+                                    seg_list.append(c[b, coi_idx, :])
+                            full_coi_head = self._concat_with_crossfade(seg_list)
+                            coi_head_save = self._normalize_for_saving(full_coi_head)
+                            torchaudio.save(
+                                str(save_dir / f"mixture_separated_coi_head_{k}.wav"),
+                                coi_head_save.unsqueeze(0).cpu(),
+                                self.sample_rate,
+                            )
+                    except Exception:
+                        print(
+                            f"Warning: failed to save separated outputs for mixture {row.filename}",
+                            file=sys.stderr,
+                        )
 
-                # Classify the full reconstructed waveform at classifier segment length
+                # Classify the full reconstructed waveform at classifier segment length.
+                # We cross-fade across separator-segment boundaries so the classifier
+                # sees the same audio that gets saved to disk for the example WAV
+                # (no hard discontinuities every separator segment_samples).
                 if use_separation:
-                    coi_full_mix = torch.cat(coi_chunks_mix, dim=0).view(-1)
+                    seg_list_cls: List[torch.Tensor] = []
+                    for c in coi_chunks_mix:
+                        # c is (B, T) per batch; unroll batch dim to per-segment.
+                        for b in range(c.shape[0]):
+                            seg_list_cls.append(c[b])
+                    coi_full_mix = self._concat_with_crossfade(seg_list_cls)
                     pred, conf = self._classify_recording(coi_full_mix, classify_fn)
                 else:
-                    # No separation: classify the full mixture waveform directly
-                    mixture_full = torch.cat([m.cpu() for m in mixtures], dim=0).view(-1)
+                    # No separation: classify the full mixture waveform directly.
+                    mixture_full = self._concat_with_crossfade(
+                        [m.cpu() for m in mixtures]
+                    )
                     pred, conf = self._classify_recording(mixture_full, classify_fn)
 
                 actual_snrs.append(float(np.mean(seg_snr_vals)))
@@ -2331,7 +2466,14 @@ class ValidationPipeline:
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
                         coi_chunks.append(coi_est.cpu())
-                    coi_full = torch.cat(coi_chunks, dim=0).view(-1)
+                    # Cross-fade across separator-segment boundaries before
+                    # passing to the classifier (matches the audio that gets
+                    # saved for example WAVs and avoids hard discontinuities).
+                    _seg_list_cls: List[torch.Tensor] = []
+                    for _c in coi_chunks:
+                        for _b in range(_c.shape[0]):
+                            _seg_list_cls.append(_c[_b])
+                    coi_full = self._concat_with_crossfade(_seg_list_cls)
                     pred, conf = self._classify_recording(coi_full, classify_fn)
                 else:
                     pred, conf = self._classify_recording(waveform_full, classify_fn)
