@@ -1,7 +1,7 @@
 """
 Bird validation — TUSS multi-class separator (bird head), both bird classifiers.
 
-Tests the multi_coi_29_04 checkpoint with tuss_coi_prompt="birds" and:
+Tests the multi_coi_11_05 checkpoint with tuss_coi_prompt="birds" and:
 - bird_mae (primary classifier)
 - audioprotopnet (secondary classifier)
 
@@ -46,7 +46,7 @@ from src.validation_functions.test_pipeline import ValidationPipeline
 BASE_PATH = str(PROJECT_ROOT.parent / "datasets")
 
 SEP_CHECKPOINT = str(
-    PROJECT_ROOT / "src/models/tuss/checkpoints/multi_coi_29_04/best_model.pt"
+    PROJECT_ROOT / "src/models/tuss/checkpoints/multi_coi_11_05/best_model.pt"
 )
 
 # Bird single-class dataset CSV (defines the bird/airplane split)
@@ -68,7 +68,7 @@ def main():
     print("=" * 70)
     print("BIRD VALIDATION — TUSS MULTI-CLASS (bird head), BOTH CLASSIFIERS")
     print("=" * 70)
-    print(f"Separator: TUSS multi_coi_29_04 — bird head (prompt='birds')")
+    print(f"Separator: TUSS multi_coi_11_05 — bird head (prompt='birds')")
     print(f"Primary Classifier: {PRIMARY_CLASSIFIER}")
     print(f"Secondary Classifier: audioprotopnet")
     print(f"Dataset: {DATA_CSV}")
@@ -123,6 +123,31 @@ def main():
             if metrics.mean_si_snr is not None:
                 snri = f"{metrics.mean_si_snri:+.2f}" if metrics.mean_si_snri is not None else "n/a"
                 print(f"    SI-SNR={metrics.mean_si_snr:+.2f} dB  SI-SNRi={snri} dB")
+
+    # Risoux independent test set
+    print("\n" + "=" * 70)
+    print("RISOUX INDEPENDENT TEST SET")
+    print("=" * 70)
+    try:
+        risoux_results = pipeline.run(
+            split="test",
+            only_dataset="risoux_test",
+            snr_range=SNR_RANGE,
+            data_csv=DATA_CSV,
+            output_dir=OUTPUT_DIR + "_risoux",
+            seed=SEED,
+            save_examples_dir=SAVE_EXAMPLES_DIR + "_risoux",
+            save_n_examples=5,
+            skip_clean_tests=True,
+            save_false_negatives=True,
+            balance_classes=False,
+        )
+        for cls_name, cls_results in risoux_results.items():
+            print(f"\nClassifier: {cls_name}")
+            for test_name, metrics in cls_results.items():
+                print(f"  {test_name}: F1={metrics.f1_score:.4f}")
+    except Exception as e:
+        print(f"No Risoux data or error: {e}")
 
     print(f"\nResults saved to: {OUTPUT_DIR}")
     print("=" * 70)

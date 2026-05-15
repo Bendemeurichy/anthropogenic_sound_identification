@@ -85,6 +85,17 @@ class AudioClassifier(Protocol):
         """
         ...
 
+    @property
+    def segment_samples(self) -> Optional[int]:
+        """Number of samples per segment at self.sample_rate, or None if the
+        classifier accepts variable-length input and handles sizing internally.
+
+        When this returns a non-None value the validation pipeline will re-split
+        separated/raw audio into chunks of this length before classification and
+        aggregate predictions with OR (positive if any chunk is positive).
+        """
+        return None
+
 
 def create_classifier(
     classifier_type: str,

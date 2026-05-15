@@ -1,7 +1,7 @@
 """
 Airplane validation — TUSS multi-class separator (airplane head), both airplane classifiers.
 
-Tests the multi_coi_29_04 checkpoint with tuss_coi_prompt="airplane" and:
+Tests the multi_coi_11_05 checkpoint with tuss_coi_prompt="airplane" and:
 - plane (primary classifier)
 - ast_finetuned (secondary classifier)
 
@@ -46,7 +46,7 @@ from src.validation_functions.test_pipeline import ValidationPipeline
 BASE_PATH = str(PROJECT_ROOT.parent / "datasets")
 
 SEP_CHECKPOINT = str(
-    PROJECT_ROOT / "src/models/tuss/checkpoints/multi_coi_29_04/best_model.pt"
+    PROJECT_ROOT / "src/models/tuss/checkpoints/multi_coi_11_05/best_model.pt"
 )
 
 DATA_CSV = str(
@@ -67,7 +67,7 @@ def main():
     print("=" * 70)
     print("AIRPLANE VALIDATION — TUSS MULTI-CLASS (airplane head), BOTH CLASSIFIERS")
     print("=" * 70)
-    print(f"Separator: TUSS multi_coi_29_04 — airplane head")
+    print(f"Separator: TUSS multi-COI ({Path(SEP_CHECKPOINT).parent.name}) — airplane head")
     print(f"Primary Classifier: {PRIMARY_CLASSIFIER}")
     print(f"Secondary Classifier: ast_finetuned")
     print(f"Dataset: {DATA_CSV}")

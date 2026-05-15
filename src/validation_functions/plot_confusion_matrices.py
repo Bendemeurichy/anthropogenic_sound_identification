@@ -1,831 +1,290 @@
 """
-Script to visualize confusion matrices from validation results using Plotly.
+plot_confusion_matrices.py — Per-run confusion matrix grids and LaTeX metrics
+tables for the dissertation.
+
+For every ``results_*.json`` discovered under ``final_results/<run>/<classifier>/``
+this script emits, into a sibling ``plots/`` directory:
+
+  * ``confusion_matrices.png`` — a 2×2 grid containing one binary confusion
+    matrix per operating condition (``clean_cls``, ``mix_cls``,
+    ``clean_sep_cls``, ``mix_sep_cls``).  All four heatmaps share a single
+    colour scale so cell darkness is directly comparable across panels.
+  * ``metrics.tex`` — booktabs tabular environment summarising the
+    classification metrics (and signal metrics where applicable) for every
+    condition.  Designed to be ``\\input``-ed from the chapter.
+
+Top-misclassified bar charts and rasterised metric tables produced by
+previous revisions have been removed: confusion-matrix counts plus the
+LaTeX table cover every diagnostic the chapter actually cites.
 """
 
+from __future__ import annotations
+
 import json
-import sys
 from pathlib import Path
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# Add path for label parsing imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from src.label_loading.coi_labels import _extract_label_atoms, normalize_label
+# ── Constants ───────────────────────────────────────────────────────────────
+SCRIPT_DIR = Path(__file__).parent
+FINAL_RESULTS_DIR = SCRIPT_DIR / "final_results"
+
+CONDITION_ORDER = ["clean_cls", "mix_cls", "clean_sep_cls", "mix_sep_cls"]
+CONDITION_LABELS = {
+    "clean_cls":     "Clean COI · classifier only",
+    "mix_cls":       "Mixture · classifier only",
+    "clean_sep_cls": "Clean COI · separation + classifier",
+    "mix_sep_cls":   "Mixture · separation + classifier",
+}
+
+CLS_DISPLAY = {
+    "pann_finetuned":  "PANN (fine-tuned)",
+    "ast_finetuned":   "AST (fine-tuned)",
+    "bird_mae":        "BirdMAE",
+    "audioprotopnet":  "AudioProtoPNet",
+}
+
+PNG_SCALE = 2
+TEMPLATE = "plotly_white"
+FONT = dict(family="Times New Roman, serif", size=12, color="#1a1a1a")
 
 
-def load_results(results_path: str | Path) -> dict:
-    """Load validation results from JSON file."""
-    with open(results_path, "r") as f:
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _cls_label(name: str) -> str:
+    return CLS_DISPLAY.get(name, name.replace("_", " "))
+
+
+def _load(path: Path) -> dict:
+    with open(path) as f:
         return json.load(f)
 
 
-def recompute_atomic_counts(raw_counts: dict) -> dict:
-    """
-    Recompute atomic label counts from raw label counts.
+def _separator_label(results: dict) -> str:
+    """Best-effort, human-readable separator name from checkpoint paths."""
+    sep = results.get("checkpoint_paths", {}).get("separator", "") or ""
+    s = sep.lower()
+    if "clapsep" in s:        return "CLAPSep"
+    if "sudormrf" in s:       return "SuDoRM-RF"
+    if "tuss" in s and "multi" in s:  return "TUSS (multi)"
+    if "tuss" in s and "single" in s: return "TUSS (single)"
+    if "tuss" in s:           return "TUSS"
+    return "Separator"
 
-    This is needed because older result files may have corrupted atomic counts
-    where individual characters like '[', ',', ']' were counted instead of
-    actual label atoms.
 
-    Args:
-        raw_counts: Dictionary mapping raw labels to their counts
+def _classifier_label_from_path(results: dict, fallback: str) -> str:
+    clf = results.get("classifier") or results.get("checkpoint_paths", {}).get("classifier", "")
+    if isinstance(clf, str):
+        for key, disp in CLS_DISPLAY.items():
+            if key in clf.lower():
+                return disp
+    return _cls_label(fallback)
 
-    Returns:
-        Dictionary mapping atomic labels to their counts
-    """
-    atomic_counts = {}
 
-    for raw_label, count in raw_counts.items():
-        try:
-            atoms = _extract_label_atoms(raw_label)
-            # Normalize each atom to ensure consistency
-            normalized_atoms = [normalize_label(atom) for atom in atoms]
-            for atom in normalized_atoms:
-                if atom:  # Skip empty strings
-                    atomic_counts[atom] = atomic_counts.get(atom, 0) + count
-        except Exception as e:
-            # If parsing fails, skip this label
-            print(f"Warning: Failed to parse label '{raw_label[:50]}...': {e}")
+def _fmt(v, spec: str = ".3f", dash: str = "—") -> str:
+    if v is None:
+        return dash
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return dash
+    if np.isnan(f):
+        return dash
+    return f"{f:{spec}}"
+
+
+# ── Confusion matrix figure ─────────────────────────────────────────────────
+
+def build_cm_figure(results: dict, title: str) -> go.Figure:
+    conditions = [c for c in CONDITION_ORDER if isinstance(results.get(c), dict)
+                  and "confusion_matrix" in results[c]]
+    if not conditions:
+        raise ValueError("No condition contains a confusion_matrix")
+
+    # Pad to 2x2 layout regardless of how many conditions exist
+    grid = conditions + [None] * (4 - len(conditions))
+    grid = grid[:4]
+
+    titles = [CONDITION_LABELS.get(c, c) if c else "" for c in grid]
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=titles,
+        horizontal_spacing=0.18,
+        vertical_spacing=0.20,
+    )
+
+    # Shared colour scale for visual comparability
+    z_max = max(
+        max(results[c]["confusion_matrix"].values())
+        for c in conditions
+    )
+
+    for idx, cond in enumerate(grid):
+        if cond is None:
             continue
-
-    return atomic_counts
-
-
-def create_confusion_matrix_figure(
-    cm_data: dict, title: str, show_percentages: bool = True, model_info: dict = None
-) -> go.Figure:
-    """
-    Create a Plotly confusion matrix heatmap.
-
-    The figure now contains only the heatmap itself; any auxiliary table showing
-    misclassification counts has been removed.
-
-    Args:
-        cm_data: Dictionary with tp, tn, fp, fn values
-        title: Title for the plot
-        show_percentages: Whether to show percentages alongside counts
-
-    Returns:
-        Plotly Figure object
-    """
-    # Extract values
-    tp = cm_data["tp"]
-    tn = cm_data["tn"]
-    fp = cm_data["fp"]
-    fn = cm_data["fn"]
-
-    # Create confusion matrix array
-    # Format: [[TN, FP], [FN, TP]]
-    cm = np.array([[tn, fp], [fn, tp]])
-    total = cm.sum()
-
-    # Create heatmap text annotations
-    if show_percentages:
+        r, c = idx // 2 + 1, idx % 2 + 1
+        cm = results[cond]["confusion_matrix"]
+        tp, tn, fp, fn = cm["tp"], cm["tn"], cm["fp"], cm["fn"]
+        z = np.array([[tn, fp], [fn, tp]])
+        total = z.sum() or 1
         text = [
-            [
-                f"TN: {tn}<br>({tn / total * 100:.1f}%)",
-                f"FP: {fp}<br>({fp / total * 100:.1f}%)",
-            ],
-            [
-                f"FN: {fn}<br>({fn / total * 100:.1f}%)",
-                f"TP: {tp}<br>({tp / total * 100:.1f}%)",
-            ],
+            [f"TN<br>{tn}<br>({tn / total:.1%})",
+             f"FP<br>{fp}<br>({fp / total:.1%})"],
+            [f"FN<br>{fn}<br>({fn / total:.1%})",
+             f"TP<br>{tp}<br>({tp / total:.1%})"],
         ]
-    else:
-        text = [[f"TN: {tn}", f"FP: {fp}"], [f"FN: {fn}", f"TP: {tp}"]]
-
-    # the small misclassification‑count table is no longer part of the figure,
-    # so we drop the previous logic that assembled labels and counts.
-
-    # construct figure containing only the heatmap
-    fig = go.Figure()
-
-    # add heatmap trace
-    heatmap = go.Heatmap(
-        z=cm,
-        x=["Predicted Negative", "Predicted Positive"],
-        y=["Actual Negative", "Actual Positive"],
-        text=text,
-        texttemplate="%{text}",
-        textfont={"size": 14},
-        colorscale="Blues",
-        showscale=True,
-        hovertemplate="Actual: %{y}<br>Predicted: %{x}<br>Count: %{z}<extra></extra>",
-    )
-    fig.add_trace(heatmap)
-
-    full_title = title
-    if model_info:
-        separator = model_info.get("separator", "")
-        classifier = model_info.get("classifier", "")
-        if separator and classifier:
-            full_title += f" ({separator} + {classifier})"
-
-    fig.update_layout(
-        title=dict(text=full_title, font=dict(size=16)),
-        width=700,
-        height=450,
-    )
-
-    # update only the heatmap axes
-    fig.update_xaxes(title="Predicted Label", side="bottom")
-    fig.update_yaxes(title="Actual Label", autorange="reversed")
-
-    return fig
-
-
-def create_combined_figure(results: dict, model_info: dict = None) -> go.Figure:
-    """
-    Create a combined figure with all confusion matrices, ensuring consistent scale.
-
-    Misclassification counts are not shown; previous versions added text
-    annotations under each subplot describing false positives/negatives, but
-    those have been removed.
-
-    Args:
-        results: Dictionary containing all test results
-        model_info: Optional dictionary with model information
-
-    Returns:
-        Plotly Figure object with subplots
-    """
-    # Filter to only include test results (exclude checkpoint_paths, etc.)
-    test_names = [
-        k
-        for k in results.keys()
-        if isinstance(results[k], dict) and "confusion_matrix" in results[k]
-    ]
-    n_tests = len(test_names)
-
-    # Calculate grid dimensions
-    n_cols = 2
-    n_rows = (n_tests + 1) // 2
-
-    # Create subplots
-    fig = make_subplots(
-        rows=n_rows,
-        cols=n_cols,
-        subplot_titles=[name.replace("_", " ").title() for name in test_names],
-        horizontal_spacing=0.15,
-        vertical_spacing=0.15,
-    )
-
-    # Determine consistent z-axis range across all confusion matrices
-    max_value = max(
-        max(data["confusion_matrix"].values())
-        for data in results.values()
-        if isinstance(data, dict) and "confusion_matrix" in data
-    )
-
-    for idx, name in enumerate(test_names):
-        row = idx // n_cols + 1
-        col = idx % n_cols + 1
-
-        data = results[name]
-        cm_data = data["confusion_matrix"]
-        tp = cm_data["tp"]
-        tn = cm_data["tn"]
-        fp = cm_data["fp"]
-        fn = cm_data["fn"]
-
-        cm = np.array([[tn, fp], [fn, tp]])
-        total = cm.sum()
-
-        text = [
-            [
-                f"TN: {tn}<br>({tn / total * 100:.1f}%)",
-                f"FP: {fp}<br>({fp / total * 100:.1f}%)",
-            ],
-            [
-                f"FN: {fn}<br>({fn / total * 100:.1f}%)",
-                f"TP: {tp}<br>({tp / total * 100:.1f}%)",
-            ],
-        ]
-
-        heatmap = go.Heatmap(
-            z=cm,
-            x=["Pred Neg", "Pred Pos"],
-            y=["Act Neg", "Act Pos"],
-            text=text,
-            texttemplate="%{text}",
-            textfont={"size": 11},
-            colorscale="Blues",
-            zmin=0,
-            zmax=max_value,  # Ensure consistent scale
-            showscale=idx == 0,  # Only show colorscale for first plot
-            hovertemplate="Actual: %{y}<br>Predicted: %{x}<br>Count: %{z}<extra></extra>",
+        fig.add_trace(
+            go.Heatmap(
+                z=z,
+                x=["Pred. negative", "Pred. positive"],
+                y=["True negative",  "True positive"],
+                text=text, texttemplate="%{text}",
+                textfont=dict(size=11),
+                colorscale="Blues",
+                zmin=0, zmax=z_max,
+                showscale=(idx == 0),
+                hovertemplate="True: %{y}<br>Pred: %{x}<br>n = %{z}<extra></extra>",
+            ),
+            row=r, col=c,
         )
-
-        fig.add_trace(heatmap, row=row, col=col)
-
-        # Update axes for this subplot
-        fig.update_xaxes(title_text="Predicted", row=row, col=col)
-        fig.update_yaxes(title_text="Actual", autorange="reversed", row=row, col=col)
-
-        # previously the function added a text annotation below each subplot
-        # listing misclassification counts.  Those annotations have been removed
-        # so the heatmap alone is shown.
-
-    title_text = "Confusion Matrices - Classifying Planes"
-    if model_info:
-        separator = model_info.get("separator", "")
-        classifier = model_info.get("classifier", "")
-        if separator and classifier:
-            title_text += f" ({separator} + {classifier})"
+        fig.update_xaxes(side="bottom", row=r, col=c)
+        fig.update_yaxes(autorange="reversed", row=r, col=c)
 
     fig.update_layout(
-        title=dict(text=title_text, font=dict(size=20)),
-        width=900,
-        height=800,
-        margin=dict(b=100),
+        title=dict(text=f"<b>{title}</b>", font=dict(size=15)),
+        template=TEMPLATE, font=FONT,
+        width=900, height=780,
+        margin=dict(l=70, r=40, t=80, b=50),
     )
-
     return fig
 
 
-def create_top_misclassified_figure(
-    results: dict, model_info: dict = None
-) -> go.Figure:
-    """
-    Create a bidirectional (diverging) horizontal bar chart showing the top
-    misclassified raw labels for each test.
+# ── LaTeX metrics table ─────────────────────────────────────────────────────
 
-    For each label the chart shows:
-      - False Positives (FP) extending to the RIGHT  — background clip
-        incorrectly predicted as COI.
-      - False Negatives (FN) extending to the LEFT   — COI clip missed by
-        the model.
-
-    Labels are ranked by their total error count (FP + FN) and the top 10
-    are shown per subplot.  Falls back to the legacy ``misclassified_raw_counts``
-    field (single-sided) when the new ``fp_raw_counts`` / ``fn_raw_counts``
-    keys are absent.
-
-    Args:
-        results: Dictionary containing all test results
-        model_info: Optional dictionary with model information
-
-    Returns:
-        Plotly Figure object with subplots.
-    """
-    # Filter to only include test results (exclude checkpoint_paths, etc.)
-    test_names = [
-        k
-        for k in results.keys()
-        if isinstance(results[k], dict) and "confusion_matrix" in results[k]
+def write_metrics_table(
+    results: dict, out_path: Path, separator: str, classifier: str,
+    coi: Optional[str] = None,
+) -> None:
+    metric_keys = [
+        ("accuracy",          "Accuracy"),
+        ("precision",         "Precision"),
+        ("recall",            "Recall"),
+        ("f1_score",          "F1"),
+        ("specificity",       "Specificity"),
+        ("balanced_accuracy", "Bal.Acc."),
+        ("mcc",               "MCC"),
     ]
-    n_tests = len(test_names)
-
-    # Calculate grid dimensions
-    n_cols = 2
-    n_rows = (n_tests + 1) // 2
-
-    fig = make_subplots(
-        rows=n_rows,
-        cols=n_cols,
-        subplot_titles=[name.replace("_", " ").title() for name in test_names],
-        horizontal_spacing=0.30,
-        vertical_spacing=0.18,
-    )
-
-    # Track whether any subplot has a legend entry so we add it only once.
-    fp_legend_added = False
-    fn_legend_added = False
-
-    for idx, name in enumerate(test_names):
-        row = idx // n_cols + 1
-        col = idx % n_cols + 1
-
-        data = results[name]
-
-        # Check if atomic counts look corrupted (contain punctuation as keys)
-        fp_atomic = data.get("fp_raw_atomic_counts", {})
-        fn_atomic = data.get("fn_raw_atomic_counts", {})
-
-        # If we see suspicious keys like '[', ',', ']' in atomic counts, recompute them
-        suspicious_keys = {"[", ",", "]", "(", ")", "a", "r", "y"}
-        has_suspicious = any(k in suspicious_keys for k in list(fp_atomic.keys())[:10])
-
-        if has_suspicious or not fp_atomic:
-            # Recompute atomic counts from raw counts
-            fp_raw_counts = data.get("fp_raw_counts", {})
-            fn_raw_counts = data.get("fn_raw_counts", {})
-            fp_raw = recompute_atomic_counts(fp_raw_counts) if fp_raw_counts else {}
-            fn_raw = recompute_atomic_counts(fn_raw_counts) if fn_raw_counts else {}
-        else:
-            # Use existing atomic counts
-            fp_raw = fp_atomic
-            fn_raw = fn_atomic
-
-        if fp_raw or fn_raw:
-            # Bidirectional mode — use the new split counts.
-            all_keys = set(fp_raw) | set(fn_raw)
-            # Rank by total error, take top 10.
-            ranked = sorted(
-                all_keys,
-                key=lambda k: fp_raw.get(k, 0) + fn_raw.get(k, 0),
-                reverse=True,
-            )[:10]
-            # Reverse so the highest-error label sits at the top of the chart.
-            ranked = ranked[::-1]
-
-            fp_vals = [fp_raw.get(k, 0) for k in ranked]
-            fn_vals = [-fn_raw.get(k, 0) for k in ranked]  # negative → left side
-
-            fig.add_trace(
-                go.Bar(
-                    x=fp_vals,
-                    y=ranked,
-                    orientation="h",
-                    name="False Positive (BG → COI)",
-                    marker_color="crimson",
-                    text=[str(v) for v in fp_vals],
-                    textposition="outside",
-                    showlegend=not fp_legend_added,
-                    legendgroup="fp",
-                    hovertemplate="<b>%{y}</b><br>FP: %{x}<extra></extra>",
-                ),
-                row=row,
-                col=col,
-            )
-            fp_legend_added = True
-
-            fig.add_trace(
-                go.Bar(
-                    x=fn_vals,
-                    y=ranked,
-                    orientation="h",
-                    name="False Negative (COI → BG)",
-                    marker_color="steelblue",
-                    text=[str(abs(v)) for v in fn_vals],
-                    textposition="outside",
-                    showlegend=not fn_legend_added,
-                    legendgroup="fn",
-                    hovertemplate="<b>%{y}</b><br>FN: %{customdata}<extra></extra>",
-                    customdata=[abs(v) for v in fn_vals],
-                ),
-                row=row,
-                col=col,
-            )
-            fn_legend_added = True
-
-            # Zero-line for visual reference.  add_vline does not accept
-            # row/col; use add_shape instead, which does.
-            fig.add_shape(
-                type="line",
-                x0=0,
-                x1=0,
-                y0=0,
-                y1=1,
-                yref="y domain",
-                line=dict(width=1, color="black"),
-                row=row,
-                col=col,
-            )
-            fig.update_xaxes(title_text="← FN  |  FP →", row=row, col=col)
-
-        else:
-            # Legacy fallback: single-sided chart using atomic counts when present.
-            mis_raw = data.get(
-                "misclassified_raw_atomic_counts",
-                data.get("misclassified_raw_counts", {}),
-            )
-            if mis_raw:
-                items = sorted(mis_raw.items(), key=lambda kv: kv[1], reverse=True)[:10]
-                labels = [str(k) for k, _ in reversed(items)]
-                counts = [v for _, v in reversed(items)]
-            else:
-                labels = []
-                counts = []
-
-            fig.add_trace(
-                go.Bar(
-                    x=counts,
-                    y=labels,
-                    orientation="h",
-                    marker_color="darkorange",
-                    text=counts,
-                    textposition="auto",
-                    showlegend=False,
-                ),
-                row=row,
-                col=col,
-            )
-            fig.update_xaxes(title_text="Count", row=row, col=col)
-
-    title_text = "Top misclassified labels (FP / FN)"
-    if model_info:
-        separator = model_info.get("separator", "")
-        classifier = model_info.get("classifier", "")
-        if separator and classifier:
-            title_text += f" ({separator} + {classifier})"
-
-    fig.update_layout(
-        title=dict(text=title_text, font=dict(size=20)),
-        barmode="overlay",
-        width=1200,
-        height=max(400 * n_rows, 600),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=-0.12,
-            xanchor="center",
-            x=0.5,
-        ),
-    )
-
-    return fig
-
-
-def create_metrics_table(results: dict, model_info: dict = None) -> go.Figure:
-    """
-    Create a table showing all metrics for each test.
-
-    Args:
-        results: Dictionary containing all test results
-        model_info: Optional dictionary with model information
-
-    Returns:
-        Plotly Figure object with table
-    """
-    # Filter to only include test results
-    test_names = [
-        k
-        for k in results.keys()
-        if isinstance(results[k], dict) and "confusion_matrix" in results[k]
+    sig_keys = [
+        ("mean_si_snr_db",   "SI-SNR (dB)"),
+        ("mean_si_snri_db",  "SI-SNRi (dB)"),
+        ("mean_sdr_db",      "SDR (dB)"),
+        ("mean_rms_error_db","RMS err (dB)"),
+        ("mean_sel_error_db","SEL err (dB)"),
     ]
 
-    # Metrics to display
-    metrics = [
-        "accuracy",
-        "precision",
-        "recall",
-        "f1_score",
-        "specificity",
-        "balanced_accuracy",
-        "mcc",
-    ]
-
-    # Signal metrics for separation tests
-    signal_metrics = [
-        "mean_si_snr_db",
-        "mean_sdr_db",
-        "mean_si_sdr_db",
-    ]
-
-    # Prepare table data
-    rows = []
-    for name in test_names:
-        data = results[name]
-        row = [name.replace("_", " ").title()]
-        for metric in metrics:
-            value = data.get(metric, 0)
-            row.append(f"{value:.4f}")
-
-        # Add signal metrics if they exist (for separation runs)
-        if "signal_metrics" in data:
-            signal_data = data["signal_metrics"]
-            for sig_metric in signal_metrics:
-                value = signal_data.get(sig_metric, 0)
-                row.append(f"{value:.2f}")
-        else:
-            # Add empty cells for non-separation runs
-            for _ in signal_metrics:
-                row.append("-")
-
+    columns = ["Condition"] + [m[1] for m in metric_keys] + [s[1] for s in sig_keys]
+    rows: List[List[str]] = []
+    for cond in CONDITION_ORDER:
+        d = results.get(cond)
+        if not isinstance(d, dict) or "confusion_matrix" not in d:
+            continue
+        row = [CONDITION_LABELS[cond]]
+        for k, _ in metric_keys:
+            row.append(_fmt(d.get(k)))
+        sig = d.get("signal_metrics") or {}
+        for k, _ in sig_keys:
+            row.append(_fmt(sig.get(k), ".2f") if sig else "—")
         rows.append(row)
 
-    # Build header
-    header_values = ["Test"] + [m.replace("_", " ").title() for m in metrics]
-    header_values += [m.replace("_", " ").title() for m in signal_metrics]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    align = "l" + "r" * (len(columns) - 1)
+    label = (f"tab:cm-{separator}-{classifier}-{coi}".lower()
+             .replace(" ", "").replace("(", "").replace(")", "")
+             .replace("·", "").replace("--", "-"))
+    caption = (f"Per-condition classification and signal metrics — "
+               f"{separator} + {classifier}"
+               + (f" ({coi})" if coi else "") + ".")
 
-    # Create cell fill colors: different color for signal metrics columns
-    num_metric_cols = len(metrics) + 1  # +1 for test name
-    num_signal_cols = len(signal_metrics)
-
-    cell_fill_colors = []
-    for row_idx in range(len(rows)):
-        row_colors = ["lavender"] * num_metric_cols + ["lightgreen"] * num_signal_cols
-        cell_fill_colors.append(row_colors)
-
-    # Transpose for table format
-    cell_fill_transposed = list(zip(*cell_fill_colors)) if cell_fill_colors else []
-
-    # Create table
-    fig = go.Figure(
-        data=[
-            go.Table(
-                header=dict(
-                    values=header_values,
-                    fill_color=["paleturquoise"] * num_metric_cols
-                    + ["lightseagreen"] * num_signal_cols,
-                    align="center",
-                    font=dict(color="black", size=11),
-                ),
-                cells=dict(
-                    values=(
-                        list(zip(*rows))
-                        if rows
-                        else [
-                            [],
-                        ]
-                        * len(header_values)
-                    ),
-                    fill_color=cell_fill_transposed,
-                    align="center",
-                    font=dict(color="black", size=10),
-                ),
-            )
-        ]
-    )
-
-    title_text = "Performance Metrics by Test Type"
-    if model_info:
-        separator = model_info.get("separator", "")
-        classifier = model_info.get("classifier", "")
-        if separator and classifier:
-            title_text += f" ({separator} + {classifier})"
-
-    fig.update_layout(
-        title=dict(text=title_text, font=dict(size=16)),
-        height=300,
-        width=1600,
-    )
-
-    return fig
-
-
-def create_metrics_bar_chart(results: dict, model_info: dict = None) -> go.Figure:
-    """
-    Create a grouped bar chart showing key metrics across all tests.
-
-    Args:
-        results: Dictionary containing all test results
-        model_info: Optional dictionary with model information
-
-    Returns:
-        Plotly Figure object with grouped bar chart
-    """
-    # Filter to only include test results
-    test_names = [
-        k
-        for k in results.keys()
-        if isinstance(results[k], dict) and "confusion_matrix" in results[k]
+    lines = [
+        "% Auto-generated by plot_confusion_matrices.py — do not edit.",
+        "\\begin{table}[htbp]",
+        "  \\centering",
+        "  \\small",
+        f"  \\caption{{{caption}}}",
+        f"  \\label{{{label}}}",
+        f"  \\begin{{tabular}}{{{align}}}",
+        "    \\toprule",
+        "    " + " & ".join(columns) + r" \\",
+        "    \\midrule",
     ]
-
-    # Important metrics to display
-    important_metrics = ["accuracy", "precision", "recall", "f1_score"]
-    metrics_labels = [m.replace("_", " ").title() for m in important_metrics]
-
-    # Prepare data
-    test_labels = [name.replace("_", " ").title() for name in test_names]
-
-    # Create subplots for each metric
-    n_metrics = len(important_metrics)
-    n_rows = 2
-    n_cols = 2
-
-    fig = make_subplots(
-        rows=n_rows,
-        cols=n_cols,
-        subplot_titles=metrics_labels,
-        horizontal_spacing=0.12,
-        vertical_spacing=0.15,
-    )
-
-    colors = ["royalblue", "orange", "green", "red"]
-
-    for idx, metric in enumerate(important_metrics):
-        row = idx // n_cols + 1
-        col = idx % n_cols + 1
-
-        # Get values for this metric across all tests
-        values = []
-        for name in test_names:
-            value = results[name].get(metric, 0)
-            values.append(value)
-
-        # Add bar trace
-        fig.add_trace(
-            go.Bar(
-                x=test_labels,
-                y=values,
-                name=metric,
-                marker_color=colors[idx],
-                text=[f"{v:.3f}" for v in values],
-                textposition="outside",
-                showlegend=False,
-                hovertemplate="<b>%{x}</b><br>"
-                + metric.replace("_", " ").title()
-                + ": %{y:.4f}<extra></extra>",
-            ),
-            row=row,
-            col=col,
-        )
-
-        # Update axes
-        fig.update_xaxes(tickangle=-45, row=row, col=col)
-        fig.update_yaxes(range=[0, 1], row=row, col=col)
-
-    title_text = "Key Metrics Across All Tests"
-    if model_info:
-        separator = model_info.get("separator", "")
-        classifier = model_info.get("classifier", "")
-        if separator and classifier:
-            title_text += f" ({separator} + {classifier})"
-
-    fig.update_layout(
-        title=dict(text=title_text, font=dict(size=18)),
-        width=1000,
-        height=700,
-        showlegend=False,
-    )
-
-    return fig
+    for row in rows:
+        lines.append("    " + " & ".join(row) + r" \\")
+    lines += [
+        "    \\bottomrule",
+        "  \\end{tabular}",
+        "\\end{table}",
+    ]
+    out_path.write_text("\n".join(lines) + "\n")
 
 
-def extract_model_info(results: dict) -> dict:
-    """
-    Extract model names from checkpoint paths.
+# ── Driver ──────────────────────────────────────────────────────────────────
 
-    Args:
-        results: Dictionary containing all test results and checkpoint_paths
-
-    Returns:
-        Dictionary with model information
-    """
-    checkpoint_paths = results.get("checkpoint_paths", {})
-
-    model_info = {}
-
-    # Extract separator model name
-    sep_path = checkpoint_paths.get("separator", "")
-    if sep_path:
-        # Normalize path separators
-        normalized_path = sep_path.replace("\\", "/")
-        path_parts = normalized_path.split("/")
-
-        # Look for known model names
-        if "CLAPSep" in sep_path:
-            model_info["separator"] = "CLAPSep"
-        elif "sudormrf" in normalized_path.lower():
-            # Extract timestamp for version differentiation
-            timestamp = None
-            for i, part in enumerate(path_parts):
-                if part.lower() == "sudormrf" and i + 2 < len(path_parts):
-                    # Check if next directory after sudormrf/checkpoints is a timestamp
-                    potential_timestamp = path_parts[i + 2]
-                    if (
-                        potential_timestamp
-                        and len(potential_timestamp) == 15
-                        and potential_timestamp.replace("_", "").isdigit()
-                    ):
-                        timestamp = potential_timestamp
-                        break
-
-            model_info["separator"] = (
-                f"SudoRMRF_{timestamp}" if timestamp else "SudoRMRF"
-            )
-        else:
-            # Fallback: find the first directory in models or similar pattern
-            # Try to find a model name in the path
-            for i, part in enumerate(path_parts):
-                if part.lower() in ["models"]:
-                    # Next part should be the model name
-                    if i + 1 < len(path_parts):
-                        model_info["separator"] = path_parts[i + 1].title()
-                    break
-
-            # If still not found, use last meaningful directory before checkpoint/checkpoints
-            if "separator" not in model_info:
-                for i, part in enumerate(path_parts):
-                    if part.lower() in ["checkpoint", "checkpoints"]:
-                        if i > 0:
-                            model_info["separator"] = path_parts[i - 1].title()
-                        break
-
-    # Extract classifier model name
-    clf_path = checkpoint_paths.get("classifier", "")
-    if clf_path:
-        # Extract model name from filename
-        if (
-            "plane_classifier" in clf_path.lower()
-            or "plane_clasifier" in clf_path.lower()
-        ):
-            model_info["classifier"] = "CNN"
-        else:
-            # Fallback: extract from directory name before checkpoints
-            normalized_path = clf_path.replace("\\", "/")
-            path_parts = normalized_path.split("/")
-            for i, part in enumerate(path_parts):
-                if part.lower() in ["checkpoint", "checkpoints"]:
-                    if i > 0:
-                        model_info["classifier"] = path_parts[i - 1].title()
-                    break
-
-    return model_info
-
-
-def process_results_file(results_file: Path, output_base_dir: Path) -> None:
-    """Process a single results JSON file and save all plots."""
-    results = load_results(results_file)
-
-    print(f"\nLoaded: {results_file.relative_to(results_file.parent.parent.parent)}")
-    print(f"  Entries: {list(results.keys())}")
-
-    # Extract model information
-    model_info = extract_model_info(results)
-    model_dir_name = (
-        f"{model_info.get('separator', 'Sep')}_{model_info.get('classifier', 'Clf')}"
-        if model_info
-        else "plots"
-    )
-
-    # Output dir mirrors: final_results/<run_dir>/<classifier>/plots/<model>/
-    output_dir = output_base_dir / model_dir_name
-    output_dir.mkdir(exist_ok=True, parents=True)
-
-    # Filter to only include test results (exclude checkpoint_paths, etc.)
-    test_results = {
-        k: v
-        for k, v in results.items()
-        if isinstance(v, dict) and "confusion_matrix" in v
-    }
-
-    if not test_results:
-        print(f"  No confusion matrix data found, skipping.")
+def process_results_file(json_path: Path) -> None:
+    results = _load(json_path)
+    if not any(isinstance(results.get(c), dict) and "confusion_matrix" in results[c]
+               for c in CONDITION_ORDER):
+        print(f"  · skipped (no confusion_matrix): {json_path.name}")
         return
 
-    # Create individual confusion matrix figures
-    for name, data in test_results.items():
-        test_label = name.replace("_", " ").title()
-        title = f"Confusion Matrix - {test_label}"
-        if model_info:
-            title += f" ({model_info.get('separator', '')} + {model_info.get('classifier', '')})"
+    classifier_dir = json_path.parent
+    classifier_key = classifier_dir.name
+    run_dir = classifier_dir.parent
+    out_dir = classifier_dir / "plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        fig = create_confusion_matrix_figure(
-            data["confusion_matrix"],
-            title=title,
-            model_info=model_info,
-        )
+    sep = _separator_label(results)
+    clf = _classifier_label_from_path(results, classifier_key)
+    coi = "Risoux" if "risoux" in json_path.stem.lower() else None
+    title = f"Confusion matrices — {sep} + {clf}" + (f"  ({coi})" if coi else "")
 
-        output_path = output_dir / f"confusion_matrix_{name}.png"
-        fig.write_image(str(output_path), scale=2)
-        print(f"  Saved: {output_path.name}")
+    fig = build_cm_figure(results, title)
+    suffix = "_risoux" if coi else ""
+    png_path = out_dir / f"confusion_matrices{suffix}.png"
+    try:
+        fig.write_image(str(png_path), scale=PNG_SCALE)
+        print(f"  · {png_path.relative_to(FINAL_RESULTS_DIR)}")
+    except Exception as e:
+        print(f"  · PNG skipped ({e}): {png_path.name}")
+    fig.write_html(str(png_path.with_suffix(".html")))
 
-    # Create combined figure with all confusion matrices
-    combined_fig = create_combined_figure(test_results, model_info)
-    combined_path = output_dir / "confusion_matrices_combined.png"
-    combined_fig.write_image(str(combined_path), scale=2)
-    print(f"  Saved: {combined_path.name}")
-
-    # Create metrics table
-    metrics_table_fig = create_metrics_table(test_results, model_info)
-    metrics_table_path = output_dir / "metrics_table.png"
-    metrics_table_fig.write_image(str(metrics_table_path), scale=2)
-    print(f"  Saved: {metrics_table_path.name}")
-
-    # Create metrics bar chart
-    metrics_bar_fig = create_metrics_bar_chart(test_results, model_info)
-    metrics_bar_path = output_dir / "metrics_bar_chart.png"
-    metrics_bar_fig.write_image(str(metrics_bar_path), scale=2)
-    print(f"  Saved: {metrics_bar_path.name}")
-
-    # Create top misclassified labels figure (combined across runs)
-    top_mis_fig = create_top_misclassified_figure(test_results, model_info)
-    top_mis_path = output_dir / "top_misclassified_labels.png"
-    top_mis_fig.write_image(str(top_mis_path), scale=2)
-    print(f"  Saved: {top_mis_path.name}")
+    tex_path = out_dir / f"metrics{suffix}.tex"
+    write_metrics_table(results, tex_path, sep, clf, coi)
+    print(f"  · {tex_path.relative_to(FINAL_RESULTS_DIR)}")
 
 
-def main():
-    script_dir = Path(__file__).parent
-    final_results_dir = script_dir / "final_results"
-
-    if not final_results_dir.exists():
-        print(f"final_results/ directory not found at {final_results_dir}")
+def main() -> None:
+    if not FINAL_RESULTS_DIR.exists():
+        print(f"final_results/ not found at {FINAL_RESULTS_DIR}")
         return
-
-    # Collect all result JSON files under final_results/*_results*/<classifier>/
-    result_files = sorted(final_results_dir.rglob("results_*.json"))
-
-    if not result_files:
-        print("No results_*.json files found in final_results/")
+    files = sorted(FINAL_RESULTS_DIR.rglob("results_*.json"))
+    # Skip noise/gating sweep JSONs — those have their own scripts
+    files = [f for f in files
+             if "noise_increase_results" not in f.parts
+             and "activity_gating_results" not in f.parts]
+    if not files:
+        print("No classifier result files found.")
         return
-
-    print(f"Found {len(result_files)} result files in final_results/")
-
-    for results_file in result_files:
-        # Output dir: final_results/<run_dir>/<classifier>/plots/
-        classifier_dir = results_file.parent
-        output_base_dir = classifier_dir / "plots"
+    print(f"Processing {len(files)} result files…")
+    for f in files:
         try:
-            process_results_file(results_file, output_base_dir)
+            process_results_file(f)
         except Exception as e:
-            print(f"  ERROR processing {results_file.name}: {e}")
+            import traceback
+            print(f"  ERROR {f}: {e}")
+            traceback.print_exc()
 
 
 if __name__ == "__main__":

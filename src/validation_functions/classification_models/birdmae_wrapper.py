@@ -61,15 +61,28 @@ class BirdMaeClassifierWrapper:
         self.model.eval()
         
         self._sample_rate = self.feature_extractor.sampling_rate
+        # The HF feature extractor uses padding="max_length", max_length=5*sr,
+        # truncation=True (see feature_extractor.py:_process_waveforms,
+        # clip_duration=5). Anything longer is silently truncated, so we must
+        # expose segment_samples here to let _classify_recording chunk the
+        # waveform at the classifier's native 5 s window before calling us.
+        self._segment_length = 5.0
+        self._segment_samples = int(self._sample_rate * self._segment_length)
         
         # Verify model is PyTorch and on correct device
         model_device = next(self.model.parameters()).device
         print(f"  Bird-MAE loaded successfully (sample_rate={self._sample_rate} Hz)")
+        print(f"  Segment length: {self._segment_length} s ({self._segment_samples} samples)")
         print(f"  Model type: {type(self.model).__name__}, Device: {model_device}, Backend: PyTorch")
 
     @property
     def sample_rate(self) -> int:
         return self._sample_rate
+
+    @property
+    def segment_samples(self) -> int:
+        """Preferred classifier input length in samples (5 s @ sampling_rate)."""
+        return self._segment_samples
 
     @torch.inference_mode()
     def __call__(self, waveform: torch.Tensor) -> Tuple[int, float]:

@@ -53,6 +53,11 @@ class ASTFinetunedWrapper:
     @property
     def sample_rate(self) -> int:
         return self._sample_rate
+
+    @property
+    def segment_samples(self) -> int:
+        """Number of samples expected per segment at self.sample_rate."""
+        return self._segment_samples
     
     @torch.inference_mode()
     def __call__(self, waveform: torch.Tensor) -> Tuple[int, float]:

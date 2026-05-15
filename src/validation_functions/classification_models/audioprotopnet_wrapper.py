@@ -50,11 +50,24 @@ class AudioProtoPNetClassifierWrapper:
         self.model.eval()
         
         self._sample_rate = self.feature_extractor.sampling_rate
+        # The HF feature extractor uses padding="longest" with max_length=5*sr
+        # and truncation=True (see processing_protonet.py.__call__,
+        # clip_duration=5). Anything longer than 5 s is silently truncated, so
+        # we must expose segment_samples here to let _classify_recording chunk
+        # the waveform at the classifier's native 5 s window before calling us.
+        self._segment_length = 5.0
+        self._segment_samples = int(self._sample_rate * self._segment_length)
         print(f"  AudioProtoPNet loaded successfully (sample_rate={self._sample_rate} Hz)")
+        print(f"  Segment length: {self._segment_length} s ({self._segment_samples} samples)")
 
     @property
     def sample_rate(self) -> int:
         return self._sample_rate
+
+    @property
+    def segment_samples(self) -> int:
+        """Preferred classifier input length in samples (5 s @ sampling_rate)."""
+        return self._segment_samples
 
     @torch.inference_mode()
     def __call__(self, waveform: torch.Tensor) -> Tuple[int, float]:

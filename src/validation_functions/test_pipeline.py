@@ -1001,12 +1001,14 @@ class ValidationPipeline:
         # Optional: AST (Audio Spectrogram Transformer) fine-tuned classifier (as auxiliary)
         # ------------------------------------------------------------------
         self.ast_finetuned_model = None
+        self.ast_checkpoint_path = None
         if use_ast_finetuned and classifier_type != "ast_finetuned":
             try:
                 cls_path = (
                     PROJECT_ROOT
                     / "src/validation_functions/classification_models/plane_classifier_ast/checkpoints/final_model.pth"
                 )
+                self.ast_checkpoint_path = cls_path
                 self.ast_finetuned_model = create_classifier(
                     "ast_finetuned",
                     checkpoint_path=str(cls_path),
@@ -1239,6 +1241,112 @@ class ValidationPipeline:
             return self.separator.separate_batch(waveforms)
         else:
             return torch.stack([self.separator.separate_waveform(w) for w in waveforms])
+
+    def _get_classifier_params(self, classify_fn: Callable) -> Tuple[int, int, Optional[Callable]]:
+        """Return (target_sample_rate, segment_samples, batch_classify_fn) for a classify_fn.
+
+        segment_samples is at target_sample_rate.
+        batch_classify_fn is None if no batch path exists.
+        """
+        if classify_fn == self._classify:
+            batch_fn = self._classify_batch if hasattr(self.classifier, "predict_batch") else None
+            seg = getattr(self.classifier, "segment_samples", self.classifier_segment_samples)
+            return self.classifier_sample_rate, seg, batch_fn
+        elif classify_fn == self._classify_ast_finetuned:
+            m = self.ast_finetuned_model
+            return m.sample_rate, m.segment_samples, self._classify_ast_finetuned_batch
+        elif classify_fn == self._classify_bird_mae:
+            m = self.bird_mae_model
+            seg = getattr(m, "segment_samples", None)
+            return m.sample_rate, seg, self._classify_bird_mae_batch
+        elif classify_fn == self._classify_audioprotopnet:
+            m = self.audioprotopnet_model
+            seg = getattr(m, "segment_samples", None)
+            return m.sample_rate, seg, self._classify_audioprotopnet_batch
+        # Unknown classify_fn — fall back to single-sample calls
+        return self.classifier_sample_rate, self.classifier_segment_samples, None
+
+    def _classify_recording(self, waveform: torch.Tensor, classify_fn: Callable) -> Tuple[int, float]:
+        """Classify a full recording waveform (at self.sample_rate) using classify_fn.
+
+        Correct flow regardless of separator window size:
+          1. Resample to classifier's native sample rate.
+          2. Split into non-overlapping chunks of the classifier's segment_samples
+             (last chunk zero-padded only if the audio runs out).
+          3. Classify all chunks (via batch path if available).
+          4. Aggregate: positive if *any* chunk is positive; confidence = max.
+
+        For classifiers without a fixed segment_samples (bird-mae, audioprotopnet)
+        the full resampled waveform is passed as a single chunk.
+        """
+        target_sr, cls_seg, batch_fn = self._get_classifier_params(classify_fn)
+
+        wav = waveform.detach().cpu()
+
+        # Resample to classifier rate
+        if self.sample_rate != target_sr:
+            key = (self.sample_rate, target_sr)
+            if key not in self._resamplers:
+                self._resamplers[key] = create_high_quality_resampler(self.sample_rate, target_sr)
+            wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
+
+        # Split into classifier-native chunks
+        T = wav.shape[0]
+        if cls_seg is None:
+            chunks = [wav]
+        else:
+            n_chunks = max(1, (T + cls_seg - 1) // cls_seg)
+            chunks = []
+            for c in range(n_chunks):
+                start = c * cls_seg
+                chunk = wav[start : start + cls_seg]
+                if chunk.shape[0] < cls_seg:
+                    chunk = torch.nn.functional.pad(chunk, (0, cls_seg - chunk.shape[0]))
+                chunks.append(chunk)
+
+        chunks_tensor = torch.stack(chunks)  # (N, cls_seg)
+
+        # Classify — batch path if available, else single-sample loop
+        # Note: batch_fn expects waveforms at self.sample_rate; we've already resampled,
+        # so call model.predict_batch directly to avoid double-resampling.
+        if classify_fn == self._classify:
+            # Primary classifier: _classify_batch expects self.sample_rate input,
+            # but we already resampled — call classifier.predict_batch directly.
+            if hasattr(self.classifier, "predict_batch"):
+                preds_t, confs_t = self.classifier.predict_batch(chunks_tensor.to(self.device))
+                preds = [int(p.item()) for p in preds_t]
+                confs = [float(c.item()) for c in confs_t]
+            else:
+                preds, confs = [], []
+                for chunk in chunks_tensor:
+                    p, c = self.classifier(chunk.to(self.device))
+                    preds.append(p)
+                    confs.append(c)
+        elif classify_fn == self._classify_ast_finetuned:
+            preds_t, confs_t = self.ast_finetuned_model.predict_batch(chunks_tensor)
+            preds = [int(p.item()) for p in preds_t]
+            confs = [float(c.item()) for c in confs_t]
+        elif classify_fn == self._classify_bird_mae:
+            preds_t, confs_t = self.bird_mae_model.predict_batch(chunks_tensor)
+            preds = [int(p.item()) for p in preds_t]
+            confs = [float(c.item()) for c in confs_t]
+        elif classify_fn == self._classify_audioprotopnet:
+            preds_t, confs_t = self.audioprotopnet_model.predict_batch(chunks_tensor)
+            preds = [int(p.item()) for p in preds_t]
+            confs = [float(c.item()) for c in confs_t]
+        else:
+            # Unknown single-sample fallback — audio is already at classifier rate,
+            # but classify_fn expects self.sample_rate. Resample back would be circular,
+            # so just call classify_fn on each chunk and accept the existing behaviour.
+            preds, confs = [], []
+            for chunk in chunks:
+                p, c = classify_fn(chunk)
+                preds.append(p)
+                confs.append(c)
+
+        pred = 1 if any(p == 1 for p in preds) else 0
+        conf = max(confs)
+        return pred, conf
 
     def _classify(self, waveform: torch.Tensor) -> Tuple[int, float]:
         """Run classification using the primary classifier. Returns (prediction, confidence).
@@ -1490,18 +1598,13 @@ class ValidationPipeline:
             raise RuntimeError(
                 "Fine-tuned AST model is not loaded. Call load_models(use_ast_finetuned=True)."
             )
-
         wav = waveform.detach().cpu()
         ast_sr = self.ast_finetuned_model.sample_rate
-
         if self.sample_rate != ast_sr:
             key = (self.sample_rate, ast_sr)
             if key not in self._resamplers:
-                self._resamplers[key] = create_high_quality_resampler(
-                    self.sample_rate, ast_sr
-                )
+                self._resamplers[key] = create_high_quality_resampler(self.sample_rate, ast_sr)
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
-
         return self.ast_finetuned_model(wav)
 
     def _classify_bird_mae(self, waveform: torch.Tensor) -> Tuple[int, float]:
@@ -1564,18 +1667,20 @@ class ValidationPipeline:
 
     def _classify_batch_generic(self, waveforms: torch.Tensor, model: AudioClassifier, target_sample_rate: int) -> Tuple[List[int], List[float]]:
         """Generic batch classification for any AudioClassifier that implements predict_batch.
-        
+
+        Resamples waveforms to target_sample_rate and calls model.predict_batch.
+        Segment-level splitting is handled upstream by _classify_recording.
+
         Args:
             waveforms: (B, T) batch of waveforms at self.sample_rate
             model: The classifier model to use
             target_sample_rate: Target sample rate for the classifier
-            
+
         Returns:
-            Tuple of (predictions, confidences) as lists
+            Tuple of (predictions, confidences) as lists of length B
         """
         wavs = waveforms.detach().cpu()
-        
-        # Resample if needed
+
         if self.sample_rate != target_sample_rate:
             key = (self.sample_rate, target_sample_rate)
             if key not in self._resamplers:
@@ -1583,8 +1688,7 @@ class ValidationPipeline:
                     self.sample_rate, target_sample_rate
                 )
             wavs = self._resamplers[key](wavs)
-        
-        # Use batch prediction
+
         preds_tensor, confs_tensor = model.predict_batch(wavs)
         return [int(p.item()) for p in preds_tensor], [float(c.item()) for c in confs_tensor]
 
@@ -1786,41 +1890,27 @@ class ValidationPipeline:
                         )
 
                 if use_separation:
-                    # Batched classification logic for clean tests
+                    # Separate all separator-sized segments in batches,
+                    # concatenate COI estimates into one full waveform,
+                    # then classify at the classifier's own segment length.
                     batch_size = 16
                     segments_tensor = torch.stack(segments)
-                    seg_preds, seg_confs = [], []
+                    coi_chunks: List[torch.Tensor] = []
                     seg_si_snr, seg_sdr, seg_si_sdr = [], [], []
                     seg_si_snri, seg_rms_error, seg_sel_error = [], [], []
 
                     for i in range(0, len(segments_tensor), batch_size):
                         batch_seg = segments_tensor[i : i + batch_size]
+                        separated_batch = self._separate_batch(batch_seg)  # (B, n_sources, T) or (B, T)
 
-                        separated_batch = self._separate_batch(
-                            batch_seg
-                        )  # (B, n_sources, T) or (B, T)
-
-                        # Get COI sources
                         if separated_batch.dim() == 2:
                             coi_est = separated_batch
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
 
-                        # Classify - use batch classification if available (much faster)
-                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
-                        if batch_classify_fn is not None:
-                            # Use optimized batch classification
-                            batch_preds, batch_confs = batch_classify_fn(coi_est)
-                            seg_preds.extend(batch_preds)
-                            seg_confs.extend(batch_confs)
-                        else:
-                            # Fallback to one-by-one classification
-                            for s_est in coi_est:
-                                p, c = classify_fn(s_est)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
+                        coi_chunks.append(coi_est.cpu())
 
-                        # Metrics
+                        # Signal metrics stay per separator segment
                         for b_idx, s_est in enumerate(coi_est):
                             snr, sdr_val, si_sdr_val, snri, rms_err, sel_err = self._compute_signal_metrics(
                                 batch_seg[b_idx], s_est
@@ -1832,12 +1922,10 @@ class ValidationPipeline:
                             seg_rms_error.append(rms_err)
                             seg_sel_error.append(sel_err)
 
-                        # Optionally save first segment (skipped here for brevity or done outside loop)
+                    # Concatenate all COI estimates into one waveform and classify
+                    coi_full = torch.cat(coi_chunks, dim=0).view(-1)
+                    pred, conf = self._classify_recording(coi_full, classify_fn)
 
-                    # A recording is classified as COI if ANY segment triggers a
-                    # positive prediction.  Confidence is the maximum over all segments.
-                    pred = 1 if any(p == 1 for p in seg_preds) else 0
-                    conf = max(seg_confs)
                     si_snr_scores.append(float(np.mean(seg_si_snr)))
                     sdr_scores.append(float(np.mean(seg_sdr)))
                     si_sdr_scores.append(float(np.mean(seg_si_sdr)))
@@ -1845,26 +1933,8 @@ class ValidationPipeline:
                     rms_error_scores.append(float(np.nanmean(seg_rms_error)))
                     sel_error_scores.append(float(np.nanmean(seg_sel_error)))
                 else:
-                    # Classify without separation - use batch if available
-                    batch_size = 16
-                    segments_tensor = torch.stack(segments)
-                    seg_preds, seg_confs = [], []
-                    batch_classify_fn = self._get_batch_classify_fn(classify_fn)
-                    
-                    if batch_classify_fn is not None:
-                        # Process in batches to avoid memory issues
-                        for i in range(0, len(segments_tensor), batch_size):
-                            batch_seg = segments_tensor[i : i + batch_size]
-                            batch_preds, batch_confs = batch_classify_fn(batch_seg)
-                            seg_preds.extend(batch_preds)
-                            seg_confs.extend(batch_confs)
-                    else:
-                        for seg in segments:
-                            seg_pred, seg_conf = classify_fn(seg)
-                            seg_preds.append(seg_pred)
-                            seg_confs.append(seg_conf)
-                    pred = 1 if any(p == 1 for p in seg_preds) else 0
-                    conf = max(seg_confs)
+                    # Classify without separation — split at classifier's segment length
+                    pred, conf = self._classify_recording(waveform_full, classify_fn)
 
                 y_true.append(1)
                 y_pred.append(pred)
@@ -1895,45 +1965,24 @@ class ValidationPipeline:
                 )
                 segments = self._split_into_segments(waveform_full)
 
-                batch_size = 16
-                segments_tensor = torch.stack(segments)
-                seg_preds, seg_confs = [], []
-
-                for i in range(0, len(segments_tensor), batch_size):
-                    batch_seg = segments_tensor[i : i + batch_size]
-                    if use_separation:
+                if use_separation:
+                    batch_size = 16
+                    segments_tensor = torch.stack(segments)
+                    coi_chunks: List[torch.Tensor] = []
+                    for i in range(0, len(segments_tensor), batch_size):
+                        batch_seg = segments_tensor[i : i + batch_size]
                         separated_batch = self._separate_batch(batch_seg)
                         if separated_batch.dim() == 2:
                             coi_est = separated_batch
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
+                        coi_chunks.append(coi_est.cpu())
+                    coi_full = torch.cat(coi_chunks, dim=0).view(-1)
+                    pred, conf = self._classify_recording(coi_full, classify_fn)
+                else:
+                    pred, conf = self._classify_recording(waveform_full, classify_fn)
 
-                        # Use batch classification if available (much faster)
-                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
-                        if batch_classify_fn is not None:
-                            batch_preds, batch_confs = batch_classify_fn(coi_est)
-                            seg_preds.extend(batch_preds)
-                            seg_confs.extend(batch_confs)
-                        else:
-                            for s_est in coi_est:
-                                p, c = classify_fn(s_est)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
-                    else:
-                        # Classify without separation - use batch if available
-                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
-                        if batch_classify_fn is not None:
-                            batch_preds, batch_confs = batch_classify_fn(batch_seg)
-                            seg_preds.extend(batch_preds)
-                            seg_confs.extend(batch_confs)
-                        else:
-                            for seg in batch_seg:
-                                p, c = classify_fn(seg)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
-
-                pred = 1 if any(p == 1 for p in seg_preds) else 0
-                conf = max(seg_confs)
+                pred = 1 if pred == 1 else 0
                 y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -2136,8 +2185,6 @@ class ValidationPipeline:
                             )
 
                 # Step 2: Process mixtures in batches
-                seg_preds: List[int] = []
-                seg_confs: List[float] = []
                 seg_si_snr: List[float] = []
                 seg_sdr: List[float] = []
                 seg_si_sdr: List[float] = []
@@ -2147,6 +2194,7 @@ class ValidationPipeline:
 
                 batch_size = 16
                 mixtures_tensor = torch.stack(mixtures)
+                coi_chunks_mix: List[torch.Tensor] = []
 
                 for i in range(0, len(mixtures_tensor), batch_size):
                     batch_mix = mixtures_tensor[i : i + batch_size]
@@ -2162,17 +2210,7 @@ class ValidationPipeline:
                         else:
                             coi_est_batch = separated_batch[:, self._get_coi_head_index()]
 
-                        # Classify - use batch classification if available
-                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
-                        if batch_classify_fn is not None:
-                            batch_preds, batch_confs = batch_classify_fn(coi_est_batch)
-                            seg_preds.extend(batch_preds)
-                            seg_confs.extend(batch_confs)
-                        else:
-                            for s_est in coi_est_batch:
-                                p, c = classify_fn(s_est)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
+                        coi_chunks_mix.append(coi_est_batch.cpu())
 
                         # Compute signal metrics for each item in batch
                         for b_idx, s_est in enumerate(coi_est_batch):
@@ -2233,22 +2271,16 @@ class ValidationPipeline:
                                     f"Warning: failed to save separated outputs for mixture {row.filename}",
                                     file=sys.stderr,
                                 )
-                    else:
-                        # Classification without separation - use batch if available
-                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
-                        if batch_classify_fn is not None:
-                            batch_preds, batch_confs = batch_classify_fn(batch_mix)
-                            seg_preds.extend(batch_preds)
-                            seg_confs.extend(batch_confs)
-                        else:
-                            for mix in batch_mix:
-                                seg_pred, seg_conf = classify_fn(mix)
-                                seg_preds.append(seg_pred)
-                                seg_confs.append(seg_conf)
 
-                # Aggregate across segments: positive if any segment detects COI.
-                pred = 1 if any(p == 1 for p in seg_preds) else 0
-                conf = max(seg_confs)
+                # Classify the full reconstructed waveform at classifier segment length
+                if use_separation:
+                    coi_full_mix = torch.cat(coi_chunks_mix, dim=0).view(-1)
+                    pred, conf = self._classify_recording(coi_full_mix, classify_fn)
+                else:
+                    # No separation: classify the full mixture waveform directly
+                    mixture_full = torch.cat([m.cpu() for m in mixtures], dim=0).view(-1)
+                    pred, conf = self._classify_recording(mixture_full, classify_fn)
+
                 actual_snrs.append(float(np.mean(seg_snr_vals)))
                 if use_separation:
                     si_snr_scores.append(float(np.mean(seg_si_snr)))
@@ -2287,45 +2319,24 @@ class ValidationPipeline:
                 )
                 segments = self._split_into_segments(waveform_full)
 
-                batch_size = 16
-                segments_tensor = torch.stack(segments)
-                seg_preds, seg_confs = [], []
-
-                for i in range(0, len(segments_tensor), batch_size):
-                    batch_seg = segments_tensor[i : i + batch_size]
-                    if use_separation:
+                if use_separation:
+                    batch_size = 16
+                    segments_tensor = torch.stack(segments)
+                    coi_chunks: List[torch.Tensor] = []
+                    for i in range(0, len(segments_tensor), batch_size):
+                        batch_seg = segments_tensor[i : i + batch_size]
                         separated_batch = self._separate_batch(batch_seg)
                         if separated_batch.dim() == 2:
                             coi_est = separated_batch
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
+                        coi_chunks.append(coi_est.cpu())
+                    coi_full = torch.cat(coi_chunks, dim=0).view(-1)
+                    pred, conf = self._classify_recording(coi_full, classify_fn)
+                else:
+                    pred, conf = self._classify_recording(waveform_full, classify_fn)
 
-                        # Use batch classification if available
-                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
-                        if batch_classify_fn is not None:
-                            batch_preds, batch_confs = batch_classify_fn(coi_est)
-                            seg_preds.extend(batch_preds)
-                            seg_confs.extend(batch_confs)
-                        else:
-                            for s_est in coi_est:
-                                p, c = classify_fn(s_est)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
-                    else:
-                        # Classification without separation - use batch if available
-                        batch_classify_fn = self._get_batch_classify_fn(classify_fn)
-                        if batch_classify_fn is not None:
-                            batch_preds, batch_confs = batch_classify_fn(batch_seg)
-                            seg_preds.extend(batch_preds)
-                            seg_confs.extend(batch_confs)
-                        else:
-                            for seg in batch_seg:
-                                p, c = classify_fn(seg)
-                                seg_preds.append(p)
-                                seg_confs.append(c)
-
-                pred = 1 if any(p == 1 for p in seg_preds) else 0
-                conf = max(seg_confs)
+                pred = 1 if pred == 1 else 0
                 y_true.append(0)
                 y_pred.append(pred)
                 y_scores.append(conf)
@@ -2886,6 +2897,13 @@ class ValidationPipeline:
                     "separator": str(self.sep_checkpoint_path),
                     "classifier": str(self.cls_checkpoint_path),
                 }
+                # Record the AST checkpoint path for auditability.
+                if cls_name == "ast_finetuned":
+                    # AST was the primary classifier — path is in cls_checkpoint_path
+                    results_dict["checkpoint_paths"]["ast_classifier"] = str(self.cls_checkpoint_path)
+                elif self.ast_checkpoint_path is not None:
+                    # AST was the auxiliary classifier
+                    results_dict["checkpoint_paths"]["ast_classifier"] = str(self.ast_checkpoint_path)
                 # Include positive-label config for AudioSet classifiers.
                 if cls_name == "ast_finetuned":
                     results_dict["positive_class"] = CNN_POSITIVE_CLASS

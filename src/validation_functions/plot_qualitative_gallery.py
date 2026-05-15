@@ -1,170 +1,208 @@
 """
-plot_qualitative_gallery.py — Spectrogram gallery for dissertation.
+plot_qualitative_gallery.py — Cross-model spectrogram gallery for the
+dissertation Results chapter.
 
-Scans *_examples/ directories produced by runner scripts, finds sets of
-saved WAV files (clean COI, mixture, separated outputs) and calls
-demo_separation.plot_combined_spectrograms_from_wavs() to produce
-one combined spectrogram figure per model.
+For each example index ``k`` shared across the model-specific
+``*_examples/`` directories, this script produces a single combined
+spectrogram figure that stacks:
 
-Figures are saved as PNG to ./chapter_figures/gallery/.
+  1. clean COI reference
+  2. created mixture (clean + background)
+  3. one panel per available separator, showing
+     ``mixture_separated_coi_head_<k>.wav`` (or ``..._coi_est_<k>.wav`` as
+     fallback for SuDoRM-RF).
 
-Usage:
-    python plot_qualitative_gallery.py
+Energy deltas (ΔRMS, ΔSEL) are reported relative to the clean COI panel so
+the cross-model comparison highlights how each separator distorts the
+energy envelope of the target.
 
-Requires:
-    - One or more *_examples/ directories (from runner scripts with save_examples_dir set)
-    - demo_separation.py in the same directory (provides plotting utilities)
+Models whose example directories are missing or empty are silently
+skipped, with a warning listing them once at the end.  Re-running after
+populating the missing directories will regenerate the gallery with the
+extra panels included.
+
+Output: ``final_results/chapter_figures/gallery/example_<k>.png``
 """
+
+from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-# Try importing demo_separation utilities
-try:
-    from demo_separation import plot_combined_spectrograms_from_wavs
-    HAS_DEMO = True
-except ImportError as e:
-    print(f"Warning: could not import demo_separation: {e}")
-    HAS_DEMO = False
+from demo_separation import plot_combined_spectrograms_from_wavs  # noqa: E402
 
-OUTPUT_DIR = SCRIPT_DIR / "chapter_figures" / "gallery"
+# ── Configuration ───────────────────────────────────────────────────────────
+FINAL_RESULTS_DIR = SCRIPT_DIR / "final_results"
+OUTPUT_DIR = FINAL_RESULTS_DIR / "chapter_figures" / "gallery"
 
-# ── Gallery configuration ──────────────────────────────────────────────────
-# Each entry: (display_label, examples_dir, wav_pattern)
-# wav_pattern keys: clean_coi, mixture, separated_coi
-GALLERY_CONFIGS = [
-    {
-        "label": "SuDoRM-RF — Airplane",
-        "examples_dir": SCRIPT_DIR / "sudormrf_airplane_examples",
-    },
-    {
-        "label": "TUSS single-class — Airplane",
-        "examples_dir": SCRIPT_DIR / "tuss_singleclass_airplane_examples",
-    },
-    {
-        "label": "CLAPSep — Airplane",
-        "examples_dir": SCRIPT_DIR / "clapsep_airplane_examples",
-    },
-    {
-        "label": "TUSS multi-class — Airplane head",
-        "examples_dir": SCRIPT_DIR / "tuss_multiclass_airplane_examples",
-    },
-    {
-        "label": "TUSS multi-class — Bird head",
-        "examples_dir": SCRIPT_DIR / "tuss_multiclass_bird_examples",
-    },
-]
+# Map separator → (display label, examples-dir under final_results/, classifier
+# subdir holding the WAVs).  The classifier subdir mirrors the runner layout
+# `<run>_examples/<classifier>/{clean_sep,mixture_sep}/`.
+GROUPS: Dict[str, List[Tuple[str, Path, str]]] = {
+    "airplane": [
+        ("SuDoRM-RF",     FINAL_RESULTS_DIR / "sudormrf_airplane_examples",        "pann_finetuned"),
+        ("TUSS (single)", FINAL_RESULTS_DIR / "tuss_singleclass_airplane_examples", "pann_finetuned"),
+        ("CLAPSep",       FINAL_RESULTS_DIR / "clapsep_airplane_examples",         "pann_finetuned"),
+        ("TUSS (multi)",  FINAL_RESULTS_DIR / "tuss_multiclass_airplane_examples",  "pann_finetuned"),
+    ],
+    "bird": [
+        ("TUSS (single)", FINAL_RESULTS_DIR / "tuss_singleclass_bird_examples",     "bird_mae"),
+        ("TUSS (multi)",  FINAL_RESULTS_DIR / "tuss_multiclass_bird_examples",      "bird_mae"),
+    ],
+}
+
+# Maximum number of example indices to render per group (keeps the chapter
+# manageable; raise/lower freely).
+MAX_EXAMPLES = 5
 
 
-def _find_example_triplets(examples_dir: Path) -> list:
-    """Return list of (clean_coi_path, mixture_path, separated_path) triplets."""
-    if not examples_dir.exists():
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _model_dirs(examples_dir: Path, classifier: str) -> Tuple[Path, Path]:
+    """Return (clean_sep_dir, mixture_sep_dir) for a given examples root."""
+    return (examples_dir / classifier / "clean_sep",
+            examples_dir / classifier / "mixture_sep")
+
+
+def _list_indices(examples_dir: Path, classifier: str) -> List[str]:
+    """Indices of available examples in mixture_sep (the operational layout)."""
+    _, mix_dir = _model_dirs(examples_dir, classifier)
+    if not mix_dir.exists():
         return []
-
-    triplets = []
-    # WAV files are named: clean_coi_<k>.wav, mixture_created_<k>.wav,
-    #   mixture_separated_coi_head_<k>.wav  (TUSS/CLAPSep)
-    #   mixture_separated_coi_est_<k>.wav   (SuDoRM-RF / no multi-source)
-    clean_wavs = sorted(examples_dir.glob("*clean_coi_*.wav"))
-    if not clean_wavs:
-        # Fall back to scanning mixture_coi_clean_*.wav
-        clean_wavs = sorted(examples_dir.glob("mixture_coi_clean_*.wav"))
-
-    for clean_wav in clean_wavs:
-        # Extract index k from filename
-        stem = clean_wav.stem  # e.g. "clean_coi_0" or "mixture_coi_clean_0"
-        k = stem.rsplit("_", 1)[-1]
-
-        mixture_wav = examples_dir / f"mixture_created_{k}.wav"
-        if not mixture_wav.exists():
-            mixture_wav = examples_dir / f"mixture_{k}.wav"
-
-        # Prefer COI head output; fall back to coi_est
-        sep_wav = examples_dir / f"mixture_separated_coi_head_{k}.wav"
-        if not sep_wav.exists():
-            sep_wav = examples_dir / f"mixture_separated_coi_est_{k}.wav"
-        if not sep_wav.exists():
-            # Try any separated wav for this index
-            candidates = list(examples_dir.glob(f"*separated*{k}*.wav"))
-            sep_wav = candidates[0] if candidates else None
-
-        if mixture_wav.exists() and sep_wav is not None and sep_wav.exists():
-            triplets.append((clean_wav, mixture_wav, sep_wav))
-
-    return triplets
+    idx = []
+    for p in sorted(mix_dir.glob("mixture_created_*.wav")):
+        idx.append(p.stem.rsplit("_", 1)[-1])
+    return idx
 
 
-def plot_gallery_entry(label: str, examples_dir: Path):
-    """Generate and save spectrogram panels for one model's examples."""
-    triplets = _find_example_triplets(examples_dir)
-    if not triplets:
-        print(f"  No example WAVs found in {examples_dir} — skipping.")
-        return
+def _separated_path(examples_dir: Path, classifier: str, k: str) -> Optional[Path]:
+    """Resolve the separated-COI WAV for example k (head → est fallback)."""
+    _, mix_dir = _model_dirs(examples_dir, classifier)
+    candidates = [
+        mix_dir / f"mixture_separated_coi_head_{k}.wav",
+        mix_dir / f"mixture_separated_coi_est_{k}.wav",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    extras = list(mix_dir.glob(f"*separated*_{k}.wav"))
+    return extras[0] if extras else None
 
+
+def _shared_indices(group: List[Tuple[str, Path, str]]) -> List[str]:
+    """Indices present in *every* model's mixture_sep dir."""
+    sets = []
+    for _, examples_dir, classifier in group:
+        idx = _list_indices(examples_dir, classifier)
+        if idx:
+            sets.append(set(idx))
+    if not sets:
+        return []
+    common = set.intersection(*sets)
+    return sorted(common, key=lambda s: int(s) if s.isdigit() else s)
+
+
+def _all_indices(group: List[Tuple[str, Path, str]]) -> List[str]:
+    """Union of indices — used as fallback if no shared index exists."""
+    seen = set()
+    for _, examples_dir, classifier in group:
+        seen.update(_list_indices(examples_dir, classifier))
+    return sorted(seen, key=lambda s: int(s) if s.isdigit() else s)
+
+
+# ── Main rendering ──────────────────────────────────────────────────────────
+
+def render_group(group_name: str, group: List[Tuple[str, Path, str]]) -> Tuple[int, List[str]]:
+    """Render the cross-model gallery for one COI group.
+
+    Returns (n_figures_written, missing_models)."""
+    available = [(label, ed, cls) for label, ed, cls in group
+                 if _list_indices(ed, cls)]
+    missing   = [label for label, ed, cls in group
+                 if not _list_indices(ed, cls)]
+
+    if not available:
+        return 0, [label for label, _, _ in group]
+
+    indices = _shared_indices(available)
+    if not indices:
+        # Fall back: render whichever indices exist, even if not shared
+        indices = _all_indices(available)
+
+    indices = indices[:MAX_EXAMPLES]
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    safe_label = label.replace(" ", "_").replace("/", "-").replace("—", "-")
 
-    for i, (clean_wav, mixture_wav, sep_wav) in enumerate(triplets):
-        out_path = OUTPUT_DIR / f"{safe_label}_example_{i}.png"
-        print(f"  [{i+1}/{len(triplets)}] {clean_wav.name} → {out_path.name}")
+    written = 0
+    for k in indices:
+        # Use the first available model to source the shared clean+mixture
+        # references.  These WAVs are produced by the runners with a fixed
+        # seed, so they should be identical across models for the same k.
+        anchor_label, anchor_ed, anchor_cls = available[0]
+        clean_dir, mix_dir = _model_dirs(anchor_ed, anchor_cls)
+        clean = clean_dir / f"clean_coi_{k}.wav"
+        if not clean.exists():
+            clean = mix_dir / f"mixture_coi_clean_{k}.wav"
+        mixture = mix_dir / f"mixture_created_{k}.wav"
 
-        if HAS_DEMO:
-            try:
-                plot_combined_spectrograms_from_wavs(
-                    clean_wav_path=str(clean_wav),
-                    mixture_wav_path=str(mixture_wav),
-                    separated_wav_path=str(sep_wav),
-                    title=f"{label} — Example {i+1}",
-                    output_path=str(out_path),
-                )
-            except Exception as e:
-                print(f"    ERROR: {e}")
-        else:
-            # Fallback: try a minimal matplotlib spectrogram if demo_separation unavailable
-            try:
-                import matplotlib
-                matplotlib.use("Agg")
-                import matplotlib.pyplot as plt
-                import torchaudio
+        if not clean.exists() or not mixture.exists():
+            print(f"  · {group_name} idx {k}: missing clean/mixture reference, skip")
+            continue
 
-                fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-                for ax, wav_path, title in zip(
-                    axes,
-                    [clean_wav, mixture_wav, sep_wav],
-                    ["Clean COI", "Mixture", "Separated"],
-                ):
-                    waveform, sr = torchaudio.load(str(wav_path))
-                    waveform = waveform[0]
-                    ax.specgram(waveform.numpy(), Fs=sr, NFFT=1024, noverlap=512, cmap="inferno")
-                    ax.set_title(title)
-                    ax.set_xlabel("Time (s)")
-                    ax.set_ylabel("Frequency (Hz)")
-                fig.suptitle(f"{label} — Example {i+1}", fontsize=13)
-                plt.tight_layout()
-                fig.savefig(str(out_path), dpi=150)
-                plt.close(fig)
-            except Exception as e:
-                print(f"    Fallback matplotlib also failed: {e}")
+        wav_paths: List[Path] = [clean, mixture]
+        titles: List[str] = ["Clean COI (reference)", "Created mixture"]
+
+        for label, ed, cls in available:
+            sep = _separated_path(ed, cls, k)
+            if sep is not None:
+                wav_paths.append(sep)
+                titles.append(f"Separated — {label}")
+            else:
+                print(f"  · {group_name} idx {k}: no separated WAV for {label}")
+
+        if len(wav_paths) <= 2:
+            continue  # nothing to compare
+
+        out_path = OUTPUT_DIR / f"gallery_{group_name}_example_{k}.png"
+        try:
+            plot_combined_spectrograms_from_wavs(
+                wav_paths=wav_paths,
+                save_path=out_path,
+                titles=titles,
+                ref_idx=0,                           # clean COI = energy reference
+                delta_indices=list(range(2, len(wav_paths))),
+            )
+            written += 1
+        except Exception as e:
+            import traceback
+            print(f"  · ERROR rendering {out_path.name}: {e}")
+            traceback.print_exc()
+
+    return written, missing
 
 
-def main():
-    print("=" * 70)
-    print("QUALITATIVE GALLERY — SPECTROGRAM FIGURES")
-    print("=" * 70)
-    print(f"Output directory: {OUTPUT_DIR}\n")
+def main() -> None:
+    print("=" * 72)
+    print("Cross-model qualitative gallery")
+    print(f"Output: {OUTPUT_DIR}")
+    print("=" * 72)
 
-    for cfg in GALLERY_CONFIGS:
-        label = cfg["label"]
-        examples_dir = cfg["examples_dir"]
-        print(f"\n{'─'*50}")
-        print(f"Model: {label}")
-        print(f"Examples dir: {examples_dir}")
-        plot_gallery_entry(label, examples_dir)
+    summary: Dict[str, Tuple[int, List[str]]] = {}
+    for group_name, group in GROUPS.items():
+        print(f"\n— {group_name} —")
+        written, missing = render_group(group_name, group)
+        summary[group_name] = (written, missing)
+        print(f"  Rendered {written} figure(s) for group '{group_name}'.")
 
-    print(f"\nGallery complete. Figures saved to: {OUTPUT_DIR}")
+    print("\n" + "=" * 72)
+    print("Summary")
+    for name, (n, missing) in summary.items():
+        print(f"  {name:>10}: {n} figure(s)" +
+              (f"  (missing examples: {', '.join(missing)})" if missing else ""))
+    print("=" * 72)
 
 
 if __name__ == "__main__":
