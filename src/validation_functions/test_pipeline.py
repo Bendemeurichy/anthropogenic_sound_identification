@@ -1715,6 +1715,7 @@ class ValidationPipeline:
         save_n_examples: int = 1,
         classify_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
         save_false_negatives: bool = False,
+        seed: int = 42,
     ) -> ClassificationMetrics:
         """Validate on clean (unmixed) audio - both COI and background.
 
@@ -1746,7 +1747,7 @@ class ValidationPipeline:
             save_dir.mkdir(parents=True, exist_ok=True)
             n = min(save_n_examples, len(df_coi))
             sample_choices = list(
-                np.random.choice(len(df_coi), size=n, replace=False).tolist()
+                np.random.default_rng(seed).choice(len(df_coi), size=n, replace=False).tolist()
             )
 
         # Process COI samples (label=1)
@@ -1980,6 +1981,7 @@ class ValidationPipeline:
         save_n_examples: int = 1,
         classify_fn: Optional[Callable[[torch.Tensor], Tuple[int, float]]] = None,
         save_false_negatives: bool = False,
+        seed: int = 42,
     ) -> ClassificationMetrics:
         """Validate on mixtures at random SNR (COI+BG) and clean background (BG only).
 
@@ -2017,7 +2019,7 @@ class ValidationPipeline:
             save_dir.mkdir(parents=True, exist_ok=True)
             n = min(save_n_examples, len(df_coi))
             sample_choices = list(
-                np.random.choice(len(df_coi), size=n, replace=False).tolist()
+                np.random.default_rng(seed).choice(len(df_coi), size=n, replace=False).tolist()
             )
 
         # Process COI + background mixtures (label=1)
@@ -2778,6 +2780,7 @@ class ValidationPipeline:
                     save_examples_dir=clean_save_dir,
                     save_n_examples=save_n_examples,
                     classify_fn=classify_fn,
+                    seed=seed,
                 )
                 print(results["clean_sep_cls"])
 
@@ -2814,6 +2817,7 @@ class ValidationPipeline:
                     save_n_examples=save_n_examples,
                     classify_fn=classify_fn,
                     save_false_negatives=save_false_negatives,
+                    seed=seed,
                 )
                 print(results["as_is_sep_cls"])
             else:
@@ -2850,6 +2854,7 @@ class ValidationPipeline:
                         save_n_examples=save_n_examples,
                         classify_fn=classify_fn,
                         save_false_negatives=save_false_negatives,
+                        seed=seed,
                     )
                     print(results["mix_sep_cls"])
                 else:

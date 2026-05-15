@@ -729,24 +729,12 @@ def extract_model_info(results: dict) -> dict:
     return model_info
 
 
-def main():
-    # Path to results file
-    results_dir = Path(__file__).parent / "meeting_26_03"
-    results_file = results_dir / "results_test_risoux_test_20260325_233346.json"
-
-    #  SudoRMRF
-    # "results_20260211_003754.json"
-    # "results_20260210_234618.json"
-    # Clapsep
-    # "results_20260211_111014.json"
-    # "results_20260211_232530.json"
-
-    # Load results
+def process_results_file(results_file: Path, output_base_dir: Path) -> None:
+    """Process a single results JSON file and save all plots."""
     results = load_results(results_file)
 
-    print(f"Loaded results for {len(results)} entries:")
-    for name in results.keys():
-        print(f"  - {name}")
+    print(f"\nLoaded: {results_file.relative_to(results_file.parent.parent.parent)}")
+    print(f"  Entries: {list(results.keys())}")
 
     # Extract model information
     model_info = extract_model_info(results)
@@ -756,8 +744,8 @@ def main():
         else "plots"
     )
 
-    # Create output directory for plots with model names
-    output_dir = results_dir / "plots" / model_dir_name
+    # Output dir mirrors: final_results/<run_dir>/<classifier>/plots/<model>/
+    output_dir = output_base_dir / model_dir_name
     output_dir.mkdir(exist_ok=True, parents=True)
 
     # Filter to only include test results (exclude checkpoint_paths, etc.)
@@ -766,6 +754,10 @@ def main():
         for k, v in results.items()
         if isinstance(v, dict) and "confusion_matrix" in v
     }
+
+    if not test_results:
+        print(f"  No confusion matrix data found, skipping.")
+        return
 
     # Create individual confusion matrix figures
     for name, data in test_results.items():
@@ -780,34 +772,60 @@ def main():
             model_info=model_info,
         )
 
-        # Save as PNG image (model info in directory name)
         output_path = output_dir / f"confusion_matrix_{name}.png"
         fig.write_image(str(output_path), scale=2)
-        print(f"Saved: {output_path}")
+        print(f"  Saved: {output_path.name}")
 
     # Create combined figure with all confusion matrices
     combined_fig = create_combined_figure(test_results, model_info)
     combined_path = output_dir / "confusion_matrices_combined.png"
     combined_fig.write_image(str(combined_path), scale=2)
-    print(f"Saved: {combined_path}")
+    print(f"  Saved: {combined_path.name}")
 
     # Create metrics table
     metrics_table_fig = create_metrics_table(test_results, model_info)
     metrics_table_path = output_dir / "metrics_table.png"
     metrics_table_fig.write_image(str(metrics_table_path), scale=2)
-    print(f"Saved: {metrics_table_path}")
+    print(f"  Saved: {metrics_table_path.name}")
 
     # Create metrics bar chart
     metrics_bar_fig = create_metrics_bar_chart(test_results, model_info)
     metrics_bar_path = output_dir / "metrics_bar_chart.png"
     metrics_bar_fig.write_image(str(metrics_bar_path), scale=2)
-    print(f"Saved: {metrics_bar_path}")
+    print(f"  Saved: {metrics_bar_path.name}")
 
     # Create top misclassified labels figure (combined across runs)
     top_mis_fig = create_top_misclassified_figure(test_results, model_info)
     top_mis_path = output_dir / "top_misclassified_labels.png"
     top_mis_fig.write_image(str(top_mis_path), scale=2)
-    print(f"Saved: {top_mis_path}")
+    print(f"  Saved: {top_mis_path.name}")
+
+
+def main():
+    script_dir = Path(__file__).parent
+    final_results_dir = script_dir / "final_results"
+
+    if not final_results_dir.exists():
+        print(f"final_results/ directory not found at {final_results_dir}")
+        return
+
+    # Collect all result JSON files under final_results/*_results*/<classifier>/
+    result_files = sorted(final_results_dir.rglob("results_*.json"))
+
+    if not result_files:
+        print("No results_*.json files found in final_results/")
+        return
+
+    print(f"Found {len(result_files)} result files in final_results/")
+
+    for results_file in result_files:
+        # Output dir: final_results/<run_dir>/<classifier>/plots/
+        classifier_dir = results_file.parent
+        output_base_dir = classifier_dir / "plots"
+        try:
+            process_results_file(results_file, output_base_dir)
+        except Exception as e:
+            print(f"  ERROR processing {results_file.name}: {e}")
 
 
 if __name__ == "__main__":

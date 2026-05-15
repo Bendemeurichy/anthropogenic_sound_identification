@@ -30,28 +30,29 @@ from plotly.subplots import make_subplots
 
 # ── Path configuration ──────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).parent
+FINAL_RESULTS_DIR = SCRIPT_DIR / "final_results"
 
 # Validation result directories (created by runner scripts)
-SUDORMRF_DIR       = SCRIPT_DIR / "sudormrf_airplane_results"
-TUSS_SC_DIR        = SCRIPT_DIR / "tuss_singleclass_airplane_results"
-CLAPSEP_DIR        = SCRIPT_DIR / "clapsep_airplane_results"
-TUSS_MC_AIR_DIR    = SCRIPT_DIR / "tuss_multiclass_airplane_results"
-TUSS_SC_BIRD_DIR   = SCRIPT_DIR / "tuss_singleclass_bird_results"   # existing run_bird_validation
-TUSS_MC_BIRD_DIR   = SCRIPT_DIR / "tuss_multiclass_bird_results"
+SUDORMRF_DIR       = FINAL_RESULTS_DIR / "sudormrf_airplane_results"
+TUSS_SC_DIR        = FINAL_RESULTS_DIR / "tuss_singleclass_airplane_results"
+CLAPSEP_DIR        = FINAL_RESULTS_DIR / "clapsep_airplane_results"
+TUSS_MC_AIR_DIR    = FINAL_RESULTS_DIR / "tuss_multiclass_airplane_results"
+TUSS_SC_BIRD_DIR   = FINAL_RESULTS_DIR / "tuss_singleclass_bird_results"
+TUSS_MC_BIRD_DIR   = FINAL_RESULTS_DIR / "tuss_multiclass_bird_results"
 
 # Risoux result subdirectories (appended with _risoux by runners)
-SUDORMRF_RISOUX_DIR    = SCRIPT_DIR / "sudormrf_airplane_results_risoux"
-TUSS_SC_RISOUX_DIR     = SCRIPT_DIR / "tuss_singleclass_airplane_results_risoux"
-CLAPSEP_RISOUX_DIR     = SCRIPT_DIR / "clapsep_airplane_results_risoux"
-TUSS_MC_AIR_RISOUX_DIR = SCRIPT_DIR / "tuss_multiclass_airplane_results_risoux"
+SUDORMRF_RISOUX_DIR    = FINAL_RESULTS_DIR / "sudormrf_airplane_results_risoux"
+TUSS_SC_RISOUX_DIR     = FINAL_RESULTS_DIR / "tuss_singleclass_airplane_results_risoux"
+CLAPSEP_RISOUX_DIR     = FINAL_RESULTS_DIR / "clapsep_airplane_results_risoux"
+TUSS_MC_AIR_RISOUX_DIR = FINAL_RESULTS_DIR / "tuss_multiclass_airplane_results_risoux"
 
 # Noise robustness JSON (from test_noise_increase.py)
-NOISE_RESULTS_DIR  = SCRIPT_DIR / "noise_increase_results"
+NOISE_RESULTS_DIR  = FINAL_RESULTS_DIR / "noise_increase_results"
 
 # Activity gating sweep JSON (from run_activity_gating_sweep.py)
-GATING_SWEEP_JSON  = SCRIPT_DIR / "activity_gating_results" / "sweep_results.json"
+GATING_SWEEP_JSON  = FINAL_RESULTS_DIR / "activity_gating_results" / "sweep_results.json"
 
-OUTPUT_DIR = SCRIPT_DIR / "chapter_figures"
+OUTPUT_DIR = FINAL_RESULTS_DIR / "chapter_figures"
 
 # ── Plotly style constants ───────────────────────────────────────────────────
 TEMPLATE = "plotly_white"
