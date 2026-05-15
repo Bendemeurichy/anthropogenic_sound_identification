@@ -680,6 +680,13 @@ class TUSSInference:
 
             # Separate this segment (returned on CPU by _separate_segment)
             sources = self._separate_segment(chunk)  # (n_sources, N)
+            # Trim or pad to exactly N samples in case the model returns a
+            # slightly different length due to resampling/architecture quirks.
+            if sources.shape[1] != N:
+                if sources.shape[1] > N:
+                    sources = sources[:, :N]
+                else:
+                    sources = torch.nn.functional.pad(sources, (0, N - sources.shape[1]))
 
             end = start + N
             # Apply Hann to the source AND accumulate Hann² as the weight,

@@ -958,9 +958,21 @@ class ValidationPipeline:
                 f"Must be one of: 'plane', 'pann_finetuned', 'ast_finetuned', 'bird_mae', 'audioprotopnet'"
             )
 
-        self.classifier_segment_samples = int(
-            self.classifier_sample_rate * self.segment_length
-        )
+        # Derive classifier_segment_samples from the classifier's own native
+        # segment length (if exposed), NOT from the separator's window size.
+        # Using the separator's segment_length here would silently make the
+        # classifier operate on differently-sized windows depending on which
+        # separator is loaded (e.g. CLAPSep uses 10 s chunks vs TUSS 5 s),
+        # causing incomparable results between experiments.
+        cls_native_seg = getattr(self.classifier, "segment_samples", None)
+        if cls_native_seg is not None:
+            self.classifier_segment_samples = int(cls_native_seg)
+        else:
+            # Classifier has no fixed window (e.g. plain CNN) — fall back to
+            # the separator's segment length as before.
+            self.classifier_segment_samples = int(
+                self.classifier_sample_rate * self.segment_length
+            )
         print(f"  Classifier sample rate: {self.classifier_sample_rate} Hz")
         print(f"  Classifier segment samples: {self.classifier_segment_samples}")
 
