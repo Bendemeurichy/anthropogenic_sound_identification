@@ -1143,7 +1143,7 @@ def train_epoch(
     grad_accum_steps: int = 1,
     use_amp: bool = True,
     snr_range: tuple[float, float] = (-5.0, 5.0),
-    scaler: torch.amp.GradScaler | None = None,
+    scaler: "torch.cuda.amp.GradScaler | None" = None,
     scheduler: optim.lr_scheduler._LRScheduler | None = None,
 ) -> tuple[float, int, list[float]]:
     """Train for one epoch."""
@@ -1153,7 +1153,7 @@ def train_epoch(
 
     use_amp = use_amp and str(device).startswith("cuda")
     if scaler is None and use_amp:
-        scaler = torch.amp.GradScaler("cuda", enabled=True)
+        scaler = torch.cuda.amp.GradScaler(enabled=True)
     autocast_ctx = (
         torch.amp.autocast("cuda", dtype=torch.float16, enabled=True)
         if use_amp
@@ -1781,7 +1781,7 @@ def train(config: Config, timestamp: str | None = None):
     use_amp = getattr(config.training, "use_amp", True) and str(
         config.training.device
     ).startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
 
     validate_every_n = int(getattr(config.training, "validate_every_n_epochs", 1))
 
