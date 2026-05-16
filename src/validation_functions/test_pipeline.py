@@ -1268,6 +1268,8 @@ class ValidationPipeline:
         """Run separation model on a batch. Returns all sources. (B, n_sources, T)"""
         if hasattr(self.separator, "separate_batch"):
             return self.separator.separate_batch(waveforms)
+        elif isinstance(self.separator, SeparationPipeline):
+            return torch.stack([self.separator.separate_waveform(w, return_dict=False) for w in waveforms])
         else:
             return torch.stack([self.separator.separate_waveform(w) for w in waveforms])
 
