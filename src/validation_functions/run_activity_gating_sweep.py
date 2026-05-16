@@ -69,7 +69,7 @@ SPLIT = "test"
 SNR_RANGE = (-5, 5)
 SEED = 42
 OUTPUT_DIR = Path("./activity_gating_results")
-CACHE_SIZE = 5
+CACHE_SIZE = 10
 # ===================================================
 
 
@@ -115,11 +115,13 @@ def run_at_threshold(threshold: float, device: str) -> dict:
     primary_key = list(results.keys())[0]
     test_metrics = results[primary_key]
 
-    # We only run mixtures (skip_clean_tests=True) so expect one key
-    mix_key = [k for k in test_metrics if "mix" in k.lower() or "mixture" in k.lower()]
-    if not mix_key:
-        mix_key = list(test_metrics.keys())
-    metrics = test_metrics[mix_key[0]]
+    # We want the separation+classification mixture results, not classification-only
+    if "mix_sep_cls" in test_metrics:
+        metrics = test_metrics["mix_sep_cls"]
+    elif "mix_cls" in test_metrics:
+        metrics = test_metrics["mix_cls"]
+    else:
+        metrics = test_metrics[list(test_metrics.keys())[0]]
 
     # Get cache stats from the separator
     cache_stats = None
@@ -220,10 +222,12 @@ def main():
     )
     primary_key = list(base_results.keys())[0]
     test_metrics = base_results[primary_key]
-    mix_key = [k for k in test_metrics if "mix" in k.lower() or "mixture" in k.lower()]
-    if not mix_key:
-        mix_key = list(test_metrics.keys())
-    base_metrics = test_metrics[mix_key[0]]
+    if "mix_sep_cls" in test_metrics:
+        base_metrics = test_metrics["mix_sep_cls"]
+    elif "mix_cls" in test_metrics:
+        base_metrics = test_metrics["mix_cls"]
+    else:
+        base_metrics = test_metrics[list(test_metrics.keys())[0]]
 
     baseline_entry = {
         "threshold": None,
