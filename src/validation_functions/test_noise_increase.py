@@ -1,7 +1,7 @@
 """Experiment that gradually adds artificial white noise to COI+BG mixtures and
-measures separation's effect on energy preservation (RMS and SEL).
+measures separation robustness using scale-invariant metrics.
 
-This script measures how well separation preserves COI energy at different
+This script measures how well separation preserves COI content at different
 white-noise SNR levels by comparing noisy separation results against a clean
 baseline that uses a realistic COI+background mixture.  Classification is not
 used since classifiers are not robust to the extreme noise levels tested here.
@@ -17,10 +17,18 @@ Mixing formulae (no peak-clipping):
 
 The BG SNR is fixed at ``BASELINE_BG_SNR_DB`` (default +10 dB, top of the TUSS
 training range [-10, +10] dB) so that separation is meaningful even in the
-clean condition.  TUSS normalises the full mixture internally by its std and
-rescales all outputs by the same std.  Any scalar applied to the mixture before
-TUSS propagates to every separated output, so omitting peak-clipping ensures
-that a perfect separator reports 0 dB degradation at every white-noise level.
+clean condition.
+
+**Why scale-invariant metrics (SI-SDR / gain / residual)?**
+Both SudoRM-RF (``inference.py:497``) and TUSS (``inference.py:568``) rescale
+every separated source by ``mixture.std()``.  Adding white noise inflates the
+mixture std without changing the COI component, so a naive RMS/SEL comparison
+of ``separated_noisy`` vs. ``separated_clean`` is dominated by this rescaling
+artefact and reads as +21 dB "energy boost" at SNR=-20 dB even for a perfect
+separator.  We therefore use SI-SDR against the clean separated waveform as the
+primary robustness metric; it is invariant to per-output scaling and captures
+only the model's actual sensitivity to added noise.  The uncorrected RMS/SEL
+deltas are retained for comparison plots.
 """
 
 from __future__ import annotations
@@ -48,12 +56,76 @@ from src.validation_functions.test_pipeline import (  # noqa: E402
 from src.validation_functions.demo_separation import compute_energy_metrics  # noqa: E402
 
 
+def _si_sdr(
+    est: torch.Tensor,
+    ref: torch.Tensor,
+    eps: float = 1e-8,
+) -> Tuple[float, float, float]:
+    """Compute scale-invariant SDR plus an explicit gain/residual decomposition.
+
+    Both ``est`` and ``ref`` must be 1-D tensors of identical length.  Computation
+    is performed in ``float64`` to avoid precision drift at extreme SNRs.
+
+    The decomposition is::
+
+        alpha   = <est, ref> / <ref, ref>          # optimal scalar
+        s_proj  = alpha * ref                      # signal component of est
+        e       = est - s_proj                     # residual (noise + artefacts)
+        si_sdr  = 10 * log10(||s_proj||^2 / ||e||^2)
+        gain    = 20 * log10(|alpha|)              # scale-free COI preservation
+        resid   = 10 * log10(||e||^2 / N)          # leakage energy (dBFS)
+
+    All three metrics are invariant to per-output rescaling applied by the
+    separator (both SudoRM-RF and TUSS rescale outputs by mixture std), so they
+    measure the model's actual behaviour under noise rather than the rescaling
+    artefact.
+
+    Args:
+        est: Estimated waveform (1-D tensor).
+        ref: Reference waveform (1-D tensor, same length as ``est``).
+        eps: Numerical floor to avoid division-by-zero and log(0).
+
+    Returns:
+        Tuple ``(si_sdr_db, gain_db, residual_db)``.
+    """
+    if est.shape != ref.shape or est.dim() != 1:
+        raise ValueError(
+            f"_si_sdr expects 1-D tensors of identical shape; got "
+            f"est={tuple(est.shape)}, ref={tuple(ref.shape)}"
+        )
+
+    est64 = est.detach().to(torch.float64)
+    ref64 = ref.detach().to(torch.float64)
+
+    # Zero-mean both signals (standard SI-SDR convention)
+    est64 = est64 - est64.mean()
+    ref64 = ref64 - ref64.mean()
+
+    ref_energy = torch.dot(ref64, ref64)
+    alpha = torch.dot(est64, ref64) / (ref_energy + eps)
+    s_proj = alpha * ref64
+    e = est64 - s_proj
+
+    s_proj_energy = torch.dot(s_proj, s_proj)
+    e_energy = torch.dot(e, e)
+
+    si_sdr_db = 10.0 * torch.log10(s_proj_energy / (e_energy + eps) + eps)
+    gain_db = 20.0 * torch.log10(torch.abs(alpha) + eps)
+    residual_db = 10.0 * torch.log10(e_energy / float(len(e)) + eps)
+
+    return float(si_sdr_db), float(gain_db), float(residual_db)
+
+
 @dataclass
 class SegmentEnergyMetrics:
     """Per-segment energy metrics for detailed analysis and plotting.
 
     All energy values are in dBFS (dB relative to full scale).
     Delta values show change from clean baseline (positive = more energy).
+
+    The RMS/SEL delta fields are retained for historical comparison but contain
+    the separator's mixture-std rescaling artefact at low SNRs.  Use the
+    SI-SDR / gain / residual fields for robustness conclusions.
     """
     # Identifiers
     filename: str
@@ -73,13 +145,23 @@ class SegmentEnergyMetrics:
     separated_noisy_rms_db: float | None = None
     separated_noisy_sel_db: float | None = None
 
-    # Energy preservation metrics (dB differences)
+    # Uncorrected energy preservation metrics (dB differences).
+    # WARNING: contain mixture-std rescaling artefact at low SNRs; kept only
+    # for side-by-side comparison with the scale-invariant metrics below.
     clean_sep_rms_delta: float = 0.0  # separated_clean - original_clean
     clean_sep_sel_delta: float = 0.0
     noisy_sep_rms_delta: float | None = None  # separated_noisy - separated_clean
     noisy_sep_sel_delta: float | None = None
 
     actual_snr_db: float | None = None  # Measured SNR for verification
+
+    # Scale-invariant robustness metrics (primary).
+    # `si_sdr_clean_vs_coi_db` is a per-segment baseline property (separator
+    # fidelity on clean COI+BG mixtures) copied verbatim to every noisy row.
+    si_sdr_clean_vs_coi_db: float | None = None
+    si_sdr_noisy_vs_clean_db: float | None = None  # SI-SDR(coi_est_noisy, coi_est_clean)
+    gain_db_noisy_vs_clean: float | None = None    # 20·log10|alpha|, scale-free
+    residual_db_noisy_vs_clean: float | None = None  # leakage energy in dBFS
 
 
 @dataclass
@@ -95,9 +177,14 @@ class CleanBaselineStats:
     std_separated_rms_db: float
     mean_separated_sel_db: float
     std_separated_sel_db: float
-    # Energy preservation on clean signals
+    # Uncorrected energy preservation (contains rescaling artefact)
     mean_rms_preservation_db: float  # How much RMS changes after separation
     mean_sel_preservation_db: float  # How much SEL changes after separation
+    # Scale-invariant baseline fidelity: SI-SDR of clean separator output vs
+    # the true unit-RMS COI signal.  Characterises how well the separator
+    # extracts the COI in the absence of added noise.
+    mean_si_sdr_clean_vs_coi_db: float = 0.0
+    std_si_sdr_clean_vs_coi_db: float = 0.0
 
 
 @dataclass
@@ -112,7 +199,8 @@ class SNREnergyStats:
     mean_separated_noisy_rms_db: float
     mean_separated_noisy_sel_db: float
 
-    # Energy degradation from clean separated baseline
+    # Uncorrected degradation from clean separated baseline (kept for
+    # comparison; contains the separator's mixture-std rescaling artefact)
     mean_rms_degradation_db: float  # separated_noisy - separated_clean
     mean_sel_degradation_db: float
     std_rms_degradation_db: float
@@ -120,6 +208,15 @@ class SNREnergyStats:
 
     # Actual measured SNR
     mean_actual_snr_db: float
+
+    # Scale-invariant robustness metrics (primary).
+    # SI-SDR is measured against the clean separator output so it isolates
+    # the noise's effect from baseline separation distortion.
+    mean_si_sdr_noisy_vs_clean_db: float = 0.0
+    std_si_sdr_noisy_vs_clean_db: float = 0.0
+    mean_gain_db_noisy_vs_clean: float = 0.0
+    std_gain_db_noisy_vs_clean: float = 0.0
+    mean_residual_db_noisy_vs_clean: float = 0.0
 
 
 def _extract_coi_df(df: pd.DataFrame, coi_synonyms: set = None) -> pd.DataFrame:
@@ -381,14 +478,29 @@ def _compute_clean_baseline_energy(
     filename_map: Dict[int, str],
     rec_seg_count: Dict[int, int],
     batch_size: int = 16,
-) -> Tuple[CleanBaselineStats, Dict[Tuple[int, int], SegmentEnergyMetrics]]:
+) -> Tuple[
+    CleanBaselineStats,
+    Dict[Tuple[int, int], SegmentEnergyMetrics],
+    Dict[Tuple[int, int], torch.Tensor],
+]:
     """Compute baseline energy metrics on COI+BG mixtures (no added white noise).
 
     Uses pre-loaded unit-RMS segments from ``_preload_coi_segments`` and the
     fixed background assignment from ``_assign_backgrounds``.  Provides the
-    reference point used to measure energy degradation at each white-noise
+    reference point used to measure separation robustness at each white-noise
     level.  ``original_clean_rms_db`` tracks COI-only energy (not mixture
     energy) to keep the energy-preservation metric interpretable.
+
+    For each segment we additionally:
+      * cache the separated COI waveform (CPU tensor) so the SNR sweep can
+        compute SI-SDR(coi_est_noisy, coi_est_clean) without re-running the
+        separator on the clean mixture;
+      * compute ``si_sdr_clean_vs_coi_db`` as a one-shot measure of how well
+        the separator extracts the COI in the absence of added noise.
+
+    Memory note: the waveform cache holds ``n_total_segments × segment_samples``
+    float32 values on CPU.  For TUSS @ 48 kHz / 6 s, each segment ≈ 1.15 MB,
+    so 5 000 segments ≈ 5.8 GB.  A size estimate is printed after loading.
 
     Args:
         pipeline: ValidationPipeline with loaded separator model.
@@ -404,12 +516,16 @@ def _compute_clean_baseline_energy(
 
     Returns:
         Tuple of:
-            - CleanBaselineStats: Aggregated statistics.
+            - :class:`CleanBaselineStats`: Aggregated statistics.
             - Dict mapping ``(rec_idx, seg_idx)`` to
               :class:`SegmentEnergyMetrics`.
+            - Dict mapping ``(rec_idx, seg_idx)`` to the clean separated COI
+              waveform (1-D CPU tensor, length = segment_samples).  Used by
+              the SNR sweep as the reference for SI-SDR.
     """
     all_metrics: List[SegmentEnergyMetrics] = []
     baseline_map: Dict[Tuple[int, int], SegmentEnergyMetrics] = {}
+    clean_waveform_cache: Dict[Tuple[int, int], torch.Tensor] = {}
 
     bg_amp = 10 ** (-bg_snr_db / 20)
     n_recordings = len(rec_seg_count)
@@ -428,7 +544,7 @@ def _compute_clean_baseline_energy(
         filename = filename_map[rec_idx]
 
         # Build COI+BG mixtures — no added white noise for the clean baseline.
-        mixture_tensors = []
+        mixture_tensors: List[torch.Tensor] = []
         for s in range(n_segs):
             coi_norm = segment_cache[(rec_idx, s)]
             bg_norm = bg_assignment[(rec_idx, s)]
@@ -451,11 +567,19 @@ def _compute_clean_baseline_energy(
                 coi_only = segment_cache[(rec_idx, seg_idx)]
                 coi_est = coi_est_batch[b_idx]
 
+                # Move to CPU once and reuse for energy + SI-SDR + cache.
+                coi_est_cpu = coi_est.detach().cpu().contiguous()
+
                 orig_metrics = compute_energy_metrics(coi_only, pipeline.sample_rate)
-                sep_metrics = compute_energy_metrics(coi_est, pipeline.sample_rate)
+                sep_metrics = compute_energy_metrics(coi_est_cpu, pipeline.sample_rate)
 
                 rms_delta = sep_metrics["rms_db"] - orig_metrics["rms_db"]
                 sel_delta = sep_metrics["sel_db"] - orig_metrics["sel_db"]
+
+                # Baseline separator fidelity: how well does the clean
+                # separated output match the true COI?  Scale-invariant, so
+                # the mixture-std rescaling has no effect here either.
+                si_sdr_baseline, _, _ = _si_sdr(coi_est_cpu, coi_only)
 
                 seg_metrics = SegmentEnergyMetrics(
                     filename=filename,
@@ -468,10 +592,12 @@ def _compute_clean_baseline_energy(
                     separated_clean_sel_db=sep_metrics["sel_db"],
                     clean_sep_rms_delta=rms_delta,
                     clean_sep_sel_delta=sel_delta,
+                    si_sdr_clean_vs_coi_db=si_sdr_baseline,
                 )
 
                 all_metrics.append(seg_metrics)
                 baseline_map[(rec_idx, seg_idx)] = seg_metrics
+                clean_waveform_cache[(rec_idx, seg_idx)] = coi_est_cpu
 
     # Compute aggregate statistics
     n_segs_total = len(all_metrics)
@@ -482,6 +608,7 @@ def _compute_clean_baseline_energy(
     sep_sel = [m.separated_clean_sel_db for m in all_metrics]
     rms_deltas = [m.clean_sep_rms_delta for m in all_metrics]
     sel_deltas = [m.clean_sep_sel_delta for m in all_metrics]
+    si_sdr_clean = [m.si_sdr_clean_vs_coi_db for m in all_metrics]
 
     baseline_stats = CleanBaselineStats(
         n_samples=n_recordings,
@@ -496,17 +623,32 @@ def _compute_clean_baseline_energy(
         std_separated_sel_db=float(np.std(sep_sel)),
         mean_rms_preservation_db=float(np.mean(rms_deltas)),
         mean_sel_preservation_db=float(np.mean(sel_deltas)),
+        mean_si_sdr_clean_vs_coi_db=float(np.mean(si_sdr_clean)),
+        std_si_sdr_clean_vs_coi_db=float(np.std(si_sdr_clean)),
     )
+
+    # Print cache size — useful for catching memory issues early.
+    if clean_waveform_cache:
+        sample_tensor = next(iter(clean_waveform_cache.values()))
+        bytes_per_seg = sample_tensor.numel() * sample_tensor.element_size()
+        total_gb = bytes_per_seg * len(clean_waveform_cache) / 1e9
+        print(
+            f"\nClean waveform cache: {len(clean_waveform_cache)} segments "
+            f"× {sample_tensor.numel()} samples = {total_gb:.2f} GB on CPU."
+        )
 
     print(f"\nClean Baseline Results ({n_segs_total} segments):")
     print(f"  Original:  RMS={baseline_stats.mean_original_rms_db:.2f} dBFS, "
           f"SEL={baseline_stats.mean_original_sel_db:.2f} dBFS")
     print(f"  Separated: RMS={baseline_stats.mean_separated_rms_db:.2f} dBFS, "
           f"SEL={baseline_stats.mean_separated_sel_db:.2f} dBFS")
-    print(f"  Preservation: RMS_delta={baseline_stats.mean_rms_preservation_db:+.2f} dB, "
+    print(f"  Uncorrected preservation: RMS_delta={baseline_stats.mean_rms_preservation_db:+.2f} dB, "
           f"SEL_delta={baseline_stats.mean_sel_preservation_db:+.2f} dB")
+    print(f"  Baseline separator fidelity: SI-SDR(clean vs. true COI) = "
+          f"{baseline_stats.mean_si_sdr_clean_vs_coi_db:+.2f} ± "
+          f"{baseline_stats.std_si_sdr_clean_vs_coi_db:.2f} dB")
 
-    return baseline_stats, baseline_map
+    return baseline_stats, baseline_map, clean_waveform_cache
 
 
 def run_noise_increase_experiment(
@@ -518,20 +660,20 @@ def run_noise_increase_experiment(
     filename_map: Dict[int, str],
     rec_seg_count: Dict[int, int],
     baseline_map: Dict[Tuple[int, int], SegmentEnergyMetrics],
+    clean_waveform_cache: Dict[Tuple[int, int], torch.Tensor],
     snr_levels_db: List[float],
     batch_size: int = 16,
 ) -> Tuple[List[SegmentEnergyMetrics], List[SNREnergyStats]]:
-    """Run robustness sweep over white-noise SNR levels measuring separation degradation.
+    """Run robustness sweep over white-noise SNR levels.
 
     For each SNR level, mixes pre-loaded unit-RMS COI segments with a fixed
     unit-RMS background and unit-RMS white noise, then measures how much the
     separated COI signal degrades compared to the clean baseline (COI+BG,
-    no added noise).  This isolates the effect of white noise on separation
-    quality independently of the COI:BG balance.
+    no added noise).
 
     Mixture formula::
 
-        bg_amplitude   = 10 ** (−bg_snr_db / 20)
+        bg_amplitude    = 10 ** (−bg_snr_db / 20)
         noise_amplitude = 10 ** (−snr_db / 20)
         mixture = coi_unit_rms + bg_unit_rms * bg_amplitude
                 + noise_unit_rms * noise_amplitude
@@ -539,16 +681,26 @@ def run_noise_increase_experiment(
     ``actual_snr_db`` is measured as COI power vs. white-noise power only (BG
     is treated as the fixed acoustic context, not the swept variable).
 
-    **Why no peak-clipping?**  TUSS ``_separate_batch`` normalises the
-    mixture by its std and rescales all outputs by the same std.  A scalar
-    applied to the mixture before TUSS therefore propagates to every separated
-    output:  ``separated_out ∝ scale_factor × true_output``.  For a perfect
-    separator the degradation metric ``separated_noisy − separated_clean``
-    would then read ``20·log₁₀(scale_factor) < 0`` instead of 0 dB, a
-    purely artefactual bias.
+    **Primary metric: SI-SDR vs. clean separated output.**
+    Both SudoRM-RF (``inference.py:497``) and TUSS (``inference.py:568``)
+    rescale every separated source by ``mixture.std()``.  Adding white noise
+    inflates the mixture std without changing the COI component, so the naive
+    RMS comparison ``separated_noisy_rms − separated_clean_rms`` is dominated
+    by this scaling factor (~+20 dB at SNR = -20 dB) and does *not* measure
+    actual separation robustness.
 
-    Degradation metric: ``separated_noisy_rms − separated_clean_rms``
-    (negative = noise caused the separator to suppress more energy).
+    We instead use SI-SDR, gain, and residual energy against the cached clean
+    separated waveform (``clean_waveform_cache``).  All three metrics are
+    scale-invariant, so the rescaling artefact cancels and only the model's
+    true sensitivity to added noise remains:
+
+        SI-SDR > 0 dB   ⇒ noise mostly leaves COI content intact
+        gain    ≈ 0 dB  ⇒ COI passed through unchanged (up to scale)
+        residual         ⇒ how loud the noise/artefact leakage is
+
+    The uncorrected RMS/SEL deltas are still computed and stored under the
+    ``noisy_sep_*_delta`` fields for comparison plots that document why
+    naive energy metrics are misleading.
 
     Args:
         pipeline: ValidationPipeline with loaded separator model.
@@ -564,6 +716,9 @@ def run_noise_increase_experiment(
         rec_seg_count: ``{rec_idx: n_segments}`` from ``_preload_coi_segments``.
         baseline_map: ``{(rec_idx, seg_idx): SegmentEnergyMetrics}`` from
             ``_compute_clean_baseline_energy``.
+        clean_waveform_cache: ``{(rec_idx, seg_idx): clean separated COI
+            waveform}`` from ``_compute_clean_baseline_energy``.  Used as the
+            reference signal for SI-SDR.
         snr_levels_db: List of white-noise SNR levels to test (in dB).
         batch_size: Number of segments to separate in one GPU call.
 
@@ -576,6 +731,9 @@ def run_noise_increase_experiment(
     """
     if not segment_cache:
         raise ValueError("No COI segments available for experiment.")
+    if not clean_waveform_cache:
+        raise ValueError("clean_waveform_cache is empty — pass the dict "
+                         "returned by _compute_clean_baseline_energy.")
 
     all_segment_metrics: List[SegmentEnergyMetrics] = []
     per_snr_stats: List[SNREnergyStats] = []
@@ -635,15 +793,34 @@ def run_noise_increase_experiment(
 
                 for b_idx in range(len(batch_mix)):
                     seg_idx = i + b_idx
-                    baseline = baseline_map[(rec_idx, seg_idx)]
+                    key = (rec_idx, seg_idx)
+                    assert key in clean_waveform_cache, (
+                        f"Missing clean reference for {key}"
+                    )
+                    baseline = baseline_map[key]
                     mixture_metrics = mixture_metrics_list[seg_idx]
                     coi_est = coi_est_batch[b_idx]
+                    coi_est_cpu = coi_est.detach().cpu().contiguous()
 
-                    sep_noisy_metrics = compute_energy_metrics(coi_est, pipeline.sample_rate)
+                    sep_noisy_metrics = compute_energy_metrics(
+                        coi_est_cpu, pipeline.sample_rate
+                    )
 
-                    # Degradation: how much does noise degrade separated energy?
-                    noisy_rms_delta = sep_noisy_metrics["rms_db"] - baseline.separated_clean_rms_db
-                    noisy_sel_delta = sep_noisy_metrics["sel_db"] - baseline.separated_clean_sel_db
+                    # Uncorrected (rescaling-artefact contaminated) deltas.
+                    noisy_rms_delta = (
+                        sep_noisy_metrics["rms_db"] - baseline.separated_clean_rms_db
+                    )
+                    noisy_sel_delta = (
+                        sep_noisy_metrics["sel_db"] - baseline.separated_clean_sel_db
+                    )
+
+                    # Scale-invariant robustness metrics: how much does noise
+                    # perturb the separator's behaviour relative to its clean
+                    # output?  Invariant to the model's mixture-std rescaling.
+                    ref_clean = clean_waveform_cache[key]
+                    si_sdr_db, gain_db, residual_db = _si_sdr(
+                        coi_est_cpu, ref_clean
+                    )
 
                     seg_metrics = SegmentEnergyMetrics(
                         filename=filename,
@@ -657,6 +834,7 @@ def run_noise_increase_experiment(
                         separated_clean_sel_db=baseline.separated_clean_sel_db,
                         clean_sep_rms_delta=baseline.clean_sep_rms_delta,
                         clean_sep_sel_delta=baseline.clean_sep_sel_delta,
+                        si_sdr_clean_vs_coi_db=baseline.si_sdr_clean_vs_coi_db,
                         # Noisy experiment values
                         mixture_rms_db=mixture_metrics["rms_db"],
                         mixture_sel_db=mixture_metrics["sel_db"],
@@ -665,6 +843,10 @@ def run_noise_increase_experiment(
                         noisy_sep_rms_delta=noisy_rms_delta,
                         noisy_sep_sel_delta=noisy_sel_delta,
                         actual_snr_db=actual_snrs[seg_idx],
+                        # Scale-invariant robustness metrics (primary)
+                        si_sdr_noisy_vs_clean_db=si_sdr_db,
+                        gain_db_noisy_vs_clean=gain_db,
+                        residual_db_noisy_vs_clean=residual_db,
                     )
 
                     snr_segment_metrics.append(seg_metrics)
@@ -680,6 +862,9 @@ def run_noise_increase_experiment(
         rms_deltas = [m.noisy_sep_rms_delta for m in snr_segment_metrics]
         sel_deltas = [m.noisy_sep_sel_delta for m in snr_segment_metrics]
         act_snrs = [m.actual_snr_db for m in snr_segment_metrics]
+        si_sdrs = [m.si_sdr_noisy_vs_clean_db for m in snr_segment_metrics]
+        gains = [m.gain_db_noisy_vs_clean for m in snr_segment_metrics]
+        residuals = [m.residual_db_noisy_vs_clean for m in snr_segment_metrics]
 
         snr_stats = SNREnergyStats(
             snr_db=float(snr_db),
@@ -693,24 +878,48 @@ def run_noise_increase_experiment(
             std_rms_degradation_db=float(np.std(rms_deltas)),
             std_sel_degradation_db=float(np.std(sel_deltas)),
             mean_actual_snr_db=float(np.mean(act_snrs)),
+            mean_si_sdr_noisy_vs_clean_db=float(np.mean(si_sdrs)),
+            std_si_sdr_noisy_vs_clean_db=float(np.std(si_sdrs)),
+            mean_gain_db_noisy_vs_clean=float(np.mean(gains)),
+            std_gain_db_noisy_vs_clean=float(np.std(gains)),
+            mean_residual_db_noisy_vs_clean=float(np.mean(residuals)),
         )
 
         per_snr_stats.append(snr_stats)
 
         print(f"  Segments: {n_segs_total}")
         print(f"  Target SNR: {snr_db:.1f} dB, Actual: {snr_stats.mean_actual_snr_db:.1f} dB")
-        print(f"  Separated RMS: {snr_stats.mean_separated_noisy_rms_db:.2f} dBFS "
-              f"(degradation: {snr_stats.mean_rms_degradation_db:+.2f} dB)")
-        print(f"  Separated SEL: {snr_stats.mean_separated_noisy_sel_db:.2f} dBFS "
-              f"(degradation: {snr_stats.mean_sel_degradation_db:+.2f} dB)")
+        print(f"  SI-SDR(noisy vs. clean): "
+              f"{snr_stats.mean_si_sdr_noisy_vs_clean_db:+.2f} ± "
+              f"{snr_stats.std_si_sdr_noisy_vs_clean_db:.2f} dB")
+        print(f"  Gain (scale-free preservation): "
+              f"{snr_stats.mean_gain_db_noisy_vs_clean:+.2f} ± "
+              f"{snr_stats.std_gain_db_noisy_vs_clean:.2f} dB")
+        print(f"  Residual (leakage energy): "
+              f"{snr_stats.mean_residual_db_noisy_vs_clean:+.2f} dBFS")
+        print(f"  [Uncorrected] Separated RMS: "
+              f"{snr_stats.mean_separated_noisy_rms_db:.2f} dBFS "
+              f"(Δ {snr_stats.mean_rms_degradation_db:+.2f} dB) — "
+              f"contains rescaling artefact")
 
     # Print summary
     print(f"\n{'=' * 60}")
     print("EXPERIMENT SUMMARY")
     print(f"{'=' * 60}")
-    print("Separation Quality Degradation vs Clean (separated_noisy - separated_clean):")
-    print("  Negative values = signal gets worse with noise")
-    print("  Positive values = noise leaking into COI output")
+    print("Robustness (scale-invariant, primary):")
+    print("  SI-SDR > 0 ⇒ noise barely perturbs separator output")
+    print("  gain   ≈ 0 ⇒ COI content preserved (up to scale)")
+    print("  residual    = noise/artefact leakage energy (dBFS)")
+    for s in per_snr_stats:
+        print(
+            f"  SNR {s.snr_db:+6.1f} dB: "
+            f"SI-SDR {s.mean_si_sdr_noisy_vs_clean_db:+6.2f} dB, "
+            f"gain {s.mean_gain_db_noisy_vs_clean:+6.2f} dB, "
+            f"residual {s.mean_residual_db_noisy_vs_clean:+6.2f} dBFS"
+        )
+    print()
+    print("Uncorrected RMS/SEL deltas (contain mixture-std rescaling artefact;")
+    print("kept for comparison plots — do NOT use for robustness conclusions):")
     for s in per_snr_stats:
         print(f"  SNR {s.snr_db:+6.1f} dB: RMS {s.mean_rms_degradation_db:+6.2f} dB, "
               f"SEL {s.mean_sel_degradation_db:+6.2f} dB")
@@ -734,19 +943,19 @@ def main() -> None:
 
     # ---- Model selection ----
     # Set USE_TUSS = True to test TUSS model instead of SudoRM-RF
-    USE_TUSS = False
+    USE_TUSS = True
 
     if USE_TUSS:
-        # TUSS model configuration
-        # Update these paths to point to your trained TUSS checkpoint
+        # TUSS model configuration — using the 14_05 checkpoint with the
+        # May 3rd separation dataset CSV (shared across TUSS checkpoints).
         DATA_CSV = str(
-            PROJECT_ROOT
-            / "src/models/tuss/checkpoints/YOUR_CHECKPOINT_DIR/separation_dataset.csv"
+            PROJECT_ROOT / "src/models/tuss/checkpoints/separation_dataset.csv"
         )
         SEP_CHECKPOINT = str(
-            PROJECT_ROOT / "src/models/tuss/checkpoints/YOUR_CHECKPOINT_DIR"
+            PROJECT_ROOT / "src/models/tuss/checkpoints/multi_coi_14_05"
         )
-        # TUSS prompts — must match training config (multi_coi_29_04: "airplane", "birds")
+        # TUSS prompts — must match training config
+        # (multi_coi_14_05 uses the same prompt vocabulary as multi_coi_29_04)
         TUSS_COI_PROMPT = "birds" if COI_TYPE == "bird" else "airplane"
         TUSS_BG_PROMPT = "background"
     else:
@@ -783,12 +992,11 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # ======================================================
 
-    # Guard: catch un-edited placeholder paths early
-    if USE_TUSS and "YOUR_CHECKPOINT_DIR" in DATA_CSV:
+    # Guard: catch missing checkpoint dir early
+    if USE_TUSS and not Path(SEP_CHECKPOINT).is_dir():
         raise RuntimeError(
-            "USE_TUSS=True but DATA_CSV/SEP_CHECKPOINT still contain "
-            "'YOUR_CHECKPOINT_DIR'.  Update the paths in the CONFIG section "
-            "before running."
+            f"USE_TUSS=True but SEP_CHECKPOINT directory does not exist: "
+            f"{SEP_CHECKPOINT}"
         )
 
     print("Initializing pipeline...")
@@ -854,8 +1062,10 @@ def main() -> None:
         seed=SEED,
     )
 
-    # Compute clean baseline (separator run on COI+BG mixture, no white noise)
-    clean_baseline_stats, baseline_map = _compute_clean_baseline_energy(
+    # Compute clean baseline (separator run on COI+BG mixture, no white noise).
+    # Also returns the per-segment separated-clean waveform cache used as the
+    # SI-SDR reference during the noisy sweep.
+    clean_baseline_stats, baseline_map, clean_waveform_cache = _compute_clean_baseline_energy(
         pipeline=pipeline,
         segment_cache=segment_cache,
         bg_assignment=bg_assignment,
@@ -875,6 +1085,7 @@ def main() -> None:
         filename_map=filename_map,
         rec_seg_count=rec_seg_count,
         baseline_map=baseline_map,
+        clean_waveform_cache=clean_waveform_cache,
         snr_levels_db=SNR_LEVELS_DB,
         batch_size=BATCH_SIZE,
     )
@@ -908,6 +1119,11 @@ def main() -> None:
             "noisy_sep_rms_delta": seg.noisy_sep_rms_delta,
             "noisy_sep_sel_delta": seg.noisy_sep_sel_delta,
             "actual_snr_db": seg.actual_snr_db,
+            # Scale-invariant robustness metrics (primary)
+            "si_sdr_clean_vs_coi_db": seg.si_sdr_clean_vs_coi_db,
+            "si_sdr_noisy_vs_clean_db": seg.si_sdr_noisy_vs_clean_db,
+            "gain_db_noisy_vs_clean": seg.gain_db_noisy_vs_clean,
+            "residual_db_noisy_vs_clean": seg.residual_db_noisy_vs_clean,
         })
 
     df_results = pd.DataFrame(csv_data)
@@ -944,7 +1160,22 @@ def main() -> None:
             "max_sel_degradation_db": float(max(s.mean_sel_degradation_db for s in per_snr_stats)),
             "min_rms_degradation_db": float(min(s.mean_rms_degradation_db for s in per_snr_stats)),
             "min_sel_degradation_db": float(min(s.mean_sel_degradation_db for s in per_snr_stats)),
+            # Scale-invariant primary metrics (use these for robustness conclusions)
+            "max_si_sdr_noisy_vs_clean_db": float(
+                max(s.mean_si_sdr_noisy_vs_clean_db for s in per_snr_stats)
+            ),
+            "min_si_sdr_noisy_vs_clean_db": float(
+                min(s.mean_si_sdr_noisy_vs_clean_db for s in per_snr_stats)
+            ),
         },
+        "metrics_note": (
+            "Primary robustness metric is SI-SDR(separated_noisy, separated_clean): "
+            "scale-invariant, immune to the separator's mixture-std rescaling "
+            "artefact (TUSS inference.py:558,568; SudoRM-RF inference.py:497) "
+            "that inflates RMS/SEL deltas at low SNR. The *_rms_delta and "
+            "*_sel_delta fields are kept for comparison plots only — do NOT "
+            "use them to draw robustness conclusions."
+        ),
     }
 
     if USE_TUSS:
