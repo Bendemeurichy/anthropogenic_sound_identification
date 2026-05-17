@@ -565,7 +565,7 @@ class TUSSInference:
         output = self.model(x, prompts)  # (B, n_sources, T)
 
         # Rescale outputs
-        sources = output.cpu() * std.unsqueeze(2)  # (B, n_sources, T)
+        sources = output.cpu() * std.detach().cpu().unsqueeze(2)  # (B, n_sources, T)
 
         return sources
 
@@ -604,7 +604,7 @@ class TUSSInference:
 
         # Scale outputs by input std to restore reasonable amplitude
         # (model outputs normalized sources, we rescale to match input level)
-        sources = output[0].cpu() * std  # (n_sources, T)
+        sources = output[0].cpu() * std.detach().cpu()  # (n_sources, T)
 
         return sources
 
