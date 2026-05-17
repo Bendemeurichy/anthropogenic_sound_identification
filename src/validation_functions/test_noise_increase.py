@@ -88,11 +88,25 @@ def _si_sdr(
     Returns:
         Tuple ``(si_sdr_db, gain_db, residual_db)``.
     """
-    if est.shape != ref.shape or est.dim() != 1:
+    if est.dim() != 1 or ref.dim() != 1:
         raise ValueError(
-            f"_si_sdr expects 1-D tensors of identical shape; got "
-            f"est={tuple(est.shape)}, ref={tuple(ref.shape)}"
+            f"_si_sdr expects 1-D tensors; got est.dim={est.dim()}, "
+            f"ref.dim={ref.dim()}"
         )
+
+    # Separators (TUSS / SudoRM-RF) pad the input up to the next chunk-size
+    # multiple, so estimates can be a few hundred samples longer than the true
+    # COI reference. Truncate both to the common length. Guard against gross
+    # mismatches that would indicate a real bug (e.g. wrong sample rate).
+    n_est, n_ref = int(est.shape[0]), int(ref.shape[0])
+    n = min(n_est, n_ref)
+    if max(n_est, n_ref) - n > max(n, 1) * 0.05:
+        raise ValueError(
+            f"_si_sdr length mismatch exceeds 5% padding tolerance: "
+            f"est={n_est}, ref={n_ref}"
+        )
+    est = est[:n]
+    ref = ref[:n]
 
     est64 = est.detach().to(torch.float64)
     ref64 = ref.detach().to(torch.float64)
