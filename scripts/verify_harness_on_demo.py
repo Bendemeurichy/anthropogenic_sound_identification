@@ -109,30 +109,38 @@ def list_webdataset_samples():
 
 
 def pick_samples():
-    """Pick N_AIRPLANE airplane + N_BACKGROUND ESC50-non-airplane background samples."""
-    airplane: List[Tuple[Path, str, dict, dict]] = []
+    """Pick N_AIRPLANE ESC50 airplane + N_AIRPLANE aerosonicdb airplane + N_BACKGROUND ESC50 BG."""
+    airplane_esc50: List[Tuple[Path, str, dict, dict]] = []
+    airplane_aero: List[Tuple[Path, str, dict, dict]] = []
     background: List[Tuple[Path, str, dict, dict]] = []
     seen_bg_labels: set = set()
 
     for shard, base, exts, meta in list_webdataset_samples():
         label = str(meta.get("label", "")).strip()
         dataset = str(meta.get("dataset", "")).strip()
+        is_plane = is_coi_label(label, AIRPLANE_SYNONYMS)
 
-        if len(airplane) < N_AIRPLANE and is_coi_label(label, AIRPLANE_SYNONYMS):
-            airplane.append((shard, base, exts, meta))
+        if is_plane and dataset == "esc50" and len(airplane_esc50) < N_AIRPLANE:
+            airplane_esc50.append((shard, base, exts, meta))
+        elif is_plane and dataset == "aerosonicdb" and len(airplane_aero) < N_AIRPLANE:
+            airplane_aero.append((shard, base, exts, meta))
         elif (
             len(background) < N_BACKGROUND
             and dataset == "esc50"
-            and not is_coi_label(label, AIRPLANE_SYNONYMS)
+            and not is_plane
             and label not in seen_bg_labels
         ):
             background.append((shard, base, exts, meta))
             seen_bg_labels.add(label)
 
-        if len(airplane) >= N_AIRPLANE and len(background) >= N_BACKGROUND:
+        if (
+            len(airplane_esc50) >= N_AIRPLANE
+            and len(airplane_aero) >= N_AIRPLANE
+            and len(background) >= N_BACKGROUND
+        ):
             break
 
-    return airplane, background
+    return airplane_esc50 + airplane_aero, background
 
 
 def extract_audio_to_tmp(shard: Path, exts: dict) -> Path:
