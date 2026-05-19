@@ -2,50 +2,13 @@
 """
 plot_dissertation_figures.py — Results & Discussion chapter visualisations.
 
-Single entry point for all quantitative figures and LaTeX tables cited in the
-dissertation.  Qualitative spectrograms are handled by plot_qualitative_gallery.py.
-
-Key design principles
----------------------
-1. **Delta-first framing**: classification figures show *improvement deltas*
-   (separator_on − separator_off) rather than absolute scores, making it clear
-   *which model helps classification the most* — the central argument for
-   selecting TUSS for the multi-class extension.
-
-2. **Per-classifier best-run selection**: for each (model, classifier) pair,
-   the run with the highest ΔF1 is selected.  This avoids conflating
-   classifier quality with separator quality.
-
-3. **Both classifiers shown**: AST and PANN for airplane; BirdMAE and
-   AudioProtoPNet for bird — minimises architectural bias per the methodology.
-
-4. **Three models only**: SuDoRM-RF, CLAPSep, TUSS (multi-class).
-   No TUSS single-class data directory exists.
-
-Outputs (under ``final_results/dissertation_figures/``):
-  Figures (PNG @ 2x + HTML interactive):
-    fig_4_1_separation_metrics      — SI-SNRi / SDR per model × classifier
-    fig_4_2_energy_preservation     — Signed RMS / SEL deviation
-    fig_4_3_classification_impact   — Diverging ΔF1 / ΔPrecision / ΔRecall bars
-    fig_4_3_classification_deltas_grid — 2×2 grid: clean & mix deltas per model
-    fig_4_4_confusion_shifts        — Δ confusion-matrix heatmaps
-    fig_4_5_generalisation_gap      — In-dist vs Risoux F1 with gap
-    fig_4_6_multiclass_overview      — TUSS airplane + bird heads
-    fig_4_7_noise_robustness        — SI-SDR vs input SNR
-    fig_4_8_activity_gating          — Quality–efficiency trade-off curve
-
-  LaTeX tables (``tables/*.tex``):
-    tab_separation_metrics.tex
-    tab_classification_impact.tex
-    tab_generalisation.tex
-    tab_multiclass_tuss.tex
-    tab_best_runs.tex
-    tab_noise_robustness.tex
-    tab_activity_gating.tex
-
-Usage::
-
-    python plot_dissertation_figures.py
+Key design changes (v2):
+- Matched runs: signal and classification figures use the SAME timestamp
+  across both classifiers (AST + PANN), averaging signal metrics and
+  showing per-classifier classification results side-by-side.
+- Fig 4.7: only the latest noise-robustness JSON is plotted.
+- Fig 4.8: split into two clear subplots (F1 vs threshold, hit rate vs threshold).
+- Fig 4.4: shows absolute confusion values with a neutral diverging scale.
 """
 
 from __future__ import annotations
@@ -55,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -66,26 +30,22 @@ FINAL_RESULTS_DIR = SCRIPT_DIR / "final_results"
 OUTPUT_DIR = FINAL_RESULTS_DIR / "dissertation_figures"
 TABLE_DIR = OUTPUT_DIR / "tables"
 
-# Model directories (airplane COI)
 SUDORMRF_DIR = FINAL_RESULTS_DIR / "sudormrf_airplane_results"
 CLAPSEP_DIR = FINAL_RESULTS_DIR / "clapsep_airplane_results"
 TUSS_MC_AIR_DIR = FINAL_RESULTS_DIR / "tuss_multiclass_airplane_results"
 
-# Risoux (OOD) directories
 SUDORMRF_RISOUX_DIR = FINAL_RESULTS_DIR / "sudormrf_airplane_results_risoux"
 CLAPSEP_RISOUX_DIR = FINAL_RESULTS_DIR / "clapsep_airplane_results_risoux"
 TUSS_MC_AIR_RISOUX_DIR = FINAL_RESULTS_DIR / "tuss_multiclass_airplane_results_risoux"
 
-# Bird COI
 TUSS_MC_BIRD_DIR = FINAL_RESULTS_DIR / "tuss_multiclass_bird_results"
 TUSS_MC_BIRD_RISOUX_DIR = FINAL_RESULTS_DIR / "tuss_multiclass_bird_results_risoux"
 
-# Supplementary
 NOISE_RESULTS_DIR = FINAL_RESULTS_DIR / "noise_increase_results"
 GATING_RESULTS_DIR = FINAL_RESULTS_DIR / "activity_gating_results"
 
 # ---------------------------------------------------------------------------
-# Model registry — single source of truth
+# Registry
 # ---------------------------------------------------------------------------
 SEPARATORS_AIRPLANE: List[Tuple[str, Path, Optional[Path]]] = [
     ("SuDoRM-RF", SUDORMRF_DIR, SUDORMRF_RISOUX_DIR),
@@ -97,42 +57,32 @@ CLASSIFIERS_AIRPLANE = ["ast_finetuned", "pann_finetuned"]
 CLASSIFIERS_BIRD = ["bird_mae", "audioprotopnet"]
 
 # ---------------------------------------------------------------------------
-# Colour palette — Okabe-Ito (colour-blind safe) + semantic mappings
+# Palette
 # ---------------------------------------------------------------------------
-OI_BLUE = "#0072B2"
-OI_ORANGE = "#E69F00"
-OI_VERMILION = "#D55E00"
-OI_GREEN = "#009E73"
-OI_SKY = "#56B4E9"
-OI_YELLOW = "#F0E442"
-OI_PURPLE = "#CC79A7"
-OI_BLACK = "#1f1f1f"
+QUAL = px.colors.qualitative.Plotly
 
 MODEL_COLORS = {
-    "SuDoRM-RF": OI_BLUE,
-    "CLAPSep": OI_VERMILION,
-    "TUSS (multi)": OI_GREEN,
+    "SuDoRM-RF": QUAL[0],
+    "CLAPSep": QUAL[1],
+    "TUSS (multi)": QUAL[2],
 }
 
 CLASSIFIER_COLORS = {
-    "ast_finetuned": OI_SKY,
-    "pann_finetuned": OI_ORANGE,
-    "bird_mae": OI_PURPLE,
-    "audioprotopnet": OI_YELLOW,
+    "ast_finetuned": QUAL[3],
+    "pann_finetuned": QUAL[4],
+    "bird_mae": QUAL[5],
+    "audioprotopnet": QUAL[6],
 }
 
-COL_POS = "#1b9e3f"   # green — separation helps
-COL_NEG = "#b22222"    # red — separation hurts
-COL_NEU = "#555555"    # grey — neutral
+COL_POS = "#2ca02c"
+COL_NEG = "#d62728"
+COL_NEU = "#7f7f7f"
 
-# Typographic constants
 FONT_FAMILY = "Times New Roman, Nimbus Roman, serif"
-FONT = dict(family=FONT_FAMILY, size=13, color=OI_BLACK)
-TITLE_FONT = dict(family=FONT_FAMILY, size=16, color=OI_BLACK)
-AXIS_TITLE_FONT = dict(family=FONT_FAMILY, size=13, color=OI_BLACK)
-TICK_FONT = dict(family=FONT_FAMILY, size=11, color=OI_BLACK)
-AXIS_LINE = OI_BLACK
-GRID = "rgba(0,0,0,0.07)"
+FONT = dict(family=FONT_FAMILY, size=13, color="#1f1f1f")
+TITLE_FONT = dict(family=FONT_FAMILY, size=18, color="#1f1f1f")
+AXIS_TITLE_FONT = dict(family=FONT_FAMILY, size=13, color="#1f1f1f")
+TICK_FONT = dict(family=FONT_FAMILY, size=11, color="#1f1f1f")
 
 LAYOUT_BASE = dict(
     template="plotly_white",
@@ -140,21 +90,11 @@ LAYOUT_BASE = dict(
     title_font=TITLE_FONT,
     paper_bgcolor="#FFFFFF",
     plot_bgcolor="#FFFFFF",
-    margin=dict(l=72, r=28, t=80, b=72),
-    legend=dict(
-        font=dict(family=FONT_FAMILY, size=11, color=OI_BLACK),
-        bgcolor="rgba(255,255,255,0.85)",
-        bordercolor="rgba(0,0,0,0.12)", borderwidth=1,
-        orientation="h", yanchor="bottom", y=-0.22,
-        xanchor="center", x=0.5,
-    ),
+    margin=dict(l=80, r=40, t=100, b=80),
 )
 
 PNG_SCALE = 2
 
-# ---------------------------------------------------------------------------
-# Classifier display names
-# ---------------------------------------------------------------------------
 CLS_DISPLAY = {
     "pann_finetuned": "PANN",
     "ast_finetuned": "AST",
@@ -168,56 +108,119 @@ def _cls_label(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Data loading — per-classifier best-run selection
+# Data loading — matched runs (same timestamp across classifiers)
 # ---------------------------------------------------------------------------
 
-def _load_all(directory: Path, glob: str = "results_*.json") -> List[dict]:
-    if not directory.exists():
-        return []
-    out = []
-    for f in sorted(directory.glob(glob)):
-        try:
-            with open(f) as fh:
-                out.append(json.load(fh))
-        except Exception:
+def _extract_timestamp(path: Path) -> str:
+    """Extract timestamp from results_test_*.json filename."""
+    stem = path.stem
+    parts = stem.split("_")
+    # results_test_TIMESTAMP.json  or  results_test_risoux_TIMESTAMP.json
+    if "risoux" in stem:
+        return "_".join(parts[3:])
+    return "_".join(parts[2:])
+
+
+def _load_best_matched(base_dir: Path, classifiers: Sequence[str],
+                       risoux: bool = False) -> Optional[dict]:
+    """Find the run with the best average ΔF1 across *all* classifiers,
+    requiring the SAME timestamp to exist in every classifier directory.
+
+    Returns a dict with keys:
+        timestamp, and one key per classifier (e.g. 'ast_finetuned')
+    Signal metrics are averaged across classifiers (stored under key
+    '__avg_signal').
+    """
+    pattern = "results_test_risoux_*.json" if risoux else "results_test_*.json"
+
+    # Collect files per classifier
+    files_by_cls: Dict[str, Dict[str, Path]] = {}
+    for cls in classifiers:
+        sub = base_dir / cls
+        if not sub.exists():
+            return None
+        files_by_cls[cls] = {_extract_timestamp(f): f for f in sorted(sub.glob(pattern))}
+
+    # Find common timestamps
+    common = set.intersection(*[set(files_by_cls[c].keys()) for c in classifiers])
+    if not common:
+        return None
+
+    base_cond = "as_is_cls" if risoux else "mix_cls"
+    sep_cond = "as_is_sep_cls" if risoux else "mix_sep_cls"
+
+    best_run: Optional[dict] = None
+    best_score = float("-inf")
+
+    for ts in sorted(common):
+        loaded: Dict[str, dict] = {}
+        for cls in classifiers:
+            with open(files_by_cls[cls][ts]) as fh:
+                loaded[cls] = json.load(fh)
+
+        # Average ΔF1 across classifiers
+        deltas = []
+        for cls in classifiers:
+            d = loaded[cls]
+            f1_base = d.get(base_cond, {}).get("f1_score", float("nan"))
+            f1_sep = d.get(sep_cond, {}).get("f1_score", float("nan"))
+            if not (np.isnan(f1_base) or np.isnan(f1_sep)):
+                deltas.append(f1_sep - f1_base)
+        if not deltas:
             continue
-    return out
+        score = float(np.mean(deltas))
+
+        if score > best_score:
+            best_score = score
+            # Average signal metrics across classifiers
+            avg_signal: Dict[str, Dict[str, float]] = {}
+            for cond in ["mix_sep_cls", "clean_sep_cls"]:
+                avg_signal[cond] = {}
+                for key in ["mean_si_snr_db", "mean_si_snri_db", "mean_sdr_db",
+                            "mean_rms_error_db", "mean_sel_error_db"]:
+                    vals = []
+                    for cls in classifiers:
+                        sm = loaded[cls].get(cond, {}).get("signal_metrics") or {}
+                        v = sm.get(key, float("nan"))
+                        if not np.isnan(v):
+                            vals.append(float(v))
+                    avg_signal[cond][key] = float(np.mean(vals)) if vals else float("nan")
+
+            best_run = {
+                "timestamp": ts,
+                "__avg_signal": avg_signal,
+            }
+            best_run.update(loaded)
+
+    return best_run
 
 
 def _load_best(base_dir: Path, classifier: str,
                risoux: bool = False) -> Optional[dict]:
-    """Select the run with the best *classification improvement delta*.
-
-    For in-distribution data (risoux=False):
-        delta = F1(mix_sep_cls) - F1(mix_cls)
-    For Risoux (risoux=True):
-        delta = F1(as_is_sep_cls) - F1(as_is_cls)
-
-    Ties are broken by balanced_accuracy delta, then by test recency.
-    """
+    """Legacy: select best run for a single classifier (used for bird)."""
     sub = base_dir / classifier
     if not sub.exists():
         return None
     pattern = "results_test_risoux_*.json" if risoux else "results_test_*.json"
-    candidates = _load_all(sub, pattern)
+    candidates = []
+    for f in sorted(sub.glob(pattern)):
+        try:
+            with open(f) as fh:
+                candidates.append(json.load(fh))
+        except Exception:
+            continue
     if not candidates:
         return None
     base_cond = "as_is_cls" if risoux else "mix_cls"
     sep_cond = "as_is_sep_cls" if risoux else "mix_sep_cls"
     best, best_delta = None, float("-inf")
-    best_ba_delta = float("-inf")
     for d in candidates:
         f1_base = d.get(base_cond, {}).get("f1_score", float("nan"))
         f1_sep = d.get(sep_cond, {}).get("f1_score", float("nan"))
         if np.isnan(f1_base) or np.isnan(f1_sep):
             continue
-        delta = f1_sep - f1_base
-        ba_base = d.get(base_cond, {}).get("balanced_accuracy", float("nan"))
-        ba_sep = d.get(sep_cond, {}).get("balanced_accuracy", float("nan"))
-        ba_delta = (ba_sep - ba_base) if not (np.isnan(ba_base) or np.isnan(ba_sep)) else float("-inf")
-        if delta > best_delta or (delta == best_delta and ba_delta > best_ba_delta):
-            best_delta = delta
-            best_ba_delta = ba_delta
+        if f1_sep - f1_base > best_delta:
+            best_delta = f1_sep - f1_base
             best = d
     return best
 
@@ -232,6 +235,9 @@ def _signal(d: Optional[dict], key: str,
             condition: str = "mix_sep_cls") -> float:
     if d is None:
         return float("nan")
+    # Try averaged signal first (from matched runs)
+    if "__avg_signal" in d:
+        return float(d["__avg_signal"].get(condition, {}).get(key, float("nan")))
     sm = d.get(condition, {}).get("signal_metrics") or {}
     val = sm.get(key, float("nan"))
     try:
@@ -252,503 +258,467 @@ def _fmt(v: float, spec: str = ".3f", dash: str = "\u2014") -> str:
     return f"{v:{spec}}"
 
 
-# ---------------------------------------------------------------------------
-# Axis styling helper
-# ---------------------------------------------------------------------------
-
-def _apply_axis_style(fig: go.Figure, n_rows: int = 1,
-                      n_cols: int = 1) -> None:
-    kw = dict(
-        showline=True, linecolor=AXIS_LINE, linewidth=1.2,
-        gridcolor=GRID, ticks="outside", tickcolor=AXIS_LINE,
-        ticklen=4, tickwidth=1, tickfont=TICK_FONT,
-        title_font=AXIS_TITLE_FONT, automargin=True,
-    )
-    uses_grid = True
-    try:
-        fig.update_xaxes(row=1, col=1, **kw)
-        fig.update_yaxes(row=1, col=1, **kw)
-    except Exception:
-        uses_grid = False
-
-    if uses_grid:
-        for r in range(1, n_rows + 1):
-            for c in range(1, n_cols + 1):
-                if r == 1 and c == 1:
-                    continue
-                fig.update_xaxes(row=r, col=c, **kw)
-                fig.update_yaxes(row=r, col=c, **kw)
-    else:
-        fig.update_xaxes(**kw)
-        fig.update_yaxes(**kw)
-
-
-def _placeholder(msg: str, title: str = "Data not yet available") -> go.Figure:
-    fig = go.Figure()
-    fig.add_annotation(text=f"<b>{msg}</b>", xref="paper", yref="paper",
-                       x=0.5, y=0.5, showarrow=False,
-                       font=dict(family=FONT_FAMILY, size=14, color=COL_NEU))
-    fig.update_layout(title=f"<b>{title}</b>", height=400, width=800,
-                     **LAYOUT_BASE)
-    return fig
-
-
 # ===================================================================
-#  FIGURE 4.1 — Separation Metrics
+# FIGURE 4.1 — Separation Metrics (averaged across classifiers)
 # ===================================================================
 
 def fig_separation_metrics() -> go.Figure:
-    models, si_snri, sdr, rms_err, sel_err = [], [], [], [], []
-    available = []
+    models, si_snri, sdr = [], [], []
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best(base, "ast_finetuned")
+        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
         if d is None:
             continue
-        available.append(name)
         models.append(name)
         si_snri.append(_signal(d, "mean_si_snri_db", "mix_sep_cls"))
         sdr.append(_signal(d, "mean_sdr_db", "mix_sep_cls"))
-        rms_err.append(abs(_signal(d, "mean_rms_error_db", "mix_sep_cls")))
-        sel_err.append(abs(_signal(d, "mean_sel_error_db", "mix_sep_cls")))
-    if not available:
+
+    if not models:
         return _placeholder("No separation data.", "Separation Metrics")
 
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=("<b>Separation fidelity (\u2191 better)</b>",
-                        "<b>Energy envelope error (\u2193 better)</b>"),
-        horizontal_spacing=0.14,
-    )
-    colors = [MODEL_COLORS.get(m, OI_ORANGE) for m in models]
-    bar_kw = dict(textposition="outside", cliponaxis=False,
-                  textfont=dict(family=FONT_FAMILY, size=10, color=OI_BLACK),
-                  marker_line=dict(color="rgba(0,0,0,0.25)", width=0.6))
+    colors = [MODEL_COLORS[m] for m in models]
+    fig = go.Figure()
 
-    fig.add_trace(go.Bar(x=models, y=si_snri, name="SI-SNRi (dB)",
-                         marker_color=colors,
-                         text=[_fmt(v, ".1f") for v in si_snri],
-                         legendgroup="a", showlegend=True, **bar_kw),
-                  row=1, col=1)
-    fig.add_trace(go.Bar(x=models, y=sdr, name="SDR (dB)",
-                         marker_color=colors, opacity=0.65,
-                         text=[_fmt(v, ".1f") for v in sdr],
-                         legendgroup="b", showlegend=True, **bar_kw),
-                  row=1, col=1)
-    fig.add_trace(go.Bar(x=models, y=rms_err, name="|RMS error| (dB)",
-                         marker_color=colors,
-                         text=[_fmt(v, ".1f") for v in rms_err],
-                         legendgroup="c", showlegend=True, **bar_kw),
-                  row=1, col=2)
-    fig.add_trace(go.Bar(x=models, y=sel_err, name="|SEL error| (dB)",
-                         marker_color=colors, opacity=0.65,
-                         text=[_fmt(v, ".1f") for v in sel_err],
-                         legendgroup="d", showlegend=True, **bar_kw),
-                  row=1, col=2)
-
-    missing = [m for m, _, _ in SEPARATORS_AIRPLANE if m not in available]
-    subtitle = "Airplane COI \u00b7 AST classifier \u00b7 mixture + separation"
-    if missing:
-        subtitle += f"  \u00b7  Missing: {', '.join(missing)}"
+    fig.add_trace(go.Bar(
+        x=models, y=si_snri, name="SI-SNRi (dB)",
+        marker_color=colors,
+        text=[_fmt(v, ".1f") for v in si_snri],
+        textposition="outside", textfont=dict(size=11),
+        marker_line=dict(color="rgba(0,0,0,0.3)", width=1),
+    ))
+    fig.add_trace(go.Bar(
+        x=models, y=sdr, name="SDR (dB)",
+        marker_color=colors, opacity=0.55,
+        text=[_fmt(v, ".1f") for v in sdr],
+        textposition="outside", textfont=dict(size=11),
+        marker_line=dict(color="rgba(0,0,0,0.3)", width=1),
+    ))
 
     fig.update_layout(
-        barmode="group", bargap=0.28, bargroupgap=0.08,
-        title=dict(text=f"<b>Signal-level separation quality</b><br><sup>{subtitle}</sup>"),
-        height=500, width=1000, **LAYOUT_BASE,
+        barmode="group", bargap=0.25, bargroupgap=0.15,
+        title=dict(
+            text="<b>Signal-level separation quality</b><br>"
+                 "<sup>Averaged across AST + PANN classifiers · Same run per model</sup>"
+        ),
+        yaxis=dict(title="dB", gridcolor="rgba(0,0,0,0.07)",
+                   showline=True, linecolor="#1f1f1f", linewidth=1),
+        xaxis=dict(showline=True, linecolor="#1f1f1f", linewidth=1),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18,
+                    xanchor="center", x=0.5, bgcolor="rgba(255,255,255,0.9)",
+                    bordercolor="rgba(0,0,0,0.1)", borderwidth=1),
+        height=520, width=750,
+        **LAYOUT_BASE,
     )
-    fig.update_yaxes(title_text="dB", row=1, col=1)
-    fig.update_yaxes(title_text="|dB|", row=1, col=2)
-    _apply_axis_style(fig, 1, 2)
     return fig
 
 
 # ===================================================================
-#  FIGURE 4.2 — Energy Preservation
+# FIGURE 4.2 — Energy Preservation (averaged across classifiers)
 # ===================================================================
 
 def fig_energy_preservation() -> go.Figure:
     models, rms_mix, sel_mix = [], [], []
     rms_clean, sel_clean = [], []
-    available = []
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best(base, "ast_finetuned")
+        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
         if d is None:
             continue
-        available.append(name)
         models.append(name)
         rms_mix.append(_signal(d, "mean_rms_error_db", "mix_sep_cls"))
         sel_mix.append(_signal(d, "mean_sel_error_db", "mix_sep_cls"))
         rms_clean.append(_signal(d, "mean_rms_error_db", "clean_sep_cls"))
         sel_clean.append(_signal(d, "mean_sel_error_db", "clean_sep_cls"))
-    if not available:
+
+    if not models:
         return _placeholder("No energy data.", "Energy Preservation")
 
+    colors = [MODEL_COLORS[m] for m in models]
     fig = go.Figure()
-    colors = [MODEL_COLORS.get(m, OI_ORANGE) for m in models]
-    for i, m in enumerate(models):
-        for cond, vals, label_suffix in [
-            ("mixture+sep", [rms_mix[i], sel_mix[i]], ""),
-            ("clean+sep", [rms_clean[i], sel_clean[i]], " (clean)"),
-        ]:
-            fig.add_trace(go.Bar(
-                y=[f"{m}  (RMS){label_suffix}", f"{m}  (SEL){label_suffix}"],
-                x=vals, orientation="h",
-                name=f"{m}{label_suffix}" if i == 0 else None,
-                marker_color=colors[i],
-                text=[_fmt(v, "+.1f") for v in vals],
-                textposition="outside",
-                textfont=dict(size=10),
-                marker_line=dict(color="rgba(0,0,0,0.25)", width=0.6),
-            ))
 
-    fig.add_vline(x=0, line_dash="dot", line_color=OI_BLACK, line_width=1.2,
+    fig.add_trace(go.Bar(
+        x=models, y=rms_mix, name="RMS (mix)",
+        marker_color=colors, opacity=0.95,
+        text=[_fmt(v, "+.1f") for v in rms_mix],
+        textposition="outside", textfont=dict(size=10),
+        marker_line=dict(color="rgba(0,0,0,0.3)", width=1),
+    ))
+    fig.add_trace(go.Bar(
+        x=models, y=sel_mix, name="SEL (mix)",
+        marker_color=colors, opacity=0.50,
+        text=[_fmt(v, "+.1f") for v in sel_mix],
+        textposition="outside", textfont=dict(size=10),
+        marker_line=dict(color="rgba(0,0,0,0.3)", width=1),
+    ))
+
+    fig.add_hline(y=0, line_dash="dot", line_color="#1f1f1f", line_width=1.5,
                   annotation_text="Perfect preservation",
-                  annotation_position="top right",
+                  annotation_position="top left",
                   annotation_font=dict(size=10, color=COL_NEU))
+
     fig.update_layout(
         barmode="group", bargap=0.25, bargroupgap=0.12,
-        title=dict(text="<b>Energy preservation deviation</b>"
-                       "<br><sup>\u0394 energy = separated \u2212 clean-COI reference"
-                       "  \u00b7  Negative = energy lost</sup>"),
-        xaxis=dict(title="\u0394 energy (dB)"),
-        height=max(380, 90 * len(models) * 2), width=900,
+        title=dict(
+            text="<b>Energy preservation deviation</b><br>"
+                 "<sup>Averaged across AST + PANN · Δ = separated − clean-COI reference</sup>"
+        ),
+        yaxis=dict(title="Δ energy (dB)", gridcolor="rgba(0,0,0,0.07)",
+                   showline=True, linecolor="#1f1f1f", linewidth=1, zeroline=False),
+        xaxis=dict(showline=True, linecolor="#1f1f1f", linewidth=1),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18,
+                    xanchor="center", x=0.5, bgcolor="rgba(255,255,255,0.9)",
+                    bordercolor="rgba(0,0,0,0.1)", borderwidth=1),
+        height=520, width=750,
         **LAYOUT_BASE,
     )
-    _apply_axis_style(fig)
     return fig
 
 
 # ===================================================================
-#  FIGURE 4.3 — Classification Impact (KEY FIGURE)
+# FIGURE 4.3 — Classification Impact (matched runs)
 # ===================================================================
 
 def fig_classification_impact() -> go.Figure:
-    metrics = [("f1_score", "F1"), ("precision", "Precision"),
-               ("recall", "Recall")]
-    rows_data: List[List[dict]] = [[] for _ in metrics]
-    any_data = False
+    metrics = [("f1_score", "F1"), ("precision", "Precision"), ("recall", "Recall")]
 
-    for cls in CLASSIFIERS_AIRPLANE:
-        for name, base, _ in SEPARATORS_AIRPLANE:
-            d = _load_best(base, cls)
-            if d is None:
-                continue
-            for i, (key, label) in enumerate(metrics):
-                v_clean_cls = _metric(d, key, "clean_cls")
-                v_clean_sep = _metric(d, key, "clean_sep_cls")
-                v_mix_cls = _metric(d, key, "mix_cls")
-                v_mix_sep = _metric(d, key, "mix_sep_cls")
-                delta_clean = v_clean_sep - v_clean_cls if not (np.isnan(v_clean_cls) or np.isnan(v_clean_sep)) else float("nan")
-                delta_mix = v_mix_sep - v_mix_cls if not (np.isnan(v_mix_cls) or np.isnan(v_mix_sep)) else float("nan")
-                rows_data[i].append({
-                    "label": f"{name} \u00b7 {_cls_label(cls)}",
-                    "delta_clean": delta_clean,
-                    "delta_mix": delta_mix,
-                })
-                if not np.isnan(delta_mix):
-                    any_data = True
+    # Load matched runs for all models
+    matched: Dict[str, dict] = {}
+    for name, base, _ in SEPARATORS_AIRPLANE:
+        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        if d is not None:
+            matched[name] = d
 
-    if not any_data:
+    if not matched:
         return _placeholder("No classification data.", "Classification Impact")
 
     fig = make_subplots(
-        rows=3, cols=1, vertical_spacing=0.10,
-        subplot_titles=[f"<b>\u0394 {label}</b>  (with separator minus without)"
-                        for _, label in metrics],
+        rows=3, cols=2,
+        row_titles=[f"<b>Δ {label}</b>" for _, label in metrics],
+        column_titles=[f"<b>{_cls_label(c)}</b>" for c in CLASSIFIERS_AIRPLANE],
+        vertical_spacing=0.10, horizontal_spacing=0.10,
+        shared_yaxes="rows",
     )
 
-    for row_idx, entries in enumerate(rows_data, 1):
-        if not entries:
-            continue
-        entries_sorted = sorted(entries,
-                                key=lambda x: abs(x["delta_mix"]) if not np.isnan(x["delta_mix"]) else 0,
-                                reverse=True)
-        y_labels = [e["label"] for e in entries_sorted]
-        delta_c = [e["delta_clean"] for e in entries_sorted]
-        delta_m = [e["delta_mix"] for e in entries_sorted]
+    for row_idx, (key, metric_label) in enumerate(metrics, 1):
+        for col_idx, cls in enumerate(CLASSIFIERS_AIRPLANE, 1):
+            y_labels = []
+            delta_c = []
+            delta_m = []
+            for name, _, _ in SEPARATORS_AIRPLANE:
+                if name not in matched:
+                    continue
+                d = matched[name]
+                dc = _metric(d.get(cls), key, "clean_sep_cls") - _metric(d.get(cls), key, "clean_cls")
+                dm = _metric(d.get(cls), key, "mix_sep_cls") - _metric(d.get(cls), key, "mix_cls")
+                y_labels.append(name)
+                delta_c.append(dc)
+                delta_m.append(dm)
 
-        fig.add_trace(go.Bar(
-            y=y_labels, x=delta_c, orientation="h",
-            name="Clean COI \u0394" if row_idx == 1 else None,
-            marker_color=OI_SKY, showlegend=(row_idx == 1),
-            text=[_fmt(v, "+.3f") for v in delta_c],
-            textposition="outside",
-            textfont=dict(family=FONT_FAMILY, size=9, color=OI_BLACK),
-            marker_line=dict(color="rgba(0,0,0,0.15)", width=0.5),
-            hovertemplate="%{y}<br>\u0394 clean = %{x:+.3f}<extra></extra>",
-        ), row=row_idx, col=1)
-        fig.add_trace(go.Bar(
-            y=y_labels, x=delta_m, orientation="h",
-            name="Mixture \u0394" if row_idx == 1 else None,
-            marker_color=OI_VERMILION, showlegend=(row_idx == 1),
-            text=[_fmt(v, "+.3f") for v in delta_m],
-            textposition="outside",
-            textfont=dict(family=FONT_FAMILY, size=9, color=OI_BLACK),
-            marker_line=dict(color="rgba(0,0,0,0.15)", width=0.5),
-            hovertemplate="%{y}<br>\u0394 mix = %{x:+.3f}<extra></extra>",
-        ), row=row_idx, col=1)
+            colors = [MODEL_COLORS[m] for m in y_labels]
 
-        fig.add_vline(x=0, line_dash="solid", line_color=OI_BLACK,
-                      line_width=1, row=row_idx, col=1)
+            fig.add_trace(go.Bar(
+                y=y_labels, x=delta_c, orientation="h",
+                name="Clean COI Δ", marker_color=colors, opacity=0.45,
+                text=[_fmt(v, "+.3f") for v in delta_c],
+                textposition="outside", textfont=dict(size=9),
+                marker_line=dict(color="rgba(0,0,0,0.3)", width=1),
+                showlegend=(row_idx == 1 and col_idx == 1),
+                legendgroup="clean",
+            ), row=row_idx, col=col_idx)
 
-        helps_c = sum(1 for v in delta_c if v > 0.005)
-        hurts_c = sum(1 for v in delta_c if v < -0.005)
-        helps_m = sum(1 for v in delta_m if v > 0.005)
-        hurts_m = sum(1 for v in delta_m if v < -0.005)
-        fig.add_annotation(
-            xref=f"x{row_idx}", yref=f"y{row_idx}",
-            x=0.98, y=0.98, xanchor="right", yanchor="top",
-            text=f"Clean: helps {helps_c}/hurts {hurts_c}  \u00b7  "
-                 f"Mix: helps {helps_m}/hurts {hurts_m}",
-            showarrow=False, font=dict(size=8, color=OI_BLACK),
-            bgcolor="rgba(255,255,255,0.9)", borderpad=3,
-            bordercolor="rgba(0,0,0,0.1)", borderwidth=1,
-        )
+            fig.add_trace(go.Bar(
+                y=y_labels, x=delta_m, orientation="h",
+                name="Mixture Δ", marker_color=colors, opacity=0.95,
+                text=[_fmt(v, "+.3f") for v in delta_m],
+                textposition="outside", textfont=dict(size=9),
+                marker_line=dict(color="rgba(0,0,0,0.3)", width=1),
+                showlegend=(row_idx == 1 and col_idx == 1),
+                legendgroup="mix",
+            ), row=row_idx, col=col_idx)
+
+            fig.add_vline(x=0, line_dash="solid", line_color="#1f1f1f",
+                          line_width=1.2, row=row_idx, col=col_idx)
+
+            fig.update_xaxes(gridcolor="rgba(0,0,0,0.07)", showline=True,
+                             linecolor="#1f1f1f", linewidth=1, zeroline=False,
+                             row=row_idx, col=col_idx)
+            if col_idx == 1:
+                fig.update_yaxes(showline=True, linecolor="#1f1f1f", linewidth=1,
+                                 row=row_idx, col=col_idx)
+            else:
+                fig.update_yaxes(showticklabels=False, row=row_idx, col=col_idx)
 
     fig.update_layout(
+        barmode="group", bargap=0.25, bargroupgap=0.12,
         title=dict(
-            text="<b>Impact of separation on downstream classification</b>"
-                 "<br><sup>Light blue = \u0394 on clean COI; terracotta = \u0394 on mixture."
-                 "  Positive = separation helps; negative = hurts.</sup>",
+            text="<b>Impact of separation on downstream classification</b><br>"
+                 "<sup>Light = clean COI Δ · Dark = mixture Δ · Same run across classifiers</sup>"
         ),
-        height=720, width=1050, **LAYOUT_BASE,
+        height=900, width=1050,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.06,
+                    xanchor="center", x=0.5, bgcolor="rgba(255,255,255,0.9)",
+                    bordercolor="rgba(0,0,0,0.1)", borderwidth=1),
+        **LAYOUT_BASE,
     )
-    fig.update_xaxes(title_text="\u0394 metric", row=3, col=1)
-    _apply_axis_style(fig, 3, 1)
     return fig
 
 
 # ===================================================================
-#  FIGURE 4.4 — Confusion Shifts
+# FIGURE 4.4 — Confusion Shifts (actual values, neutral scale)
 # ===================================================================
 
-def _norm_cm(cm: dict) -> np.ndarray:
+def _norm_cm(cm: dict) -> Tuple[np.ndarray, float]:
     tp, tn, fp, fn = cm.get("tp", 0), cm.get("tn", 0), cm.get("fp", 0), cm.get("fn", 0)
     total = tp + tn + fp + fn
-    return np.array([[tn, fp], [fn, tp]], dtype=float) / (total or 1) * 100.0
+    arr = np.array([[tn, fp], [fn, tp]], dtype=float)
+    return arr, float(total)
 
 
 def fig_confusion_shifts() -> go.Figure:
     panels = []
-    for cls in CLASSIFIERS_AIRPLANE:
-        for name, base, _ in SEPARATORS_AIRPLANE:
-            d = _load_best(base, cls)
-            if d is None:
+    for name, base, _ in SEPARATORS_AIRPLANE:
+        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        if d is None:
+            continue
+        # Use AST as representative (signal metrics averaged, confusion is per-classifier)
+        # Show both classifiers
+        for cls in CLASSIFIERS_AIRPLANE:
+            cls_data = d.get(cls)
+            if cls_data is None:
                 continue
-            cm_cls = _cm(d, "mix_cls")
-            cm_sep = _cm(d, "mix_sep_cls")
+            cm_cls = _cm(cls_data, "mix_cls")
+            cm_sep = _cm(cls_data, "mix_sep_cls")
             if cm_cls is None or cm_sep is None:
                 continue
-            n_cls = _norm_cm(cm_cls)
-            n_sep = _norm_cm(cm_sep)
-            delta = n_sep - n_cls
-            text = [[f"{v:+.1f}pp" for v in row] for row in delta.tolist()]
-            panels.append((name, _cls_label(cls), delta, text, cm_cls))
+            arr_cls, total_cls = _norm_cm(cm_cls)
+            arr_sep, total_sep = _norm_cm(cm_sep)
+            # Percentages
+            pct_cls = arr_cls / (total_cls or 1) * 100.0
+            pct_sep = arr_sep / (total_sep or 1) * 100.0
+            delta = pct_sep - pct_cls
+
+            # Annotate with absolute counts + delta
+            text = []
+            for r in range(2):
+                row_text = []
+                for c in range(2):
+                    row_text.append(
+                        f"{int(arr_sep[r,c])}<br><span style='font-size:8px'>"
+                        f"({delta[r,c]:+.1f}pp)</span>"
+                    )
+                text.append(row_text)
+
+            panels.append((name, _cls_label(cls), delta, text, arr_sep, total_sep))
 
     if not panels:
         return _placeholder("No confusion data.", "Confusion Shifts")
 
     n = len(panels)
-    n_cols = 2
+    n_cols = min(3, n)
     n_rows = (n + n_cols - 1) // n_cols
     fig = make_subplots(
         rows=n_rows, cols=n_cols,
         subplot_titles=[f"<b>{m}</b><br><span style='font-size:10px'>{c}</span>"
-                        for m, c, _, _, _ in panels],
-        horizontal_spacing=0.12, vertical_spacing=0.28 if n_rows > 1 else 0.18,
+                        for m, c, _, _, _, _ in panels],
+        horizontal_spacing=0.10, vertical_spacing=0.22 if n_rows > 1 else 0.15,
     )
-    div_scale = [[0.0, COL_NEG], [0.5, "#FFFFFF"], [1.0, COL_POS]]
+
+    # Neutral diverging: purple-white-orange (no green/red semantic)
+    div_scale = [[0.0, "#54278f"], [0.5, "#FFFFFF"], [1.0, "#d94801"]]
     zmax = max(abs(p[2]).max() for p in panels)
     zmax = max(zmax, 5.0)
 
-    for idx, (name, cls_label, delta, text, cm_cls) in enumerate(panels):
+    for idx, (name, cls_label, delta, text, arr_sep, total_sep) in enumerate(panels):
         r, c = idx // n_cols + 1, idx % n_cols + 1
-        total = sum(cm_cls.values())
         fig.add_trace(go.Heatmap(
             z=delta, x=["Pred. 0", "Pred. 1"], y=["True 0", "True 1"],
             text=text, texttemplate="%{text}",
-            textfont=dict(size=11, color=OI_BLACK),
+            textfont=dict(size=11, color="#1f1f1f"),
             colorscale=div_scale, zmid=0, zmin=-zmax, zmax=zmax,
             showscale=(idx == 0),
-            colorbar=dict(title=dict(text="\u0394pp", side="right"), thickness=12) if idx == 0 else None,
+            colorbar=dict(title=dict(text="Δpp", side="right"),
+                          thickness=12, x=1.02) if idx == 0 else None,
         ), row=r, col=c)
         fig.update_xaxes(side="bottom", row=r, col=c)
         fig.update_yaxes(autorange="reversed", row=r, col=c)
         fig.add_annotation(
-            xref=f"x{idx+1}", yref=f"y{idx+1}", x=0.5, y=-0.28,
-            xanchor="center", text=f"Baseline N = {total}", showarrow=False,
+            xref=f"x{idx+1}", yref=f"y{idx+1}",
+            x=0.5, y=-0.32, xanchor="center",
+            text=f"N = {int(total_sep)}", showarrow=False,
             font=dict(size=9, color=COL_NEU),
         )
 
     fig.update_layout(
         title=dict(
-            text="<b>How separation shifts the confusion pattern</b>"
-                 "<br><sup>\u0394 = (mix + sep) \u2212 (mix only), in percentage points.</sup>",
+            text="<b>How separation shifts the confusion pattern</b><br>"
+                 "<sup>Cell = absolute count (baseline Δ in pp) · Purple = decrease · Orange = increase</sup>"
         ),
-        height=max(420, 380 * n_rows), width=max(800, 460 * n_cols),
+        height=max(400, 380 * n_rows), width=max(700, 360 * n_cols),
         **LAYOUT_BASE,
     )
-    _apply_axis_style(fig, n_rows, n_cols)
     return fig
 
 
 # ===================================================================
-#  FIGURE 4.5 — Generalisation Gap
+# FIGURE 4.5 — Generalisation Gap (matched runs)
 # ===================================================================
 
 def fig_generalisation_gap() -> go.Figure:
-    rows_data = []
+    data_by_cls: Dict[str, List[dict]] = {c: [] for c in CLASSIFIERS_AIRPLANE}
+
     for cls in CLASSIFIERS_AIRPLANE:
         for name, base, risoux_dir in SEPARATORS_AIRPLANE:
-            d_in = _load_best(base, cls)
-            d_out = _load_best(risoux_dir, cls, risoux=True) if risoux_dir else None
-            rows_data.append({
-                "model": name,
-                "classifier": _cls_label(cls),
-                "f1_in": _metric(d_in, "f1_score", "mix_sep_cls"),
-                "ba_in": _metric(d_in, "balanced_accuracy", "mix_sep_cls"),
-                "f1_out": _metric(d_out, "f1_score", "as_is_sep_cls") if d_out else float("nan"),
-                "ba_out": _metric(d_out, "balanced_accuracy", "as_is_sep_cls") if d_out else float("nan"),
-                "f1_base_in": _metric(d_in, "f1_score", "mix_cls"),
-                "f1_base_out": _metric(d_out, "f1_score", "as_is_cls") if d_out else float("nan"),
-            })
-
-    if not any(not np.isnan(r["f1_in"]) for r in rows_data):
-        return _placeholder("No generalisation data.", "Generalisation Gap")
-
-    labels = [f"{r['model']}<br>{r['classifier']}" for r in rows_data]
-    f1_in = [r["f1_in"] for r in rows_data]
-    f1_out = [r["f1_out"] for r in rows_data]
-    delta_f1 = [r["f1_out"] - r["f1_base_out"] if not (np.isnan(r["f1_out"]) or np.isnan(r["f1_base_out"])) else float("nan")
-                for r in rows_data]
-
-    fig = go.Figure()
-    bar_kw = dict(textposition="outside", cliponaxis=False,
-                  textfont=dict(family=FONT_FAMILY, size=10, color=OI_BLACK),
-                  marker_line=dict(color="rgba(0,0,0,0.2)", width=0.6))
-
-    fig.add_trace(go.Bar(x=labels, y=f1_in, name="In-dist test (mix+sep)",
-                         marker_color=[MODEL_COLORS.get(r["model"], OI_ORANGE) for r in rows_data],
-                         text=[_fmt(v, ".2f") for v in f1_in],
-                         legendgroup="in", showlegend=True, **bar_kw))
-    fig.add_trace(go.Bar(x=labels, y=f1_out, name="Risoux (OOD, as-is+sep)",
-                         marker_color=[MODEL_COLORS.get(r["model"], OI_ORANGE) for r in rows_data],
-                         opacity=0.65,
-                         text=[_fmt(v, ".2f") for v in f1_out],
-                         legendgroup="out", showlegend=True, **bar_kw))
-
-    for i, d_f1 in enumerate(delta_f1):
-        if np.isnan(d_f1):
-            continue
-        y_anchor = max(f1_in[i] if not np.isnan(f1_in[i]) else 0,
-                       f1_out[i] if not np.isnan(f1_out[i]) else 0) + 0.05
-        color = COL_NEG if d_f1 < -0.05 else COL_POS if d_f1 > 0.05 else COL_NEU
-        label = f"\u0394 {d_f1:+.2f}"
-        fig.add_annotation(x=labels[i], y=y_anchor, text=f"<b>{label}</b>",
-                          showarrow=False, yanchor="bottom",
-                          font=dict(family=FONT_FAMILY, size=11, color=color))
-
-    fig.update_layout(
-        barmode="group", bargap=0.28, bargroupgap=0.08,
-        title=dict(text="<b>Generalisation gap: in-distribution vs. Risoux field recordings</b>"
-                       "<br><sup>F1 after separation; \u0394 = Risoux improvement over baseline."
-                       "  Negative \u0394 = separation helps less on OOB data.</sup>"),
-        yaxis=dict(title="F1 score", range=[0, 1.05]),
-        height=520, width=850, **LAYOUT_BASE,
-    )
-    _apply_axis_style(fig)
-    return fig
-
-
-# ===================================================================
-#  FIGURE 4.6 — Multi-Class Overview (TUSS airplane + bird)
-# ===================================================================
-
-def fig_multiclass_overview() -> go.Figure:
-    air_data = []
-    for cls in CLASSIFIERS_AIRPLANE:
-        for name, base, _ in SEPARATORS_AIRPLANE:
-            d = _load_best(base, cls)
-            if d is None:
+            # Load matched run, but classification result is per-classifier
+            d_matched = _load_best_matched(base, CLASSIFIERS_AIRPLANE, risoux=False)
+            d_matched_risoux = _load_best_matched(risoux_dir, CLASSIFIERS_AIRPLANE, risoux=True) if risoux_dir else None
+            if d_matched is None:
                 continue
-            air_data.append({
+            data_by_cls[cls].append({
                 "model": name,
-                "classifier": _cls_label(cls),
-                "f1_mix": _metric(d, "f1_score", "mix_cls"),
-                "f1_sep": _metric(d, "f1_score", "mix_sep_cls"),
-                "delta": _metric(d, "f1_score", "mix_sep_cls") - _metric(d, "f1_score", "mix_cls"),
+                "f1_in": _metric(d_matched.get(cls), "f1_score", "mix_sep_cls"),
+                "f1_base_in": _metric(d_matched.get(cls), "f1_score", "mix_cls"),
+                "f1_out": _metric(d_matched_risoux.get(cls), "f1_score", "as_is_sep_cls") if d_matched_risoux else float("nan"),
+                "f1_base_out": _metric(d_matched_risoux.get(cls), "f1_score", "as_is_cls") if d_matched_risoux else float("nan"),
             })
 
-    bird_data = []
-    for cls in CLASSIFIERS_BIRD:
-        d = _load_best(TUSS_MC_BIRD_DIR, cls)
-        if d is not None:
-            bird_data.append({
-                "classifier": _cls_label(cls),
-                "f1_mix": _metric(d, "f1_score", "mix_cls"),
-                "f1_sep": _metric(d, "f1_score", "mix_sep_cls"),
-                "delta": _metric(d, "f1_score", "mix_sep_cls") - _metric(d, "f1_score", "mix_cls"),
-            })
-
-    if not air_data and not bird_data:
-        return _placeholder("No multi-class data.", "Multi-Class Separation")
+    if not any(data_by_cls.values()):
+        return _placeholder("No generalisation data.", "Generalisation Gap")
 
     fig = make_subplots(
         rows=1, cols=2,
-        subplot_titles=("<b>Airplane COI</b><br><span style='font-size:10px'>"
-                        "All architectures</span>",
-                        "<b>Bird COI</b><br><span style='font-size:10px'>"
-                        "TUSS multi-class only</span>"),
+        subplot_titles=[f"<b>{_cls_label(c)}</b>" for c in CLASSIFIERS_AIRPLANE],
         horizontal_spacing=0.14,
     )
 
-    if air_data:
-        labels = [f"{d['model']}<br>{d['classifier']}" for d in air_data]
-        deltas = [d["delta"] for d in air_data]
-        colors = [COL_POS if v > 0.005 else COL_NEG if v < -0.005 else COL_NEU
-                  for v in deltas]
-        fig.add_trace(go.Bar(x=labels, y=deltas,
-                             name="\u0394F1 (sep \u2212 no sep)",
-                             marker_color=colors,
-                             text=[_fmt(v, "+.3f") for v in deltas],
-                             textposition="outside", showlegend=True,
-                             textfont=dict(size=9),
-                             marker_line=dict(color="rgba(0,0,0,0.2)", width=0.6)),
-                      row=1, col=1)
-        fig.add_hline(y=0, line_dash="dot", line_color=OI_BLACK, line_width=1,
-                      row=1, col=1)
+    for col_idx, cls in enumerate(CLASSIFIERS_AIRPLANE, 1):
+        entries = data_by_cls[cls]
+        if not entries:
+            continue
 
-    if bird_data:
-        labels = [d["classifier"] for d in bird_data]
-        deltas = [d["delta"] for d in bird_data]
-        colors = [COL_POS if v > 0.005 else COL_NEG if v < -0.005 else COL_NEU
-                  for v in deltas]
-        fig.add_trace(go.Bar(x=labels, y=deltas,
-                             name="\u0394F1 (sep \u2212 no sep)",
-                             marker_color=colors,
-                             text=[_fmt(v, "+.3f") for v in deltas],
-                             textposition="outside", showlegend=False,
-                             textfont=dict(size=10),
-                             marker_line=dict(color="rgba(0,0,0,0.2)", width=0.6)),
-                      row=1, col=2)
-        fig.add_hline(y=0, line_dash="dot", line_color=OI_BLACK, line_width=1,
-                      row=1, col=2)
+        models = [e["model"] for e in entries]
+        colors = [MODEL_COLORS[m] for m in models]
+        f1_in = [e["f1_in"] for e in entries]
+        f1_out = [e["f1_out"] for e in entries]
+        delta_f1 = [e["f1_out"] - e["f1_base_out"] if not (np.isnan(e["f1_out"]) or np.isnan(e["f1_base_out"])) else float("nan")
+                    for e in entries]
+
+        bar_kw = dict(textposition="outside", cliponaxis=False,
+                      textfont=dict(size=10),
+                      marker_line=dict(color="rgba(0,0,0,0.2)", width=0.6))
+
+        fig.add_trace(go.Bar(
+            x=models, y=f1_in, name="In-dist (mix+sep)",
+            marker_color=colors, opacity=0.95,
+            text=[_fmt(v, ".2f") for v in f1_in],
+            showlegend=(col_idx == 1), legendgroup="in",
+            **bar_kw,
+        ), row=1, col=col_idx)
+        fig.add_trace(go.Bar(
+            x=models, y=f1_out, name="Risoux (as-is+sep)",
+            marker_color=colors, opacity=0.50,
+            text=[_fmt(v, ".2f") for v in f1_out],
+            showlegend=(col_idx == 1), legendgroup="out",
+            **bar_kw,
+        ), row=1, col=col_idx)
+
+        for i, d_f1 in enumerate(delta_f1):
+            if np.isnan(d_f1):
+                continue
+            y_anchor = max(f1_in[i] if not np.isnan(f1_in[i]) else 0,
+                           f1_out[i] if not np.isnan(f1_out[i]) else 0) + 0.04
+            color = COL_NEG if d_f1 < -0.05 else COL_POS if d_f1 > 0.05 else COL_NEU
+            fig.add_annotation(
+                x=models[i], y=y_anchor, text=f"<b>Δ {d_f1:+.2f}</b>",
+                showarrow=False, yanchor="bottom",
+                font=dict(size=10, color=color),
+                row=1, col=col_idx,
+            )
+
+        fig.update_yaxes(title_text="F1 score" if col_idx == 1 else None,
+                         range=[0, 1.10], gridcolor="rgba(0,0,0,0.07)",
+                         showline=True, linecolor="#1f1f1f", linewidth=1,
+                         row=1, col=col_idx)
+        fig.update_xaxes(showline=True, linecolor="#1f1f1f", linewidth=1,
+                         row=1, col=col_idx)
 
     fig.update_layout(
-        barmode="group", bargap=0.30, bargroupgap=0.10,
+        barmode="group", bargap=0.28, bargroupgap=0.08,
         title=dict(
-            text="<b>\u0394F1: does separation help classification?</b>"
-                 "<br><sup>Teal = helps; terracotta = hurts.  Airplane (left) all models;"
-                 "  Bird (right) TUSS multi-class only.</sup>",
+            text="<b>Generalisation gap: in-distribution vs. Risoux</b><br>"
+                 "<sup>Same matched run for both classifiers · Δ = Risoux improvement over baseline</sup>"
         ),
-        yaxis=dict(title="\u0394F1"),
-        height=520, width=1000, **LAYOUT_BASE,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18,
+                    xanchor="center", x=0.5, bgcolor="rgba(255,255,255,0.9)",
+                    bordercolor="rgba(0,0,0,0.1)", borderwidth=1),
+        height=520, width=950,
+        **LAYOUT_BASE,
     )
-    _apply_axis_style(fig, 1, 2)
     return fig
 
 
 # ===================================================================
-#  FIGURES 4.7 & 4.8 — Noise robustness and Activity gating
+# FIGURE 4.6 — Multi-Class Overview
+# ===================================================================
+
+def fig_multiclass_overview() -> go.Figure:
+    rows = []
+
+    # Airplane — matched runs
+    for name, base, _ in SEPARATORS_AIRPLANE:
+        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        if d is None:
+            continue
+        for cls in CLASSIFIERS_AIRPLANE:
+            delta = _metric(d.get(cls), "f1_score", "mix_sep_cls") - _metric(d.get(cls), "f1_score", "mix_cls")
+            rows.append({
+                "group": f"Airplane · {name}",
+                "classifier": _cls_label(cls),
+                "delta": delta,
+            })
+
+    # Bird — matched runs
+    d_bird = _load_best_matched(TUSS_MC_BIRD_DIR, CLASSIFIERS_BIRD)
+    if d_bird is not None:
+        for cls in CLASSIFIERS_BIRD:
+            delta = _metric(d_bird.get(cls), "f1_score", "mix_sep_cls") - _metric(d_bird.get(cls), "f1_score", "mix_cls")
+            rows.append({
+                "group": "Bird · TUSS (multi)",
+                "classifier": _cls_label(cls),
+                "delta": delta,
+            })
+
+    if not rows:
+        return _placeholder("No multi-class data.", "Multi-Class Separation")
+
+    labels = [f"{r['group']}<br><span style='font-size:9px'>{r['classifier']}</span>" for r in rows]
+    deltas = [r["delta"] for r in rows]
+    colors = [COL_POS if v > 0.005 else COL_NEG if v < -0.005 else COL_NEU for v in deltas]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=labels, y=deltas,
+        marker_color=colors,
+        text=[_fmt(v, "+.3f") for v in deltas],
+        textposition="outside",
+        textfont=dict(size=9),
+        marker_line=dict(color="rgba(0,0,0,0.2)", width=0.6),
+    ))
+    fig.add_hline(y=0, line_dash="dot", line_color="#1f1f1f", line_width=1.2)
+
+    fig.update_layout(
+        title=dict(
+            text="<b>Does separation help classification?</b><br>"
+                 "<sup>ΔF1 = F1(sep) − F1(no sep) · Same matched run per model</sup>"
+        ),
+        yaxis=dict(title="ΔF1", gridcolor="rgba(0,0,0,0.07)",
+                   showline=True, linecolor="#1f1f1f", linewidth=1, zeroline=False),
+        xaxis=dict(showline=True, linecolor="#1f1f1f", linewidth=1),
+        height=520, width=max(800, 120 * len(labels)),
+        **LAYOUT_BASE,
+    )
+    return fig
+
+
+# ===================================================================
+# FIGURE 4.7 — Noise Robustness (latest run only)
 # ===================================================================
 
 def fig_noise_robustness() -> go.Figure:
@@ -758,67 +728,72 @@ def fig_noise_robustness() -> go.Figure:
         return _placeholder("No noise data.\nRun test_noise_increase.py first.",
                             "Noise Robustness")
 
+    # Only the latest file
+    latest = noise_files[0]
+    with open(latest) as f:
+        data = json.load(f)
+
+    model = data.get("config", {}).get("model_type", "model")
+    snr_results = sorted(data.get("snr_results", []),
+                         key=lambda x: x["snr_db"], reverse=True)
+    if not snr_results:
+        return _placeholder("Latest noise JSON empty.", "Noise Robustness")
+
+    snr = [r["snr_db"] for r in snr_results]
+    use_si = "mean_si_sdr_noisy_vs_clean_db" in snr_results[0]
+
+    if use_si:
+        y = [r["mean_si_sdr_noisy_vs_clean_db"] for r in snr_results]
+        y_std = [r.get("std_si_sdr_noisy_vs_clean_db", 0) for r in snr_results]
+        y_label = "SI-SDR (dB)"
+    else:
+        y = [r["mean_rms_degradation_db"] for r in snr_results]
+        y_std = [r.get("std_rms_degradation_db", 0) for r in snr_results]
+        y_label = "ΔRMS (dB)"
+
+    color = MODEL_COLORS.get(model, QUAL[2])
     fig = go.Figure()
-    any_trace = False
-    has_si_sdr = False
+    fig.add_trace(go.Scatter(
+        x=snr, y=y, mode="lines+markers",
+        name=f"{model}",
+        line=dict(color=color, width=2.5),
+        marker=dict(size=9, symbol="circle"),
+        error_y=dict(type="data", array=y_std, thickness=1.2, width=5,
+                     color=color),
+    ))
 
-    for nf in noise_files:
-        with open(nf) as f:
-            data = json.load(f)
-        model = data.get("config", {}).get("model_type", "model")
-        snr_results = sorted(data.get("snr_results", []),
-                              key=lambda x: x["snr_db"], reverse=True)
-        if not snr_results:
-            continue
-        snr = [r["snr_db"] for r in snr_results]
-        use_si = "mean_si_sdr_noisy_vs_clean_db" in snr_results[0]
-        has_si_sdr |= use_si
-
-        if use_si:
-            y = [r["mean_si_sdr_noisy_vs_clean_db"] for r in snr_results]
-            y_std = [r.get("std_si_sdr_noisy_vs_clean_db", 0) for r in snr_results]
-            y_label = "SI-SDR (dB)"
-        else:
-            y = [r["mean_rms_degradation_db"] for r in snr_results]
-            y_std = [r.get("std_rms_degradation_db", 0) for r in snr_results]
-            y_label = "\u0394RMS (dB)"
-
-        color = MODEL_COLORS.get(model, OI_ORANGE)
-        any_trace = True
-        fig.add_trace(go.Scatter(
-            x=snr, y=y, mode="lines+markers", name=f"{model} ({y_label})",
-            line=dict(color=color, width=2.5),
-            marker=dict(size=8, symbol="circle"),
-            error_y=dict(type="data", array=y_std, thickness=1, width=4,
-                         color=color),
-        ))
-
-    if not any_trace:
-        return _placeholder("Noise JSONs empty.", "Noise Robustness")
-
-    fig.add_vrect(x0=-5, x1=10, fillcolor=OI_ORANGE, opacity=0.10,
+    fig.add_vrect(x0=-5, x1=10, fillcolor=QUAL[4], opacity=0.08,
                   layer="below", line_width=0)
     fig.add_annotation(x=2.5, y=0.95, xref="x", yref="paper",
                        text="<b>Realistic deployment</b>", showarrow=False,
-                       font=dict(size=10, color=OI_BLACK))
+                       font=dict(size=10, color="#1f1f1f"))
 
-    if has_si_sdr:
-        fig.add_hline(y=0, line_dash="dot", line_color=OI_BLACK,
+    if use_si:
+        fig.add_hline(y=0, line_dash="dot", line_color="#1f1f1f", line_width=1.5,
                       annotation_text="Clean reference",
                       annotation_position="bottom right",
                       annotation_font=dict(size=10, color=COL_NEU))
 
     fig.update_layout(
         title=dict(
-            text="<b>Separation robustness under additive white noise</b>"
-                 "<br><sup><< easier \u2192 harder SNR \u00b7 shaded = realistic deployment range</sup>"),
-        xaxis=dict(title="Input SNR (dB)", autorange="reversed"),
-        yaxis=dict(title="SI-SDR (dB)" if has_si_sdr else "\u0394RMS (dB)"),
-        height=520, width=900, **LAYOUT_BASE,
+            text="<b>Separation robustness under additive white noise</b><br>"
+                 f"<sup>{model} · Latest run · ← easier · harder →</sup>"
+        ),
+        xaxis=dict(title="Input SNR (dB)", autorange="reversed",
+                   gridcolor="rgba(0,0,0,0.07)", showline=True,
+                   linecolor="#1f1f1f", linewidth=1),
+        yaxis=dict(title=y_label,
+                   gridcolor="rgba(0,0,0,0.07)", showline=True,
+                   linecolor="#1f1f1f", linewidth=1),
+        height=520, width=800,
+        **LAYOUT_BASE,
     )
-    _apply_axis_style(fig)
     return fig
 
+
+# ===================================================================
+# FIGURE 4.8 — Activity Gating (split into 2 clear panels)
+# ===================================================================
 
 def fig_activity_gating() -> go.Figure:
     json_path = GATING_RESULTS_DIR / "sweep_results.json"
@@ -831,64 +806,97 @@ def fig_activity_gating() -> go.Figure:
     baseline = data.get("baseline_no_recycling", {})
     th = [r["threshold"] for r in sweep]
     f1 = [r.get("f1_score", float("nan")) for r in sweep]
-    sni = [r.get("mean_si_snri_db", float("nan")) for r in sweep]
     hit = [r.get("cache_hit_rate", float("nan")) * 100 for r in sweep]
 
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Scatter(x=th, y=f1, mode="lines+markers", name="F1",
-                             line=dict(color=OI_VERMILION, width=2.5),
-                             marker=dict(size=7)), secondary_y=False)
-    if any(not np.isnan(v) for v in sni):
-        fig.add_trace(go.Scatter(x=th, y=sni, mode="lines+markers",
-                                 name="SI-SNRi (dB)",
-                                 line=dict(color=OI_BLUE, width=2.5, dash="dash"),
-                                 marker=dict(size=7)), secondary_y=False)
-    fig.add_trace(go.Scatter(x=th, y=hit, mode="lines+markers",
-                             name="Cache hit rate (%)",
-                             line=dict(color=OI_GREEN, width=2.5, dash="dot"),
-                             marker=dict(size=7, symbol="diamond")), secondary_y=True)
-
     bf1 = baseline.get("f1_score", float("nan"))
-    if not np.isnan(bf1):
-        fig.add_hline(y=bf1, line_dash="dot", line_color=OI_VERMILION,
-                      annotation_text=f"Baseline F1 = {bf1:.2f}",
-                      annotation_position="top left")
 
-    zone_th = [t for t, fi, hi in zip(th, f1, hit)
-               if not np.isnan(fi) and not np.isnan(hi) and fi >= bf1 - 0.02 and hi >= 50]
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        vertical_spacing=0.12,
+        subplot_titles=["<b>F1 score vs. threshold</b>", "<b>Cache hit rate vs. threshold</b>"],
+    )
+
+    # Top: F1
+    fig.add_trace(go.Scatter(
+        x=th, y=f1, mode="lines+markers", name="F1",
+        line=dict(color=QUAL[1], width=2.5),
+        marker=dict(size=8),
+    ), row=1, col=1)
+    if not np.isnan(bf1):
+        fig.add_hline(y=bf1, line_dash="dot", line_color=QUAL[1],
+                      annotation_text=f"Baseline F1 = {bf1:.2f}",
+                      annotation_position="top left", row=1, col=1)
+
+    zone_th = [t for t, fi in zip(th, f1)
+               if not np.isnan(fi) and fi >= bf1 - 0.02]
     if zone_th:
         fig.add_vrect(x0=min(zone_th), x1=max(zone_th),
-                      fillcolor=OI_GREEN, opacity=0.10, layer="below", line_width=0)
+                      fillcolor=QUAL[2], opacity=0.10, layer="below",
+                      line_width=0, row=1, col=1)
         fig.add_annotation(x=(min(zone_th) + max(zone_th)) / 2, y=0.05,
-                           xref="x", yref="paper", text="<b>Recommended zone</b>",
-                           showarrow=False, font=dict(size=9, color=OI_BLACK))
+                           xref="x", yref="paper",
+                           text="<b>F1 ≥ baseline − 0.02</b>",
+                           showarrow=False, font=dict(size=9, color="#1f1f1f"),
+                           row=1, col=1)
+
+    # Bottom: Cache hit rate
+    fig.add_trace(go.Scatter(
+        x=th, y=hit, mode="lines+markers", name="Cache hit rate (%)",
+        line=dict(color=QUAL[2], width=2.5),
+        marker=dict(size=8, symbol="diamond"),
+    ), row=2, col=1)
+
+    zone_th_hit = [t for t, fi, hi in zip(th, f1, hit)
+                   if not np.isnan(fi) and not np.isnan(hi)
+                   and fi >= bf1 - 0.02 and hi >= 50]
+    if zone_th_hit:
+        fig.add_vrect(x0=min(zone_th_hit), x1=max(zone_th_hit),
+                      fillcolor=QUAL[2], opacity=0.10, layer="below",
+                      line_width=0, row=2, col=1)
+        fig.add_annotation(x=(min(zone_th_hit) + max(zone_th_hit)) / 2, y=0.05,
+                           xref="x", yref="paper",
+                           text="<b>Recommended zone (F1 ≥ baseline − 0.02 & hit ≥ 50%)</b>",
+                           showarrow=False, font=dict(size=9, color="#1f1f1f"),
+                           row=2, col=1)
+
+    fig.update_xaxes(title_text="Cosine-similarity threshold",
+                     gridcolor="rgba(0,0,0,0.07)", showline=True,
+                     linecolor="#1f1f1f", linewidth=1, row=2, col=1)
+    fig.update_yaxes(title_text="F1 score", range=[0, 1.05],
+                     gridcolor="rgba(0,0,0,0.07)", showline=True,
+                     linecolor="#1f1f1f", linewidth=1, row=1, col=1)
+    fig.update_yaxes(title_text="Hit rate (%)", range=[0, 105],
+                     gridcolor="rgba(0,0,0,0.07)", showline=True,
+                     linecolor="#1f1f1f", linewidth=1, row=2, col=1)
 
     fig.update_layout(
         title=dict(
-            text="<b>Activity gating: quality\u2013efficiency trade-off</b>"
-                 "<br><sup>F1 / SI-SNRi (left) and cache hit rate (right)"
-                 " vs. cosine-similarity threshold</sup>",
+            text="<b>Activity gating: quality–efficiency trade-off</b><br>"
+                 "<sup>Top: classification quality · Bottom: computational savings</sup>"
         ),
-        xaxis=dict(title="Cosine-similarity threshold"),
-        height=520, width=900, **LAYOUT_BASE,
+        height=700, width=800,
+        showlegend=False,
+        **LAYOUT_BASE,
     )
-    fig.update_yaxes(title_text="F1 / SI-SNRi (dB)", secondary_y=False,
-                     showline=True, linecolor=AXIS_LINE, linewidth=1.2,
-                     gridcolor=GRID, ticks="outside", tickcolor=AXIS_LINE,
-                     ticklen=4, tickwidth=1, tickfont=TICK_FONT,
-                     title_font=AXIS_TITLE_FONT)
-    fig.update_yaxes(title_text="Cache hit rate (%)", range=[0, 105],
-                     secondary_y=True,
-                     showline=True, linecolor=AXIS_LINE, linewidth=1.2,
-                     ticks="outside", tickcolor=AXIS_LINE,
-                     ticklen=4, tickwidth=1,
-                     tickfont=TICK_FONT, title_font=AXIS_TITLE_FONT)
-    _apply_axis_style(fig)
     return fig
 
 
 # ===================================================================
-#  LaTeX tables
+# Placeholder helper
+# ===================================================================
+
+def _placeholder(msg: str, title: str = "Data not yet available") -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(text=f"<b>{msg}</b>", xref="paper", yref="paper",
+                       x=0.5, y=0.5, showarrow=False,
+                       font=dict(family=FONT_FAMILY, size=14, color=COL_NEU))
+    fig.update_layout(title=f"<b>{title}</b>", height=400, width=800,
+                      **LAYOUT_BASE)
+    return fig
+
+
+# ===================================================================
+# LaTeX tables
 # ===================================================================
 
 def _write_latex_table(path: Path, columns: Sequence[str],
@@ -899,7 +907,7 @@ def _write_latex_table(path: Path, columns: Sequence[str],
     if col_align is None:
         col_align = "l" + "r" * (len(columns) - 1)
     lines = [
-        "% Auto-generated by plot_dissertation_figures.py \u2014 do not edit by hand.",
+        "% Auto-generated — do not edit by hand.",
         "\\begin{table}[htbp]", "  \\centering",
         f"  \\caption{{{caption}}}", f"  \\label{{{label}}}",
         f"  \\begin{{tabular}}{{{col_align}}}",
@@ -916,19 +924,22 @@ def _write_latex_table(path: Path, columns: Sequence[str],
 
 def table_best_runs() -> None:
     header = ["Separator", "Classifier", "Run condition",
-               "F1 base", "F1 sep", "\u0394F1",
-               "Bal.Acc base", "Bal.Acc sep", "\u0394BA",
+               "F1 base", "F1 sep", "ΔF1",
+               "Bal.Acc base", "Bal.Acc sep", "ΔBA",
                "SI-SNRi (dB)"]
     rows = []
     for name, base, _ in SEPARATORS_AIRPLANE:
+        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        if d is None:
+            continue
         for cls in CLASSIFIERS_AIRPLANE:
-            d = _load_best(base, cls)
-            if d is None:
+            cls_data = d.get(cls)
+            if cls_data is None:
                 continue
-            f1_mix = _metric(d, "f1_score", "mix_cls")
-            f1_sep = _metric(d, "f1_score", "mix_sep_cls")
-            ba_mix = _metric(d, "balanced_accuracy", "mix_cls")
-            ba_sep = _metric(d, "balanced_accuracy", "mix_sep_cls")
+            f1_mix = _metric(cls_data, "f1_score", "mix_cls")
+            f1_sep = _metric(cls_data, "f1_score", "mix_sep_cls")
+            ba_mix = _metric(cls_data, "balanced_accuracy", "mix_cls")
+            ba_sep = _metric(cls_data, "balanced_accuracy", "mix_sep_cls")
             snri = _signal(d, "mean_si_snri_db", "mix_sep_cls")
             delta_f1 = f1_sep - f1_mix if not (np.isnan(f1_mix) or np.isnan(f1_sep)) else float("nan")
             delta_ba = ba_sep - ba_mix if not (np.isnan(ba_mix) or np.isnan(ba_sep)) else float("nan")
@@ -938,10 +949,10 @@ def table_best_runs() -> None:
                 _fmt(ba_mix), _fmt(ba_sep), _fmt(delta_ba, "+.3f"),
                 _fmt(snri, ".2f"),
             ])
-            f1_clean = _metric(d, "f1_score", "clean_cls")
-            f1_clean_sep = _metric(d, "f1_score", "clean_sep_cls")
-            ba_clean = _metric(d, "balanced_accuracy", "clean_cls")
-            ba_clean_sep = _metric(d, "balanced_accuracy", "clean_sep_cls")
+            f1_clean = _metric(cls_data, "f1_score", "clean_cls")
+            f1_clean_sep = _metric(cls_data, "f1_score", "clean_sep_cls")
+            ba_clean = _metric(cls_data, "balanced_accuracy", "clean_cls")
+            ba_clean_sep = _metric(cls_data, "balanced_accuracy", "clean_sep_cls")
             delta_f1_c = f1_clean_sep - f1_clean if not (np.isnan(f1_clean) or np.isnan(f1_clean_sep)) else float("nan")
             delta_ba_c = ba_clean_sep - ba_clean if not (np.isnan(ba_clean) or np.isnan(ba_clean_sep)) else float("nan")
             rows.append([
@@ -954,9 +965,7 @@ def table_best_runs() -> None:
         TABLE_DIR / "tab_best_runs.tex",
         header, rows,
         caption="Best classification run per (separator, classifier) pair, "
-                "selected by maximum \u0394F1 improvement. "
-                "Base = without separation; Sep = with separation; "
-                "\u0394 = Sep $-$ Base.",
+                "selected by maximum average ΔF1 across classifiers.",
         label="tab:best-runs", col_align="lllrrrrrrr",
     )
 
@@ -964,38 +973,39 @@ def table_best_runs() -> None:
 def table_separation_metrics() -> None:
     rows = []
     for name, base, _ in SEPARATORS_AIRPLANE:
-        for cls in CLASSIFIERS_AIRPLANE:
-            d = _load_best(base, cls)
-            if d is None:
-                continue
-            rows.append([
-                name, _cls_label(cls),
-                _fmt(_signal(d, "mean_si_snr_db", "mix_sep_cls"), ".2f"),
-                _fmt(_signal(d, "mean_si_snri_db", "mix_sep_cls"), ".2f"),
-                _fmt(_signal(d, "mean_sdr_db", "mix_sep_cls"), ".2f"),
-                _fmt(_signal(d, "mean_rms_error_db", "mix_sep_cls"), "+.2f"),
-                _fmt(_signal(d, "mean_sel_error_db", "mix_sep_cls"), "+.2f"),
-            ])
+        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        if d is None:
+            continue
+        rows.append([
+            name,
+            _fmt(_signal(d, "mean_si_snr_db", "mix_sep_cls"), ".2f"),
+            _fmt(_signal(d, "mean_si_snri_db", "mix_sep_cls"), ".2f"),
+            _fmt(_signal(d, "mean_sdr_db", "mix_sep_cls"), ".2f"),
+            _fmt(_signal(d, "mean_rms_error_db", "mix_sep_cls"), "+.2f"),
+            _fmt(_signal(d, "mean_sel_error_db", "mix_sep_cls"), "+.2f"),
+        ])
     if not rows:
-        print("  [skipped \u2014 no data]")
+        print("  [skipped — no data]")
         return
     _write_latex_table(
         TABLE_DIR / "tab_separation_metrics.tex",
-        ["Model", "Classifier", "SI-SNR (dB)", "SI-SNRi (dB)", "SDR (dB)",
+        ["Model", "SI-SNR (dB)", "SI-SNRi (dB)", "SDR (dB)",
          "RMS err (dB)", "SEL err (dB)"],
         rows,
-        caption="Signal-level separation metrics on held-out artificial mixtures "
-                "(mixture + separation condition).",
-        label="tab:separation-metrics", col_align="llrrrrr",
+        caption="Signal-level separation metrics (averaged across AST + PANN).",
+        label="tab:separation-metrics", col_align="lrrrrr",
     )
 
 
 def table_classification_impact() -> None:
     rows = []
     for name, base, _ in SEPARATORS_AIRPLANE:
+        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        if d is None:
+            continue
         for cls in CLASSIFIERS_AIRPLANE:
-            d = _load_best(base, cls)
-            if d is None:
+            cls_data = d.get(cls)
+            if cls_data is None:
                 continue
             for cond_base, cond_sep, cond_label in [
                 ("mix_cls", "mix_sep_cls", "Mixture"),
@@ -1004,39 +1014,41 @@ def table_classification_impact() -> None:
                 for metric_key, metric_label in [("f1_score", "F1"),
                                                   ("precision", "Prec."),
                                                   ("recall", "Rec.")]:
-                    v_base = _metric(d, metric_key, cond_base)
-                    v_sep = _metric(d, metric_key, cond_sep)
+                    v_base = _metric(cls_data, metric_key, cond_base)
+                    v_sep = _metric(cls_data, metric_key, cond_sep)
                     delta = v_sep - v_base if not (np.isnan(v_base) or np.isnan(v_sep)) else float("nan")
                     rows.append([
                         name, _cls_label(cls), cond_label, metric_label,
                         _fmt(v_base), _fmt(v_sep), _fmt(delta, "+.3f"),
                     ])
     if not rows:
-        print("  [skipped \u2014 no data]")
+        print("  [skipped — no data]")
         return
     _write_latex_table(
         TABLE_DIR / "tab_classification_impact.tex",
         ["Separator", "Classifier", "Input", "Metric",
-         "Base", "+Separation", "\u0394"],
+         "Base", "+Separation", "Δ"],
         rows,
         caption="Downstream classification impact of separation. "
-                "\u0394 = (with separation) $-$ (without).",
-        label="tab:classification-impact", col_align="llllrrrr",
+                "Δ = (with separation) − (without).",
+        label="tab:classification-impact", col_align="llllrrr",
     )
 
 
 def table_generalisation() -> None:
     rows = []
     for name, base, risoux_dir in SEPARATORS_AIRPLANE:
+        d_in = _load_best_matched(base, CLASSIFIERS_AIRPLANE, risoux=False)
+        d_out = _load_best_matched(risoux_dir, CLASSIFIERS_AIRPLANE, risoux=True) if risoux_dir else None
+        if d_in is None:
+            continue
         for cls in CLASSIFIERS_AIRPLANE:
-            d_in = _load_best(base, cls)
-            d_out = _load_best(risoux_dir, cls, risoux=True) if risoux_dir else None
-            if d_in is None:
-                continue
-            f1_in_val = _metric(d_in, "f1_score", "mix_sep_cls")
-            f1_out_val = _metric(d_out, "f1_score", "as_is_sep_cls") if d_out else float("nan")
-            f1_base_in = _metric(d_in, "f1_score", "mix_cls")
-            f1_base_out = _metric(d_out, "f1_score", "as_is_cls") if d_out else float("nan")
+            cls_in = d_in.get(cls)
+            cls_out = d_out.get(cls) if d_out else None
+            f1_in_val = _metric(cls_in, "f1_score", "mix_sep_cls")
+            f1_out_val = _metric(cls_out, "f1_score", "as_is_sep_cls")
+            f1_base_in = _metric(cls_in, "f1_score", "mix_cls")
+            f1_base_out = _metric(cls_out, "f1_score", "as_is_cls")
             delta_in = f1_in_val - f1_base_in if not (np.isnan(f1_in_val) or np.isnan(f1_base_in)) else float("nan")
             delta_out = f1_out_val - f1_base_out if not (np.isnan(f1_out_val) or np.isnan(f1_base_out)) else float("nan")
             gap = (f1_in_val - f1_out_val) if not (np.isnan(f1_in_val) or np.isnan(f1_out_val)) else float("nan")
@@ -1047,58 +1059,60 @@ def table_generalisation() -> None:
                 _fmt(gap, "+.3f"),
             ])
     if not rows:
-        print("  [skipped \u2014 no data]")
+        print("  [skipped — no data]")
         return
     _write_latex_table(
         TABLE_DIR / "tab_generalisation.tex",
         ["Model", "Classifier",
-         "In-dist F1", "In-dist \u0394F1",
-         "Risoux F1", "Risoux \u0394F1",
-         "Gap (in \u2212 OOD)"],
+         "In-dist F1", "In-dist ΔF1",
+         "Risoux F1", "Risoux ΔF1",
+         "Gap (in − OOD)"],
         rows,
-        caption="Out-of-distribution generalisation: F1 and \u0394F1 on artificial mixtures vs.\\ "
-                "Risoux forest field recordings. "
-                "\u0394F1 = (with separation) $-$ (without).",
-        label="tab:generalisation", col_align="llrrrrrr",
+        caption="Out-of-distribution generalisation (matched runs).",
+        label="tab:generalisation", col_align="llrrrrr",
     )
 
 
 def table_multiclass() -> None:
     rows = []
-    for cls in CLASSIFIERS_AIRPLANE:
-        d = _load_best(TUSS_MC_AIR_DIR, cls)
-        if d is not None:
-            f1_mix = _metric(d, "f1_score", "mix_cls")
-            f1_sep = _metric(d, "f1_score", "mix_sep_cls")
+    d_air = _load_best_matched(TUSS_MC_AIR_DIR, CLASSIFIERS_AIRPLANE)
+    if d_air is not None:
+        for cls in CLASSIFIERS_AIRPLANE:
+            cls_data = d_air.get(cls)
+            if cls_data is None:
+                continue
+            f1_mix = _metric(cls_data, "f1_score", "mix_cls")
+            f1_sep = _metric(cls_data, "f1_score", "mix_sep_cls")
             delta = f1_sep - f1_mix if not (np.isnan(f1_mix) or np.isnan(f1_sep)) else float("nan")
             rows.append([
                 "Airplane", _cls_label(cls), "TUSS (multi)",
                 _fmt(f1_mix), _fmt(f1_sep), _fmt(delta, "+.3f"),
-                _fmt(_signal(d, "mean_si_snri_db", "mix_sep_cls"), ".2f"),
+                _fmt(_signal(d_air, "mean_si_snri_db", "mix_sep_cls"), ".2f"),
             ])
-    for cls in CLASSIFIERS_BIRD:
-        d = _load_best(TUSS_MC_BIRD_DIR, cls)
-        if d is None:
-            continue
-        f1_mix = _metric(d, "f1_score", "mix_cls")
-        f1_sep = _metric(d, "f1_score", "mix_sep_cls")
-        delta = f1_sep - f1_mix if not (np.isnan(f1_mix) or np.isnan(f1_sep)) else float("nan")
-        rows.append([
-            "Bird", _cls_label(cls), "TUSS (multi)",
-            _fmt(f1_mix), _fmt(f1_sep), _fmt(delta, "+.3f"),
-            _fmt(_signal(d, "mean_si_snri_db", "mix_sep_cls"), ".2f"),
-        ])
+    d_bird = _load_best_matched(TUSS_MC_BIRD_DIR, CLASSIFIERS_BIRD)
+    if d_bird is not None:
+        for cls in CLASSIFIERS_BIRD:
+            cls_data = d_bird.get(cls)
+            if cls_data is None:
+                continue
+            f1_mix = _metric(cls_data, "f1_score", "mix_cls")
+            f1_sep = _metric(cls_data, "f1_score", "mix_sep_cls")
+            delta = f1_sep - f1_mix if not (np.isnan(f1_mix) or np.isnan(f1_sep)) else float("nan")
+            rows.append([
+                "Bird", _cls_label(cls), "TUSS (multi)",
+                _fmt(f1_mix), _fmt(f1_sep), _fmt(delta, "+.3f"),
+                _fmt(_signal(d_bird, "mean_si_snri_db", "mix_sep_cls"), ".2f"),
+            ])
     if not rows:
-        print("  [skipped \u2014 no data]")
+        print("  [skipped — no data]")
         return
     _write_latex_table(
         TABLE_DIR / "tab_multiclass_tuss.tex",
         ["COI", "Classifier", "Model",
-         "F1 base", "F1 sep", "\u0394F1", "SI-SNRi (dB)"],
+         "F1 base", "F1 sep", "ΔF1", "SI-SNRi (dB)"],
         rows,
-        caption="TUSS multi-class performance per COI head. "
-                "\u0394F1 = \u0394(separation $-$ no separation).",
-        label="tab:multiclass-tuss", col_align="llllrrrr",
+        caption="TUSS multi-class performance per COI head (matched runs).",
+        label="tab:multiclass-tuss", col_align="lllrrrr",
     )
 
 
@@ -1106,31 +1120,31 @@ def table_noise_robustness() -> None:
     files = sorted(NOISE_RESULTS_DIR.glob("noise_increase_energy_*.json"),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
-        print("  [skipped \u2014 no data]")
+        print("  [skipped — no data]")
         return
+    # Latest only
+    latest = files[0]
+    with open(latest) as f:
+        data = json.load(f)
+    model = data.get("config", {}).get("model_type", "model")
     rows = []
-    for nf in files:
-        with open(nf) as f:
-            data = json.load(f)
-        model = data.get("config", {}).get("model_type", "model")
-        for r in sorted(data.get("snr_results", []), key=lambda x: x["snr_db"], reverse=True):
-            has_si = "mean_si_sdr_noisy_vs_clean_db" in r
-            rows.append([
-                model, _fmt(r.get("snr_db"), ".1f"),
-                _fmt(r.get("mean_si_sdr_noisy_vs_clean_db"), "+.2f") if has_si else "\u2014",
-                _fmt(r.get("mean_rms_degradation_db"), "+.2f"),
-                _fmt(r.get("mean_sel_degradation_db"), "+.2f"),
-                _fmt(r.get("n_segments"), "d"),
-            ])
+    for r in sorted(data.get("snr_results", []), key=lambda x: x["snr_db"], reverse=True):
+        has_si = "mean_si_sdr_noisy_vs_clean_db" in r
+        rows.append([
+            model, _fmt(r.get("snr_db"), ".1f"),
+            _fmt(r.get("mean_si_sdr_noisy_vs_clean_db"), "+.2f") if has_si else "\u2014",
+            _fmt(r.get("mean_rms_degradation_db"), "+.2f"),
+            _fmt(r.get("mean_sel_degradation_db"), "+.2f"),
+            _fmt(r.get("n_segments"), "d"),
+        ])
     if not rows:
-        print("  [skipped \u2014 empty JSONs]")
+        print("  [skipped — empty JSONs]")
         return
     _write_latex_table(
         TABLE_DIR / "tab_noise_robustness.tex",
-        ["Model", "SNR (dB)", "SI-SDR (dB)", "\u0394RMS (dB)", "\u0394SEL (dB)", "$N$"],
+        ["Model", "SNR (dB)", "SI-SDR (dB)", "ΔRMS (dB)", "ΔSEL (dB)", "$N$"],
         rows,
-        caption="Robustness under additive white noise. SI-SDR is scale-invariant; "
-                "RMS/SEL contain rescaling artefact.",
+        caption="Robustness under additive white noise (latest run).",
         label="tab:noise-robustness", col_align="lrrrrr",
     )
 
@@ -1138,7 +1152,7 @@ def table_noise_robustness() -> None:
 def table_activity_gating() -> None:
     json_path = GATING_RESULTS_DIR / "sweep_results.json"
     if not json_path.exists():
-        print("  [skipped \u2014 no data]")
+        print("  [skipped — no data]")
         return
     with open(json_path) as f:
         data = json.load(f)
@@ -1149,24 +1163,22 @@ def table_activity_gating() -> None:
         rows.append([
             _fmt(r.get("threshold"), ".2f"),
             _fmt(r.get("f1_score"), ".3f"),
-            _fmt(r.get("mean_si_snri_db"), ".2f"),
             _fmt(r.get("cache_hit_rate", float("nan")) * 100, ".1f"),
         ])
     rows.append([
-        "baseline", _fmt(baseline.get("f1_score"), ".3f"),
-        _fmt(baseline.get("mean_si_snri_db"), ".2f"), "0.0",
+        "baseline", _fmt(baseline.get("f1_score"), ".3f"), "0.0",
     ])
     _write_latex_table(
         TABLE_DIR / "tab_activity_gating.tex",
-        ["Threshold", "F1", "SI-SNRi (dB)", "Hit rate (%)"],
+        ["Threshold", "F1", "Hit rate (%)"],
         rows,
-        caption="Activity-gating sweep: quality\u2013efficiency trade-off.",
+        caption="Activity-gating sweep: quality–efficiency trade-off.",
         label="tab:activity-gating", col_align="lrrr",
     )
 
 
 # ===================================================================
-#  I/O driver
+# I/O driver
 # ===================================================================
 
 def save_figure(fig: go.Figure, name: str) -> None:
@@ -1176,7 +1188,7 @@ def save_figure(fig: go.Figure, name: str) -> None:
         fig.write_image(str(png), scale=PNG_SCALE)
         print(f"  Wrote {png.relative_to(FINAL_RESULTS_DIR)}")
     except Exception as e:
-        print(f"  [PNG skipped \u2014 {e}]")
+        print(f"  [PNG skipped — {e}]")
     html = OUTPUT_DIR / f"{name}.html"
     fig.write_html(str(html))
     print(f"  Wrote {html.relative_to(FINAL_RESULTS_DIR)}")
@@ -1199,29 +1211,28 @@ def main() -> None:
         ("fig_4_8_activity_gating", fig_activity_gating),
     ]
 
-    print("\n\u2014 Figures \u2014")
+    print("\n— Figures —")
     for name, fn in figures:
         try:
-            print(f"  Building {name} \u2026")
+            print(f"  Building {name} …")
             save_figure(fn(), name)
         except Exception as e:
             import traceback
             print(f"  ERROR {name}: {e}")
             traceback.print_exc()
 
-    print("\n\u2014 LaTeX tables \u2014")
-    for tbl_fn in (table_best_runs, table_separation_metrics,
-                   table_classification_impact, table_generalisation,
-                   table_multiclass, table_noise_robustness,
-                   table_activity_gating):
-        try:
-            tbl_fn()
-        except Exception as e:
-            import traceback
-            print(f"  ERROR {tbl_fn.__name__}: {e}")
-            traceback.print_exc()
+    print("\n— LaTeX tables —")
+    table_best_runs()
+    table_separation_metrics()
+    table_classification_impact()
+    table_generalisation()
+    table_multiclass()
+    table_noise_robustness()
+    table_activity_gating()
 
-    print(f"\nDone.\n  Figures: {OUTPUT_DIR}\n  Tables : {TABLE_DIR}")
+    print(f"\nDone.")
+    print(f"  Figures: {OUTPUT_DIR}")
+    print(f"  Tables : {TABLE_DIR}")
 
 
 if __name__ == "__main__":
