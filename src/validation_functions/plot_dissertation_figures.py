@@ -2,13 +2,9 @@
 """
 plot_dissertation_figures.py — Results & Discussion chapter visualisations.
 
-Key design changes (v2):
-- Matched runs: signal and classification figures use the SAME timestamp
-  across both classifiers (AST + PANN), averaging signal metrics and
-  showing per-classifier classification results side-by-side.
-- Fig 4.7: only the latest noise-robustness JSON is plotted.
-- Fig 4.8: split into two clear subplots (F1 vs threshold, hit rate vs threshold).
-- Fig 4.4: shows absolute confusion values with a neutral diverging scale.
+Each separator directory contains one curated result per classifier.
+Signal metrics are averaged across classifiers (AST + PANN) to reduce
+architecture bias; per-classifier classification results are shown side-by-side.
 """
 
 from __future__ import annotations
@@ -50,7 +46,7 @@ GATING_RESULTS_DIR = FINAL_RESULTS_DIR / "activity_gating_results"
 SEPARATORS_AIRPLANE: List[Tuple[str, Path, Optional[Path]]] = [
     ("SuDoRM-RF", SUDORMRF_DIR, SUDORMRF_RISOUX_DIR),
     ("CLAPSep", CLAPSEP_DIR, CLAPSEP_RISOUX_DIR),
-    ("TUSS (multi)", TUSS_MC_AIR_DIR, TUSS_MC_AIR_RISOUX_DIR),
+    ("TUSS", TUSS_MC_AIR_DIR, TUSS_MC_AIR_RISOUX_DIR),
 ]
 
 CLASSIFIERS_AIRPLANE = ["ast_finetuned", "pann_finetuned"]
@@ -64,7 +60,7 @@ QUAL = px.colors.qualitative.Plotly
 MODEL_COLORS = {
     "SuDoRM-RF": QUAL[0],
     "CLAPSep": QUAL[1],
-    "TUSS (multi)": QUAL[2],
+    "TUSS": QUAL[2],
 }
 
 CLASSIFIER_COLORS = {
@@ -108,121 +104,56 @@ def _cls_label(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Data loading — matched runs (same timestamp across classifiers)
+# Data loading — one curated result per classifier directory
 # ---------------------------------------------------------------------------
 
-def _extract_timestamp(path: Path) -> str:
-    """Extract timestamp from results_test_*.json filename."""
-    stem = path.stem
-    parts = stem.split("_")
-    # results_test_TIMESTAMP.json  or  results_test_risoux_TIMESTAMP.json
-    if "risoux" in stem:
-        return "_".join(parts[3:])
-    return "_".join(parts[2:])
+def _load_classifier_result(classifier_dir: Path, risoux: bool = False) -> Optional[dict]:
+    """Load the single best result file from a classifier directory."""
+    if not classifier_dir.exists():
+        return None
+    pattern = "results_test_risoux_*.json" if risoux else "results_test_*.json"
+    files = list(classifier_dir.glob(pattern))
+    if not files:
+        return None
+    try:
+        with open(files[0]) as fh:
+            return json.load(fh)
+    except Exception:
+        return None
 
 
-def _load_best_matched(base_dir: Path, classifiers: Sequence[str],
-                       risoux: bool = False) -> Optional[dict]:
-    """Find the run with the best average ΔF1 across *all* classifiers,
-    requiring the SAME timestamp to exist in every classifier directory.
+def _load_results(base_dir: Path, classifiers: Sequence[str],
+                  risoux: bool = False) -> Optional[dict]:
+    """Load results for all classifiers, averaging signal metrics.
 
-    Returns a dict with keys:
-        timestamp, and one key per classifier (e.g. 'ast_finetuned')
-    Signal metrics are averaged across classifiers (stored under key
-    '__avg_signal').
+    Each classifier directory contains exactly one curated result file.
+
+    Returns a dict with one key per classifier (e.g. 'ast_finetuned')
+    plus '__avg_signal' with metrics averaged across classifiers.
     """
-    pattern = "results_test_risoux_*.json" if risoux else "results_test_*.json"
-
-    # Collect files per classifier
-    files_by_cls: Dict[str, Dict[str, Path]] = {}
+    loaded: Dict[str, dict] = {}
     for cls in classifiers:
-        sub = base_dir / cls
-        if not sub.exists():
+        result = _load_classifier_result(base_dir / cls, risoux)
+        if result is None:
             return None
-        files_by_cls[cls] = {_extract_timestamp(f): f for f in sorted(sub.glob(pattern))}
+        loaded[cls] = result
 
-    # Find common timestamps
-    common = set.intersection(*[set(files_by_cls[c].keys()) for c in classifiers])
-    if not common:
-        return None
+    avg_signal: Dict[str, Dict[str, float]] = {}
+    for cond in ["mix_sep_cls", "clean_sep_cls"]:
+        avg_signal[cond] = {}
+        for key in ["mean_si_snr_db", "mean_si_snri_db", "mean_sdr_db",
+                    "mean_rms_error_db", "mean_sel_error_db"]:
+            vals = []
+            for cls in classifiers:
+                sm = loaded[cls].get(cond, {}).get("signal_metrics") or {}
+                v = sm.get(key, float("nan"))
+                if not np.isnan(v):
+                    vals.append(float(v))
+            avg_signal[cond][key] = float(np.mean(vals)) if vals else float("nan")
 
-    base_cond = "as_is_cls" if risoux else "mix_cls"
-    sep_cond = "as_is_sep_cls" if risoux else "mix_sep_cls"
-
-    best_run: Optional[dict] = None
-    best_score = float("-inf")
-
-    for ts in sorted(common):
-        loaded: Dict[str, dict] = {}
-        for cls in classifiers:
-            with open(files_by_cls[cls][ts]) as fh:
-                loaded[cls] = json.load(fh)
-
-        # Average ΔF1 across classifiers
-        deltas = []
-        for cls in classifiers:
-            d = loaded[cls]
-            f1_base = d.get(base_cond, {}).get("f1_score", float("nan"))
-            f1_sep = d.get(sep_cond, {}).get("f1_score", float("nan"))
-            if not (np.isnan(f1_base) or np.isnan(f1_sep)):
-                deltas.append(f1_sep - f1_base)
-        if not deltas:
-            continue
-        score = float(np.mean(deltas))
-
-        if score > best_score:
-            best_score = score
-            # Average signal metrics across classifiers
-            avg_signal: Dict[str, Dict[str, float]] = {}
-            for cond in ["mix_sep_cls", "clean_sep_cls"]:
-                avg_signal[cond] = {}
-                for key in ["mean_si_snr_db", "mean_si_snri_db", "mean_sdr_db",
-                            "mean_rms_error_db", "mean_sel_error_db"]:
-                    vals = []
-                    for cls in classifiers:
-                        sm = loaded[cls].get(cond, {}).get("signal_metrics") or {}
-                        v = sm.get(key, float("nan"))
-                        if not np.isnan(v):
-                            vals.append(float(v))
-                    avg_signal[cond][key] = float(np.mean(vals)) if vals else float("nan")
-
-            best_run = {
-                "timestamp": ts,
-                "__avg_signal": avg_signal,
-            }
-            best_run.update(loaded)
-
-    return best_run
-
-
-def _load_best(base_dir: Path, classifier: str,
-               risoux: bool = False) -> Optional[dict]:
-    """Legacy: select best run for a single classifier (used for bird)."""
-    sub = base_dir / classifier
-    if not sub.exists():
-        return None
-    pattern = "results_test_risoux_*.json" if risoux else "results_test_*.json"
-    candidates = []
-    for f in sorted(sub.glob(pattern)):
-        try:
-            with open(f) as fh:
-                candidates.append(json.load(fh))
-        except Exception:
-            continue
-    if not candidates:
-        return None
-    base_cond = "as_is_cls" if risoux else "mix_cls"
-    sep_cond = "as_is_sep_cls" if risoux else "mix_sep_cls"
-    best, best_delta = None, float("-inf")
-    for d in candidates:
-        f1_base = d.get(base_cond, {}).get("f1_score", float("nan"))
-        f1_sep = d.get(sep_cond, {}).get("f1_score", float("nan"))
-        if np.isnan(f1_base) or np.isnan(f1_sep):
-            continue
-        if f1_sep - f1_base > best_delta:
-            best_delta = f1_sep - f1_base
-            best = d
-    return best
+    result = {"__avg_signal": avg_signal}
+    result.update(loaded)
+    return result
 
 
 def _metric(d: Optional[dict], key: str, condition: str) -> float:
@@ -265,7 +196,7 @@ def _fmt(v: float, spec: str = ".3f", dash: str = "\u2014") -> str:
 def fig_separation_metrics() -> go.Figure:
     models, si_snri, sdr = [], [], []
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        d = _load_results(base, CLASSIFIERS_AIRPLANE)
         if d is None:
             continue
         models.append(name)
@@ -319,7 +250,7 @@ def fig_energy_preservation() -> go.Figure:
     models, rms_mix, sel_mix = [], [], []
     rms_clean, sel_clean = [], []
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        d = _load_results(base, CLASSIFIERS_AIRPLANE)
         if d is None:
             continue
         models.append(name)
@@ -382,7 +313,7 @@ def fig_classification_impact() -> go.Figure:
     # Load matched runs for all models
     matched: Dict[str, dict] = {}
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        d = _load_results(base, CLASSIFIERS_AIRPLANE)
         if d is not None:
             matched[name] = d
 
@@ -475,7 +406,7 @@ def _norm_cm(cm: dict) -> Tuple[np.ndarray, float]:
 def fig_confusion_shifts() -> go.Figure:
     panels = []
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        d = _load_results(base, CLASSIFIERS_AIRPLANE)
         if d is None:
             continue
         # Use AST as representative (signal metrics averaged, confusion is per-classifier)
@@ -522,7 +453,7 @@ def fig_confusion_shifts() -> go.Figure:
     )
 
     # Neutral diverging: purple-white-orange (no green/red semantic)
-    div_scale = [[0.0, "#54278f"], [0.5, "#FFFFFF"], [1.0, "#d94801"]]
+    div_scale = [[0.0, "#8b61c3"], [0.5, "#FFFFFF"], [1.0, "#e58758"]]
     zmax = max(abs(p[2]).max() for p in panels)
     zmax = max(zmax, 5.0)
 
@@ -566,17 +497,16 @@ def fig_generalisation_gap() -> go.Figure:
 
     for cls in CLASSIFIERS_AIRPLANE:
         for name, base, risoux_dir in SEPARATORS_AIRPLANE:
-            # Load matched run, but classification result is per-classifier
-            d_matched = _load_best_matched(base, CLASSIFIERS_AIRPLANE, risoux=False)
-            d_matched_risoux = _load_best_matched(risoux_dir, CLASSIFIERS_AIRPLANE, risoux=True) if risoux_dir else None
+            d_matched = _load_results(base, CLASSIFIERS_AIRPLANE, risoux=False)
+            d_matched_risoux = _load_results(risoux_dir, CLASSIFIERS_AIRPLANE, risoux=True) if risoux_dir else None
             if d_matched is None:
                 continue
             data_by_cls[cls].append({
                 "model": name,
-                "f1_in": _metric(d_matched.get(cls), "f1_score", "mix_sep_cls"),
-                "f1_base_in": _metric(d_matched.get(cls), "f1_score", "mix_cls"),
-                "f1_out": _metric(d_matched_risoux.get(cls), "f1_score", "as_is_sep_cls") if d_matched_risoux else float("nan"),
-                "f1_base_out": _metric(d_matched_risoux.get(cls), "f1_score", "as_is_cls") if d_matched_risoux else float("nan"),
+                "ba_in_base": _metric(d_matched.get(cls), "balanced_accuracy", "mix_cls"),
+                "ba_in_sep": _metric(d_matched.get(cls), "balanced_accuracy", "mix_sep_cls"),
+                "ba_out_base": _metric(d_matched_risoux.get(cls), "balanced_accuracy", "as_is_cls") if d_matched_risoux else float("nan"),
+                "ba_out_sep": _metric(d_matched_risoux.get(cls), "balanced_accuracy", "as_is_sep_cls") if d_matched_risoux else float("nan"),
             })
 
     if not any(data_by_cls.values()):
@@ -595,60 +525,76 @@ def fig_generalisation_gap() -> go.Figure:
 
         models = [e["model"] for e in entries]
         colors = [MODEL_COLORS[m] for m in models]
-        f1_in = [e["f1_in"] for e in entries]
-        f1_out = [e["f1_out"] for e in entries]
-        delta_f1 = [e["f1_out"] - e["f1_base_out"] if not (np.isnan(e["f1_out"]) or np.isnan(e["f1_base_out"])) else float("nan")
-                    for e in entries]
+        ba_in_base = [e["ba_in_base"] for e in entries]
+        ba_in_sep = [e["ba_in_sep"] for e in entries]
+        ba_out_base = [e["ba_out_base"] for e in entries]
+        ba_out_sep = [e["ba_out_sep"] for e in entries]
 
         bar_kw = dict(textposition="outside", cliponaxis=False,
-                      textfont=dict(size=10),
-                      marker_line=dict(color="rgba(0,0,0,0.2)", width=0.6))
+                      textfont=dict(size=9),
+                      marker_line=dict(color="rgba(0,0,0,0.2)", width=0.5))
 
         fig.add_trace(go.Bar(
-            x=models, y=f1_in, name="In-dist (mix+sep)",
-            marker_color=colors, opacity=0.95,
-            text=[_fmt(v, ".2f") for v in f1_in],
-            showlegend=(col_idx == 1), legendgroup="in",
+            x=models, y=ba_in_base, name="In-dist base",
+            marker_color=colors, opacity=0.25,
+            text=[_fmt(v, ".2f") for v in ba_in_base],
+            showlegend=(col_idx == 1), legendgroup="in_base",
             **bar_kw,
         ), row=1, col=col_idx)
         fig.add_trace(go.Bar(
-            x=models, y=f1_out, name="Risoux (as-is+sep)",
-            marker_color=colors, opacity=0.50,
-            text=[_fmt(v, ".2f") for v in f1_out],
-            showlegend=(col_idx == 1), legendgroup="out",
+            x=models, y=ba_in_sep, name="In-dist + sep",
+            marker_color=colors, opacity=0.90,
+            text=[_fmt(v, ".2f") for v in ba_in_sep],
+            showlegend=(col_idx == 1), legendgroup="in_sep",
+            **bar_kw,
+        ), row=1, col=col_idx)
+        fig.add_trace(go.Bar(
+            x=models, y=ba_out_base, name="Risoux base",
+            marker_color=colors, opacity=0.15,
+            text=[_fmt(v, ".2f") for v in ba_out_base],
+            showlegend=(col_idx == 1), legendgroup="out_base",
+            **bar_kw,
+        ), row=1, col=col_idx)
+        fig.add_trace(go.Bar(
+            x=models, y=ba_out_sep, name="Risoux + sep",
+            marker_color=colors, opacity=0.55,
+            text=[_fmt(v, ".2f") for v in ba_out_sep],
+            showlegend=(col_idx == 1), legendgroup="out_sep",
             **bar_kw,
         ), row=1, col=col_idx)
 
-        for i, d_f1 in enumerate(delta_f1):
-            if np.isnan(d_f1):
+        for i, e in enumerate(entries):
+            v_in = e["ba_in_sep"]
+            v_out = e["ba_out_sep"]
+            if np.isnan(v_in) or np.isnan(v_out):
                 continue
-            y_anchor = max(f1_in[i] if not np.isnan(f1_in[i]) else 0,
-                           f1_out[i] if not np.isnan(f1_out[i]) else 0) + 0.04
-            color = COL_NEG if d_f1 < -0.05 else COL_POS if d_f1 > 0.05 else COL_NEU
+            gap_val = v_in - v_out
+            y_anchor = max(v_in, v_out) + 0.06
+            color = COL_POS if gap_val > 0.03 else COL_NEG if gap_val < -0.03 else COL_NEU
             fig.add_annotation(
-                x=models[i], y=y_anchor, text=f"<b>Δ {d_f1:+.2f}</b>",
+                x=models[i], y=y_anchor, text=f"<b>Gap {gap_val:+.2f}</b>",
                 showarrow=False, yanchor="bottom",
-                font=dict(size=10, color=color),
+                font=dict(size=9, color=color),
                 row=1, col=col_idx,
             )
 
-        fig.update_yaxes(title_text="F1 score" if col_idx == 1 else None,
-                         range=[0, 1.10], gridcolor="rgba(0,0,0,0.07)",
+        fig.update_yaxes(title_text="Balanced accuracy" if col_idx == 1 else None,
+                         range=[0, 1.12], gridcolor="rgba(0,0,0,0.07)",
                          showline=True, linecolor="#1f1f1f", linewidth=1,
-                         row=1, col=col_idx)
+                         zeroline=True, row=1, col=col_idx)
         fig.update_xaxes(showline=True, linecolor="#1f1f1f", linewidth=1,
                          row=1, col=col_idx)
 
     fig.update_layout(
-        barmode="group", bargap=0.28, bargroupgap=0.08,
+        barmode="group", bargap=0.22, bargroupgap=0.06,
         title=dict(
             text="<b>Generalisation gap: in-distribution vs. Risoux</b><br>"
-                 "<sup>Same matched run for both classifiers · Δ = Risoux improvement over baseline</sup>"
+                 "<sup>Balanced accuracy · Gap = In-dist − Risoux (positive ⟹ degrades on OOD)</sup>"
         ),
-        legend=dict(orientation="h", yanchor="bottom", y=-0.18,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.22,
                     xanchor="center", x=0.5, bgcolor="rgba(255,255,255,0.9)",
                     bordercolor="rgba(0,0,0,0.1)", borderwidth=1),
-        height=520, width=950,
+        height=550, width=950,
         **LAYOUT_BASE,
     )
     return fig
@@ -663,7 +609,7 @@ def fig_multiclass_overview() -> go.Figure:
 
     # Airplane — matched runs
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        d = _load_results(base, CLASSIFIERS_AIRPLANE)
         if d is None:
             continue
         for cls in CLASSIFIERS_AIRPLANE:
@@ -675,12 +621,12 @@ def fig_multiclass_overview() -> go.Figure:
             })
 
     # Bird — matched runs
-    d_bird = _load_best_matched(TUSS_MC_BIRD_DIR, CLASSIFIERS_BIRD)
+    d_bird = _load_results(TUSS_MC_BIRD_DIR, CLASSIFIERS_BIRD)
     if d_bird is not None:
         for cls in CLASSIFIERS_BIRD:
             delta = _metric(d_bird.get(cls), "f1_score", "mix_sep_cls") - _metric(d_bird.get(cls), "f1_score", "mix_cls")
             rows.append({
-                "group": "Bird · TUSS (multi)",
+                "group": "Bird · TUSS",
                 "classifier": _cls_label(cls),
                 "delta": delta,
             })
@@ -807,37 +753,47 @@ def fig_activity_gating() -> go.Figure:
     sweep = sorted(data.get("sweep", []), key=lambda r: r["threshold"])
     baseline = data.get("baseline_no_recycling", {})
     th = [r["threshold"] for r in sweep]
-    f1 = [r.get("f1_score", float("nan")) for r in sweep]
+    has_si = "mean_si_snri_db" in sweep[0] if sweep else False
+    y_key = "mean_si_snri_db" if has_si else "mean_si_snr_db"
+    y_label_top = "SI-SNRi (dB)" if has_si else "SI-SNR (dB)"
+    snr = [r.get(y_key, float("nan")) for r in sweep]
     hit = [r.get("cache_hit_rate", float("nan")) * 100 for r in sweep]
 
-    bf1 = baseline.get("f1_score", float("nan"))
+    b_snr = baseline.get(y_key, float("nan"))
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         vertical_spacing=0.12,
-        subplot_titles=["<b>F1 score vs. threshold</b>", "<b>Cache hit rate vs. threshold</b>"],
+        subplot_titles=[f"<b>{y_label_top} vs. threshold</b>",
+                        "<b>Cache hit rate vs. threshold</b>"],
     )
 
-    # Top: F1
+    # Top: SI-SNR(i)
     fig.add_trace(go.Scatter(
-        x=th, y=f1, mode="lines+markers", name="F1",
+        x=th, y=snr, mode="lines+markers", name=y_label_top,
         line=dict(color=QUAL[1], width=2.5),
         marker=dict(size=8),
     ), row=1, col=1)
-    if not np.isnan(bf1):
-        fig.add_hline(y=bf1, line_dash="dot", line_color=QUAL[1],
-                      annotation_text=f"Baseline F1 = {bf1:.2f}",
+    if not np.isnan(b_snr):
+        fig.add_hline(y=b_snr, line_dash="dot", line_color=QUAL[1],
+                      annotation_text=f"Baseline (no recycling) = {b_snr:.1f} dB",
                       annotation_position="top left", row=1, col=1)
 
-    zone_th = [t for t, fi in zip(th, f1)
-               if not np.isnan(fi) and fi >= bf1 - 0.02]
+    fig.add_hline(y=0, line_dash="solid", line_color=COL_NEU, line_width=0.8,
+                  annotation_text="No improvement",
+                  annotation_position="bottom right",
+                  annotation_font=dict(size=9, color=COL_NEU),
+                  row=1, col=1)
+
+    # Shade region where SI-SNRi > 0 (meaningful separation)
+    zone_th = [t for t, s in zip(th, snr) if not np.isnan(s) and s >= 0]
     if zone_th:
         fig.add_vrect(x0=min(zone_th), x1=max(zone_th),
-                      fillcolor=QUAL[2], opacity=0.10, layer="below",
+                      fillcolor=QUAL[2], opacity=0.08, layer="below",
                       line_width=0, row=1, col=1)
         fig.add_annotation(x=(min(zone_th) + max(zone_th)) / 2, y=0.05,
                            xref="x", yref="paper",
-                           text="<b>F1 ≥ baseline − 0.02</b>",
+                           text="<b>Effective separation (SI-SNRi ≥ 0)</b>",
                            showarrow=False, font=dict(size=9, color="#1f1f1f"),
                            row=1, col=1)
 
@@ -848,25 +804,27 @@ def fig_activity_gating() -> go.Figure:
         marker=dict(size=8, symbol="diamond"),
     ), row=2, col=1)
 
-    zone_th_hit = [t for t, fi, hi in zip(th, f1, hit)
-                   if not np.isnan(fi) and not np.isnan(hi)
-                   and fi >= bf1 - 0.02 and hi >= 50]
+    # Shade recommended operating zone (separation effective & hit rate ≥ 20%)
+    zone_th_hit = [t for t, s, hi in zip(th, snr, hit)
+                   if not np.isnan(s) and not np.isnan(hi)
+                   and s >= 0 and hi >= 20]
     if zone_th_hit:
         fig.add_vrect(x0=min(zone_th_hit), x1=max(zone_th_hit),
-                      fillcolor=QUAL[2], opacity=0.10, layer="below",
+                      fillcolor=QUAL[2], opacity=0.08, layer="below",
                       line_width=0, row=2, col=1)
         fig.add_annotation(x=(min(zone_th_hit) + max(zone_th_hit)) / 2, y=0.05,
                            xref="x", yref="paper",
-                           text="<b>Recommended zone (F1 ≥ baseline − 0.02 & hit ≥ 50%)</b>",
+                           text="<b>Recommended zone (SI-SNRi ≥ 0 & hit ≥ 20%)</b>",
                            showarrow=False, font=dict(size=9, color="#1f1f1f"),
                            row=2, col=1)
 
     fig.update_xaxes(title_text="Cosine-similarity threshold",
                      gridcolor="rgba(0,0,0,0.07)", showline=True,
                      linecolor="#1f1f1f", linewidth=1, row=2, col=1)
-    fig.update_yaxes(title_text="F1 score", range=[0, 1.05],
+    fig.update_yaxes(title_text=y_label_top,
                      gridcolor="rgba(0,0,0,0.07)", showline=True,
-                     linecolor="#1f1f1f", linewidth=1, row=1, col=1)
+                     linecolor="#1f1f1f", linewidth=1, zeroline=False,
+                     row=1, col=1)
     fig.update_yaxes(title_text="Hit rate (%)", range=[0, 105],
                      gridcolor="rgba(0,0,0,0.07)", showline=True,
                      linecolor="#1f1f1f", linewidth=1, row=2, col=1)
@@ -874,7 +832,7 @@ def fig_activity_gating() -> go.Figure:
     fig.update_layout(
         title=dict(
             text="<b>Activity gating: quality–efficiency trade-off</b><br>"
-                 "<sup>Top: classification quality · Bottom: computational savings</sup>"
+                 "<sup>Top: separation quality · Bottom: computational savings</sup>"
         ),
         height=700, width=800,
         showlegend=False,
@@ -931,7 +889,7 @@ def table_best_runs() -> None:
                "SI-SNRi (dB)"]
     rows = []
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        d = _load_results(base, CLASSIFIERS_AIRPLANE)
         if d is None:
             continue
         for cls in CLASSIFIERS_AIRPLANE:
@@ -975,7 +933,7 @@ def table_best_runs() -> None:
 def table_separation_metrics() -> None:
     rows = []
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        d = _load_results(base, CLASSIFIERS_AIRPLANE)
         if d is None:
             continue
         rows.append([
@@ -1002,7 +960,7 @@ def table_separation_metrics() -> None:
 def table_classification_impact() -> None:
     rows = []
     for name, base, _ in SEPARATORS_AIRPLANE:
-        d = _load_best_matched(base, CLASSIFIERS_AIRPLANE)
+        d = _load_results(base, CLASSIFIERS_AIRPLANE)
         if d is None:
             continue
         for cls in CLASSIFIERS_AIRPLANE:
@@ -1040,24 +998,24 @@ def table_classification_impact() -> None:
 def table_generalisation() -> None:
     rows = []
     for name, base, risoux_dir in SEPARATORS_AIRPLANE:
-        d_in = _load_best_matched(base, CLASSIFIERS_AIRPLANE, risoux=False)
-        d_out = _load_best_matched(risoux_dir, CLASSIFIERS_AIRPLANE, risoux=True) if risoux_dir else None
+        d_in = _load_results(base, CLASSIFIERS_AIRPLANE, risoux=False)
+        d_out = _load_results(risoux_dir, CLASSIFIERS_AIRPLANE, risoux=True) if risoux_dir else None
         if d_in is None:
             continue
         for cls in CLASSIFIERS_AIRPLANE:
             cls_in = d_in.get(cls)
             cls_out = d_out.get(cls) if d_out else None
-            f1_in_val = _metric(cls_in, "f1_score", "mix_sep_cls")
-            f1_out_val = _metric(cls_out, "f1_score", "as_is_sep_cls")
-            f1_base_in = _metric(cls_in, "f1_score", "mix_cls")
-            f1_base_out = _metric(cls_out, "f1_score", "as_is_cls")
-            delta_in = f1_in_val - f1_base_in if not (np.isnan(f1_in_val) or np.isnan(f1_base_in)) else float("nan")
-            delta_out = f1_out_val - f1_base_out if not (np.isnan(f1_out_val) or np.isnan(f1_base_out)) else float("nan")
-            gap = (f1_in_val - f1_out_val) if not (np.isnan(f1_in_val) or np.isnan(f1_out_val)) else float("nan")
+            ba_in_val = _metric(cls_in, "balanced_accuracy", "mix_sep_cls")
+            ba_out_val = _metric(cls_out, "balanced_accuracy", "as_is_sep_cls")
+            ba_base_in = _metric(cls_in, "balanced_accuracy", "mix_cls")
+            ba_base_out = _metric(cls_out, "balanced_accuracy", "as_is_cls")
+            delta_in = ba_in_val - ba_base_in if not (np.isnan(ba_in_val) or np.isnan(ba_base_in)) else float("nan")
+            delta_out = ba_out_val - ba_base_out if not (np.isnan(ba_out_val) or np.isnan(ba_base_out)) else float("nan")
+            gap = (ba_in_val - ba_out_val) if not (np.isnan(ba_in_val) or np.isnan(ba_out_val)) else float("nan")
             rows.append([
                 name, _cls_label(cls),
-                _fmt(f1_in_val), _fmt(delta_in, "+.3f"),
-                _fmt(f1_out_val), _fmt(delta_out, "+.3f"),
+                _fmt(ba_in_val), _fmt(delta_in, "+.3f"),
+                _fmt(ba_out_val), _fmt(delta_out, "+.3f"),
                 _fmt(gap, "+.3f"),
             ])
     if not rows:
@@ -1066,18 +1024,19 @@ def table_generalisation() -> None:
     _write_latex_table(
         TABLE_DIR / "tab_generalisation.tex",
         ["Model", "Classifier",
-         "In-dist F1", "In-dist ΔF1",
-         "Risoux F1", "Risoux ΔF1",
+         "In-dist BA", "In-dist ΔBA",
+         "Risoux BA", "Risoux ΔBA",
          "Gap (in − OOD)"],
         rows,
-        caption="Out-of-distribution generalisation (matched runs).",
+        caption="Out-of-distribution generalisation (matched runs). "
+                "Balanced accuracy used due to Risoux class imbalance.",
         label="tab:generalisation", col_align="llrrrrr",
     )
 
 
 def table_multiclass() -> None:
     rows = []
-    d_air = _load_best_matched(TUSS_MC_AIR_DIR, CLASSIFIERS_AIRPLANE)
+    d_air = _load_results(TUSS_MC_AIR_DIR, CLASSIFIERS_AIRPLANE)
     if d_air is not None:
         for cls in CLASSIFIERS_AIRPLANE:
             cls_data = d_air.get(cls)
@@ -1087,11 +1046,11 @@ def table_multiclass() -> None:
             f1_sep = _metric(cls_data, "f1_score", "mix_sep_cls")
             delta = f1_sep - f1_mix if not (np.isnan(f1_mix) or np.isnan(f1_sep)) else float("nan")
             rows.append([
-                "Airplane", _cls_label(cls), "TUSS (multi)",
+                "Airplane", _cls_label(cls), "TUSS",
                 _fmt(f1_mix), _fmt(f1_sep), _fmt(delta, "+.3f"),
                 _fmt(_signal(d_air, "mean_si_snri_db", "mix_sep_cls"), ".2f"),
             ])
-    d_bird = _load_best_matched(TUSS_MC_BIRD_DIR, CLASSIFIERS_BIRD)
+    d_bird = _load_results(TUSS_MC_BIRD_DIR, CLASSIFIERS_BIRD)
     if d_bird is not None:
         for cls in CLASSIFIERS_BIRD:
             cls_data = d_bird.get(cls)
@@ -1101,7 +1060,7 @@ def table_multiclass() -> None:
             f1_sep = _metric(cls_data, "f1_score", "mix_sep_cls")
             delta = f1_sep - f1_mix if not (np.isnan(f1_mix) or np.isnan(f1_sep)) else float("nan")
             rows.append([
-                "Bird", _cls_label(cls), "TUSS (multi)",
+                "Bird", _cls_label(cls), "TUSS",
                 _fmt(f1_mix), _fmt(f1_sep), _fmt(delta, "+.3f"),
                 _fmt(_signal(d_bird, "mean_si_snri_db", "mix_sep_cls"), ".2f"),
             ])

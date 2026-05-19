@@ -96,6 +96,56 @@ class SeparationPipeline:
         else:
             self.recycler = None
     
+    @torch.inference_mode()
+    def separate_batch(self, waveforms: torch.Tensor) -> torch.Tensor:
+        """Separate a batch of waveforms with mask recycling.
+
+        Cache checks are done per-element; cache misses are batched together
+        into a single TUSS forward pass to avoid the batch_size=1 artefact
+        that produces different floating-point accumulation from batched
+        inference.
+
+        Args:
+            waveforms: Input audio (B, T)
+
+        Returns:
+            sources: (B, n_sources, T)
+        """
+        B, _T = waveforms.shape
+        n_sources = self.tuss.num_sources
+        results: list[Optional[torch.Tensor]] = [None] * B
+
+        if not self.enable_recycling:
+            return self.tuss.separate_batch(waveforms)
+
+        miss_indices: list[int] = []
+        miss_waveforms: list[torch.Tensor] = []
+        miss_normalized: list[torch.Tensor] = []
+
+        for i in range(B):
+            segment = waveforms[i]
+            mean = segment.mean()
+            std = segment.std() + 1e-8
+            normalized = (segment - mean) / std
+
+            is_hit, cached_sources = self.recycler.check_cache(normalized)
+            if is_hit:
+                results[i] = cached_sources
+            else:
+                miss_indices.append(i)
+                miss_waveforms.append(segment)
+                miss_normalized.append(normalized)
+
+        if miss_indices:
+            miss_batch = torch.stack(miss_waveforms, dim=0)
+            miss_sources = self.tuss.separate_batch(miss_batch)
+            for j, idx in enumerate(miss_indices):
+                sources = miss_sources[j]
+                results[idx] = sources
+                self.recycler.update_cache(miss_normalized[j], sources)
+
+        return torch.stack([r for r in results if r is not None], dim=0)  # type: ignore[arg-type]
+
     def separate_waveform(
         self,
         waveform: torch.Tensor,

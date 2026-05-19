@@ -1562,7 +1562,7 @@ class ValidationPipeline:
 
     def _create_mixture_rms(
         self, source: torch.Tensor, noise: torch.Tensor, snr_db: float
-    ) -> Tuple[torch.Tensor, float]:
+    ) -> Tuple[torch.Tensor, float, float]:
         """Mix source and noise at given SNR using RMS-based normalization.
 
         This is the CORRECT way to create SNR mixtures for classifier evaluation:
@@ -1583,7 +1583,10 @@ class ValidationPipeline:
             snr_db: Target SNR in decibels
 
         Returns:
-            Tuple of (mixture, actual_snr_db)
+            Tuple of (mixture, actual_snr_db, peak_scale_factor)
+            peak_scale_factor is the uniform scaling applied in step 4 (1.0 if no
+            scaling was needed).  Callers should use this to compute the correct
+            energy reference for RMS/SEL error metrics.
         """
         eps = 1e-8
 
@@ -1622,7 +1625,7 @@ class ValidationPipeline:
         final_noise_power = torch.mean((noise_scaled * scale_factor) ** 2) + eps
         actual_snr_db = 10 * torch.log10(final_signal_power / final_noise_power).item()
 
-        return mixture, actual_snr_db
+        return mixture, actual_snr_db, scale_factor
 
     def _normalize(self, waveform: torch.Tensor) -> torch.Tensor:
         """Peak-normalize a waveform to [-1, 1].
@@ -2343,11 +2346,11 @@ class ValidationPipeline:
                     coi_n = self._prepare_rms_mixing_input(coi_seg)
                     bg_n = self._prepare_rms_mixing_input(bg_seg)
                     snr = np.random.uniform(*snr_range)
-                    mixture, actual_snr = self._create_mixture_rms(coi_seg, bg_seg, snr)
+                    mixture, actual_snr, peak_scale = self._create_mixture_rms(coi_seg, bg_seg, snr)
 
                     mixtures.append(mixture)
-                    coi_normalized.append(coi_n)
-                    bg_normalized.append(bg_n)
+                    coi_normalized.append(coi_n * peak_scale)
+                    bg_normalized.append(bg_n * peak_scale)
                     seg_snr_vals.append(actual_snr)
 
                 # Save the COMPLETE recordings (all segments concatenated) for
