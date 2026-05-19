@@ -734,8 +734,9 @@ def fig_noise_robustness() -> go.Figure:
         data = json.load(f)
 
     model = data.get("config", {}).get("model_type", "model")
+    # Sort in ASCENDING order (low SNR/hard on left, high SNR/easy on right)
     snr_results = sorted(data.get("snr_results", []),
-                         key=lambda x: x["snr_db"], reverse=True)
+                         key=lambda x: x["snr_db"])
     if not snr_results:
         return _placeholder("Latest noise JSON empty.", "Noise Robustness")
 
@@ -745,11 +746,11 @@ def fig_noise_robustness() -> go.Figure:
     if use_si:
         y = [r["mean_si_sdr_noisy_vs_clean_db"] for r in snr_results]
         y_std = [r.get("std_si_sdr_noisy_vs_clean_db", 0) for r in snr_results]
-        y_label = "SI-SDR (dB)"
+        y_label = "SI-SDR noisy vs. clean (dB)"
     else:
         y = [r["mean_rms_degradation_db"] for r in snr_results]
         y_std = [r.get("std_rms_degradation_db", 0) for r in snr_results]
-        y_label = "ΔRMS (dB)"
+        y_label = "RMS degradation (dB)"
 
     color = MODEL_COLORS.get(model, QUAL[2])
     fig = go.Figure()
@@ -762,6 +763,7 @@ def fig_noise_robustness() -> go.Figure:
                      color=color),
     ))
 
+    # Shade realistic deployment range (SNR: -5 to 10 dB)
     fig.add_vrect(x0=-5, x1=10, fillcolor=QUAL[4], opacity=0.08,
                   layer="below", line_width=0)
     fig.add_annotation(x=2.5, y=0.95, xref="x", yref="paper",
@@ -770,16 +772,16 @@ def fig_noise_robustness() -> go.Figure:
 
     if use_si:
         fig.add_hline(y=0, line_dash="dot", line_color="#1f1f1f", line_width=1.5,
-                      annotation_text="Clean reference",
+                      annotation_text="No degradation (clean reference)",
                       annotation_position="bottom right",
                       annotation_font=dict(size=10, color=COL_NEU))
 
     fig.update_layout(
         title=dict(
             text="<b>Separation robustness under additive white noise</b><br>"
-                 f"<sup>{model} · Latest run · ← easier · harder →</sup>"
+                 f"<sup>{model} · Latest run · harder ← → easier</sup>"
         ),
-        xaxis=dict(title="Input SNR (dB)", autorange="reversed",
+        xaxis=dict(title="Input SNR (dB)",
                    gridcolor="rgba(0,0,0,0.07)", showline=True,
                    linecolor="#1f1f1f", linewidth=1),
         yaxis=dict(title=y_label,

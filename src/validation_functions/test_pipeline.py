@@ -944,7 +944,7 @@ class ValidationPipeline:
             print(f"  from {cls_path}")
             self.classifier = create_classifier(
                 "ast_finetuned",
-                checkpoint_path=None,
+                checkpoint_path=str(cls_path),
                 device=self.device,
             )
             self.classifier_sample_rate = self.classifier.sample_rate
@@ -957,7 +957,7 @@ class ValidationPipeline:
             print(f"  from {cls_path}")
             self.classifier = create_classifier(
                 "pann_finetuned",
-                checkpoint_path=None,
+                checkpoint_path=str(cls_path),
                 device=self.device,
             )
             # Update classifier_sample_rate to match PANN's requirement (32kHz)
