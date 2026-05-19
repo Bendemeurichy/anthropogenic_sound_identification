@@ -29,12 +29,6 @@ class ASTFinetunedWrapper:
             device: Device for inference ("cuda", "cuda:0", "cpu")
             threshold: Classification threshold (default: 0.5)
         """
-        from validation_functions.classification_models.plane_classifier_ast.model_loader import (
-            load_trained_model,
-            create_plane_classifier,
-        )
-        from validation_functions.classification_models.plane_classifier_ast.config import ModelConfig
-        
         self.checkpoint_path = checkpoint_path
         self.device = device
         self.threshold = threshold
@@ -42,6 +36,11 @@ class ASTFinetunedWrapper:
         self._ast_for_embedding = None
         
         if checkpoint_path is not None:
+            from validation_functions.classification_models.plane_classifier_ast.model_loader import (
+                load_trained_model,
+            )
+            from validation_functions.classification_models.plane_classifier_ast.config import ModelConfig
+            
             self.model = load_trained_model(
                 checkpoint_path=checkpoint_path,
                 config=ModelConfig() if config is None else None,
@@ -49,33 +48,20 @@ class ASTFinetunedWrapper:
                 device=device,
             )
         else:
-            # Without a checkpoint, use a simpler approach:
-            # Extract AST embeddings and use a lightweight classifier
-            from validation_functions.classification_models.plane_classifier_ast.model_loader import (
-                load_pretrained_ast,
-            )
-            self._ast_for_embedding = load_pretrained_ast(
-                config=ModelConfig() if config is None else None,
-                device=device,
-            )
-            
-            # Create a simple classifier head for plane detection
-            # Using a lightweight 2-layer MLP on the AST embedding (768 dims)
-            import torch.nn as nn
-            self.model = nn.Sequential(
-                nn.Linear(768, 256),
-                nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(256, 1)
+            # Without a checkpoint, use the pretrained AST model directly.
+            # The pretrained model outputs 527 AudioSet classes, including:
+            #   - Index 335: Aircraft
+            #   - Index 336: Aircraft engine
+            #   - Index 340: Fixed-wing aircraft, airplane
+            # We'll extract all airplane-related labels for binary classification.
+            from transformers import ASTForAudioClassification
+            self.model = ASTForAudioClassification.from_pretrained(
+                "MIT/ast-finetuned-audioset-10-10-0.4593",
+                num_labels=527
             ).to(device)
             
-            # Initialize with better weights
-            for module in self.model.modules():
-                if isinstance(module, nn.Linear):
-                    nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
-                    if module.bias is not None:
-                        nn.init.constant_(module.bias, 0)
-            
+            # Indices for all airplane-related labels in AudioSet
+            self._airplane_label_indices = [335, 336, 340]  # Aircraft, Aircraft engine, Fixed-wing aircraft
             self._use_pretrained_fallback = True
         
         self.model.eval()
@@ -134,10 +120,17 @@ class ASTFinetunedWrapper:
         self.model.eval()
         
         if self._use_pretrained_fallback:
-            # Use AST embedding + simple classifier
-            ast_outputs = self._ast_for_embedding(input_values)
-            embedding = ast_outputs.pooler_output
-            logits = self.model(embedding)
+            # Use the pretrained AST model's airplane labels (indices 335, 336, 340)
+            # The model outputs 527 AudioSet class logits
+            outputs = self.model(input_values)
+            all_logits = outputs.logits  # (B, 527)
+            # Extract and aggregate all airplane-related label logits
+            airplane_logits = torch.index_select(
+                all_logits, 1, 
+                torch.tensor(self._airplane_label_indices, device=self.device)
+            )  # (B, 3)
+            # Take the maximum logit across all airplane labels as the final logit
+            logits = torch.max(airplane_logits, dim=1, keepdim=True)[0]  # (B, 1)
         else:
             # Use the full fine-tuned PlaneClassifierAST
             logits = self.model(input_values)  # (B, 1)

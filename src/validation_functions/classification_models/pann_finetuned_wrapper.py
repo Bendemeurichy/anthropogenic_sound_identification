@@ -69,8 +69,12 @@ class PANNFinetunedWrapper:
             )
             self._use_pretrained_fallback = False
         else:
-            # Without a checkpoint, we'll use a simpler approach:
-            # Extract CNN14 embeddings and use a lightweight classifier
+            # Without a checkpoint, use the pretrained CNN14 model directly.
+            # The pretrained model outputs 527 AudioSet classes, including:
+            #   - Index 335: Aircraft
+            #   - Index 336: Aircraft engine
+            #   - Index 340: Fixed-wing aircraft, airplane
+            # We'll extract all airplane-related labels for binary classification.
             from validation_functions.classification_models.plane_classifier_pann.model_loader import (
                 load_pretrained_cnn14,
             )
@@ -78,24 +82,10 @@ class PANNFinetunedWrapper:
                 config=ModelConfig() if config is None else None,
                 device=device,
             )
+            self.model = self._cnn14
             
-            # Create a simple classifier head for plane detection
-            # Using a lightweight 2-layer MLP on the CNN14 embedding
-            import torch.nn as nn
-            self.model = nn.Sequential(
-                nn.Linear(2048, 256),
-                nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(256, 1)
-            ).to(device)
-            
-            # Initialize with better weights
-            for module in self.model.modules():
-                if isinstance(module, nn.Linear):
-                    nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
-                    if module.bias is not None:
-                        nn.init.constant_(module.bias, 0)
-            
+            # Indices for all airplane-related labels in AudioSet
+            self._airplane_label_indices = [335, 336, 340]  # Aircraft, Aircraft engine, Fixed-wing aircraft
             self._use_pretrained_fallback = True
             self._cnn14_for_embedding = self._cnn14
         
@@ -158,9 +148,17 @@ class PANNFinetunedWrapper:
         self.model.eval()
         with torch.no_grad():
             if self._use_pretrained_fallback:
-                # Use CNN14 embedding + simple classifier
-                embedding = self._cnn14_for_embedding(waveform, return_embedding=True)
-                logit = self.model(embedding)
+                # Use the pretrained CNN14 model's airplane labels (indices 335, 336, 340)
+                # The model returns a dict with 'clipwise_output' (1, 527)
+                output = self.model(waveform)
+                clipwise_output = output['clipwise_output']  # (1, 527)
+                # Extract and aggregate all airplane-related label logits
+                airplane_logits = torch.index_select(
+                    clipwise_output, 1, 
+                    torch.tensor(self._airplane_label_indices, device=self.device)
+                )  # (1, 3)
+                # Take the maximum logit across all airplane labels as the final logit
+                logit = torch.max(airplane_logits, dim=1, keepdim=True)[0]  # (1, 1)
             else:
                 # Use the full fine-tuned PlaneClassifierPANN
                 logit = self.model(waveform)  # (1, 1)
