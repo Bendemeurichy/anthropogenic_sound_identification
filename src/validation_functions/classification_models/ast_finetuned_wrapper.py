@@ -38,6 +38,8 @@ class ASTFinetunedWrapper:
         self.checkpoint_path = checkpoint_path
         self.device = device
         self.threshold = threshold
+        self._use_pretrained_fallback = False
+        self._ast_for_embedding = None
         
         if checkpoint_path is not None:
             self.model = load_trained_model(
@@ -47,12 +49,35 @@ class ASTFinetunedWrapper:
                 device=device,
             )
         else:
-            self.model = create_plane_classifier(
+            # Without a checkpoint, use a simpler approach:
+            # Extract AST embeddings and use a lightweight classifier
+            from validation_functions.classification_models.plane_classifier_ast.model_loader import (
+                load_pretrained_ast,
+            )
+            self._ast_for_embedding = load_pretrained_ast(
                 config=ModelConfig() if config is None else None,
-                training_config=config,
-                fine_tune=False,
                 device=device,
             )
+            
+            # Create a simple classifier head for plane detection
+            # Using a lightweight 2-layer MLP on the AST embedding (768 dims)
+            import torch.nn as nn
+            self.model = nn.Sequential(
+                nn.Linear(768, 256),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(256, 1)
+            ).to(device)
+            
+            # Initialize with better weights
+            for module in self.model.modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+                    if module.bias is not None:
+                        nn.init.constant_(module.bias, 0)
+            
+            self._use_pretrained_fallback = True
+        
         self.model.eval()
         
         from transformers import ASTFeatureExtractor
@@ -107,7 +132,16 @@ class ASTFinetunedWrapper:
         input_values = inputs.input_values.to(self.device)
         
         self.model.eval()
-        logits = self.model(input_values)  # (B, 1)
+        
+        if self._use_pretrained_fallback:
+            # Use AST embedding + simple classifier
+            ast_outputs = self._ast_for_embedding(input_values)
+            embedding = ast_outputs.pooler_output
+            logits = self.model(embedding)
+        else:
+            # Use the full fine-tuned PlaneClassifierAST
+            logits = self.model(input_values)  # (B, 1)
+        
         confidences = torch.sigmoid(logits).squeeze(-1)  # (B,)
         
         predictions = (confidences >= self.threshold).long()

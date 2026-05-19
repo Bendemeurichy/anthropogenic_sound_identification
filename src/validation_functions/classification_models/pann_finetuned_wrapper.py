@@ -55,6 +55,8 @@ class PANNFinetunedWrapper:
         self.checkpoint_path = checkpoint_path
         self.device = device
         self.threshold = threshold
+        self._use_pretrained_fallback = False
+        self._cnn14_for_embedding = None
         
         # Load the model
         if checkpoint_path is not None:
@@ -62,15 +64,41 @@ class PANNFinetunedWrapper:
                 checkpoint_path=checkpoint_path,
                 config=ModelConfig() if config is None else None,
                 training_config=config,
-                device=device,
-            )
-        else:
-            self.model = create_plane_classifier(
-                config=ModelConfig() if config is None else None,
-                training_config=config,
                 fine_tune=False,
                 device=device,
             )
+            self._use_pretrained_fallback = False
+        else:
+            # Without a checkpoint, we'll use a simpler approach:
+            # Extract CNN14 embeddings and use a lightweight classifier
+            from validation_functions.classification_models.plane_classifier_pann.model_loader import (
+                load_pretrained_cnn14,
+            )
+            self._cnn14 = load_pretrained_cnn14(
+                config=ModelConfig() if config is None else None,
+                device=device,
+            )
+            
+            # Create a simple classifier head for plane detection
+            # Using a lightweight 2-layer MLP on the CNN14 embedding
+            import torch.nn as nn
+            self.model = nn.Sequential(
+                nn.Linear(2048, 256),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(256, 1)
+            ).to(device)
+            
+            # Initialize with better weights
+            for module in self.model.modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+                    if module.bias is not None:
+                        nn.init.constant_(module.bias, 0)
+            
+            self._use_pretrained_fallback = True
+            self._cnn14_for_embedding = self._cnn14
+        
         self.model.eval()
         
         # PANN works at 32kHz with 10-second segments
@@ -129,7 +157,14 @@ class PANNFinetunedWrapper:
         # Run model inference
         self.model.eval()
         with torch.no_grad():
-            logit = self.model(waveform)  # (1, 1)
+            if self._use_pretrained_fallback:
+                # Use CNN14 embedding + simple classifier
+                embedding = self._cnn14_for_embedding(waveform, return_embedding=True)
+                logit = self.model(embedding)
+            else:
+                # Use the full fine-tuned PlaneClassifierPANN
+                logit = self.model(waveform)  # (1, 1)
+            
             confidence = torch.sigmoid(logit).item()
         
         # Apply threshold
