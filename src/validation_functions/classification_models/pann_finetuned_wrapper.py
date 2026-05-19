@@ -64,7 +64,6 @@ class PANNFinetunedWrapper:
                 checkpoint_path=checkpoint_path,
                 config=ModelConfig() if config is None else None,
                 training_config=config,
-                fine_tune=False,
                 device=device,
             )
             self._use_pretrained_fallback = False
