@@ -14,25 +14,45 @@ class ASTFinetunedWrapper:
     
     def __init__(
         self,
-        checkpoint_path: str,
+        checkpoint_path: Optional[str] = None,
         config=None,  # TrainingConfig
         device: str = "cuda",
         threshold: float = 0.5,
     ):
-        """Initialize the fine-tuned AST classifier."""
-        from validation_functions.classification_models.plane_classifier_ast.model_loader import load_trained_model
+        """Initialize the AST classifier.
+
+        Args:
+            checkpoint_path: Path to a fine-tuned model checkpoint (.pth file).
+                             If None, loads the pretrained AST backbone only
+                             (no task-specific finetuning).
+            config: TrainingConfig (uses defaults if None)
+            device: Device for inference ("cuda", "cuda:0", "cpu")
+            threshold: Classification threshold (default: 0.5)
+        """
+        from validation_functions.classification_models.plane_classifier_ast.model_loader import (
+            load_trained_model,
+            create_plane_classifier,
+        )
         from validation_functions.classification_models.plane_classifier_ast.config import ModelConfig
         
         self.checkpoint_path = checkpoint_path
         self.device = device
         self.threshold = threshold
         
-        self.model = load_trained_model(
-            checkpoint_path=checkpoint_path,
-            config=ModelConfig() if config is None else None,
-            training_config=config,
-            device=device,
-        )
+        if checkpoint_path is not None:
+            self.model = load_trained_model(
+                checkpoint_path=checkpoint_path,
+                config=ModelConfig() if config is None else None,
+                training_config=config,
+                device=device,
+            )
+        else:
+            self.model = create_plane_classifier(
+                config=ModelConfig() if config is None else None,
+                training_config=config,
+                fine_tune=False,
+                device=device,
+            )
         self.model.eval()
         
         from transformers import ASTFeatureExtractor
@@ -45,7 +65,10 @@ class ASTFinetunedWrapper:
         self._segment_length = 10.0
         self._segment_samples = int(self._sample_rate * self._segment_length)
         
-        print(f"Loaded fine-tuned AST classifier from {checkpoint_path}")
+        if checkpoint_path is not None:
+            print(f"Loaded fine-tuned AST classifier from {checkpoint_path}")
+        else:
+            print("Loaded pretrained AST classifier (no finetuning)")
         print(f"  Sample rate: {self._sample_rate} Hz")
         print(f"  Segment length: {self._segment_length} s ({self._segment_samples} samples)")
         print(f"  Threshold: {threshold}")

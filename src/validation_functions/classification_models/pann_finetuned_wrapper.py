@@ -30,21 +30,26 @@ class PANNFinetunedWrapper:
     
     def __init__(
         self,
-        checkpoint_path: str,
+        checkpoint_path: Optional[str] = None,
         config=None,  # TrainingConfig, but avoid import
         device: str = "cuda",
         threshold: float = 0.5,
     ):
-        """Initialize the fine-tuned PANN classifier.
+        """Initialize the PANN classifier.
         
         Args:
-            checkpoint_path: Path to the fine-tuned model checkpoint (.pth file)
+            checkpoint_path: Path to a fine-tuned model checkpoint (.pth file).
+                             If None, loads the pretrained CNN14 backbone only
+                             (no task-specific finetuning).
             config: TrainingConfig (uses defaults if None)
             device: Device for inference ("cuda", "cuda:0", "cpu")
             threshold: Classification threshold (default: 0.5)
         """
         # Import here to avoid circular dependencies
-        from validation_functions.classification_models.plane_classifier_pann.model_loader import load_trained_model
+        from validation_functions.classification_models.plane_classifier_pann.model_loader import (
+            load_trained_model,
+            create_plane_classifier,
+        )
         from validation_functions.classification_models.plane_classifier_pann.config import ModelConfig
         
         self.checkpoint_path = checkpoint_path
@@ -52,12 +57,20 @@ class PANNFinetunedWrapper:
         self.threshold = threshold
         
         # Load the model
-        self.model = load_trained_model(
-            checkpoint_path=checkpoint_path,
-            config=ModelConfig() if config is None else None,
-            training_config=config,
-            device=device,
-        )
+        if checkpoint_path is not None:
+            self.model = load_trained_model(
+                checkpoint_path=checkpoint_path,
+                config=ModelConfig() if config is None else None,
+                training_config=config,
+                device=device,
+            )
+        else:
+            self.model = create_plane_classifier(
+                config=ModelConfig() if config is None else None,
+                training_config=config,
+                fine_tune=False,
+                device=device,
+            )
         self.model.eval()
         
         # PANN works at 32kHz with 10-second segments
@@ -65,7 +78,10 @@ class PANNFinetunedWrapper:
         self._segment_length = 10.0
         self._segment_samples = int(self._sample_rate * self._segment_length)
         
-        print(f"Loaded fine-tuned PANN classifier from {checkpoint_path}")
+        if checkpoint_path is not None:
+            print(f"Loaded fine-tuned PANN classifier from {checkpoint_path}")
+        else:
+            print("Loaded pretrained PANN CNN14 classifier (no finetuning)")
         print(f"  Sample rate: {self._sample_rate} Hz")
         print(f"  Segment length: {self._segment_length} s ({self._segment_samples} samples)")
         print(f"  Threshold: {threshold}")

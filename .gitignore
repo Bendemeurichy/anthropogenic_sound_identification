@@ -231,4 +231,5 @@ validation_examples*
 */pann/
 *meeting_*/
 *final_results/
+*final_results.7z
 !src/validation_functions/classification_models/plane_classifier_ast/

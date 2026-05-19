@@ -265,7 +265,7 @@ class ClassificationMetrics:
     contaminated_backgrounds_removed: int = 0
     final_background_count: int = 0
     final_coi_count: int = 0
-    
+
     # Class balancing statistics
     classes_balanced: bool = False
     original_coi_count: int = 0
@@ -445,9 +445,21 @@ MCC: {self.matthews_corrcoef:.4f}"""
             si_sdr_str = (
                 f"{self.mean_si_sdr:+.2f} dB" if self.mean_si_sdr is not None else "n/a"
             )
-            si_snri_str = f"{self.mean_si_snri:+.2f} dB" if self.mean_si_snri is not None else "n/a"
-            rms_err_str = f"{self.mean_rms_error_db:+.2f} dB" if self.mean_rms_error_db is not None else "n/a"
-            sel_err_str = f"{self.mean_sel_error_db:+.2f} dB" if self.mean_sel_error_db is not None else "n/a"
+            si_snri_str = (
+                f"{self.mean_si_snri:+.2f} dB"
+                if self.mean_si_snri is not None
+                else "n/a"
+            )
+            rms_err_str = (
+                f"{self.mean_rms_error_db:+.2f} dB"
+                if self.mean_rms_error_db is not None
+                else "n/a"
+            )
+            sel_err_str = (
+                f"{self.mean_sel_error_db:+.2f} dB"
+                if self.mean_sel_error_db is not None
+                else "n/a"
+            )
             s += f"""
 
 Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
@@ -581,7 +593,11 @@ Signal-Level Metrics (COI samples, n={len(self.si_snr_scores)}):
                 "final_coi_count": int(self.final_coi_count),
             }
         # Add class balancing stats if balancing was applied
-        if self.classes_balanced or self.original_coi_count > 0 or self.original_background_count > 0:
+        if (
+            self.classes_balanced
+            or self.original_coi_count > 0
+            or self.original_background_count > 0
+        ):
             d["class_balancing"] = {
                 "balanced": bool(self.classes_balanced),
                 "original_coi_count": int(self.original_coi_count),
@@ -609,7 +625,9 @@ class ValidationPipeline:
     )
     DATA_CSV = PROJECT_ROOT / "src/models/sudormrf/checkpoints/separation_dataset.csv"
 
-    def __init__(self, base_path: str = None, coi_synonyms: set = None, device: str = None):
+    def __init__(
+        self, base_path: str = None, coi_synonyms: set = None, device: str = None
+    ):
         """
         Args:
             base_path: Base path for audio files (to convert Windows paths in CSV)
@@ -629,7 +647,7 @@ class ValidationPipeline:
             self.classifier_sample_rate * self.segment_length
         )
         self.segment_samples = int(self.sample_rate * self.segment_length)
-        
+
         # Device selection: use provided device or auto-select
         if device is not None:
             self.device = device
@@ -730,7 +748,7 @@ class ValidationPipeline:
                 tuss_coi_prompt = "bird"
             else:
                 tuss_coi_prompt = "airplane"
-        
+
         if clapsep_text_pos is None:
             if classifier_type in ["bird_mae", "audioprotopnet"]:
                 clapsep_text_pos = "bird"
@@ -739,19 +757,23 @@ class ValidationPipeline:
 
         if use_tuss:
             print(f"Loading TUSS model from {sep_path}")
-            
+
             # Determine COI prompts
-            coi_prompts = tuss_coi_prompts if tuss_coi_prompts is not None else tuss_coi_prompt
-            
+            coi_prompts = (
+                tuss_coi_prompts if tuss_coi_prompts is not None else tuss_coi_prompt
+            )
+
             print(
                 f"  COI prompt(s): {coi_prompts}, Background prompt: '{tuss_bg_prompt}'"
             )
             if tuss_coi_prompt in ["bird", "airplane"]:
                 print(f"  (auto-detected from classifier_type='{classifier_type}')")
-            
+
             # Determine COI prompts: multi-COI list overrides single prompt
-            coi_prompts = tuss_coi_prompts if tuss_coi_prompts is not None else tuss_coi_prompt
-            
+            coi_prompts = (
+                tuss_coi_prompts if tuss_coi_prompts is not None else tuss_coi_prompt
+            )
+
             # Load base TUSS model
             tuss_model = TUSSInference.from_checkpoint(
                 sep_path,
@@ -780,7 +802,7 @@ class ValidationPipeline:
             else:
                 self.separator = tuss_model
                 self._tuss_model = None
-            
+
             # Propagate sample_rate and segment_samples from TUSS model
             self.sample_rate = tuss_model.sample_rate
             self.segment_samples = tuss_model.segment_samples
@@ -857,7 +879,7 @@ class ValidationPipeline:
         sep_for_config = self.separator
         if isinstance(self.separator, SeparationPipeline):
             sep_for_config = self.separator.tuss
-        
+
         if hasattr(sep_for_config, "config") and sep_for_config.config:
             # Try multiple paths depending on model type
             tc = None
@@ -914,26 +936,28 @@ class ValidationPipeline:
                 device=self.device,
             )
         elif classifier_type == "ast_finetuned":
-            cls_path = cls_weights or (
+            cls_path = (
                 PROJECT_ROOT
                 / "src/validation_functions/classification_models/plane_classifier_ast/checkpoints/final_model.pth"
             )
+
             print(f"  from {cls_path}")
             self.classifier = create_classifier(
                 "ast_finetuned",
-                checkpoint_path=str(cls_path),
+                checkpoint_path=None,
                 device=self.device,
             )
             self.classifier_sample_rate = self.classifier.sample_rate
         elif classifier_type == "pann_finetuned":
-            cls_path = cls_weights or (
+            cls_path = (
                 PROJECT_ROOT
                 / "src/validation_functions/classification_models/plane_classifier_pann/checkpoints/final_model.pth"
             )
+
             print(f"  from {cls_path}")
             self.classifier = create_classifier(
                 "pann_finetuned",
-                checkpoint_path=str(cls_path),
+                checkpoint_path=None,
                 device=self.device,
             )
             # Update classifier_sample_rate to match PANN's requirement (32kHz)
@@ -990,22 +1014,21 @@ class ValidationPipeline:
                     elif isinstance(item, str):
                         flattened.append(item)
                 return flattened
-            
+
             flat_target_classes = flatten_target_classes(self.target_classes)
-            
+
             # Check if separator was trained for the classifier's COI type
             separator_has_airplane = any(
-                tc.lower() in ['airplane', 'aeroplane', 'aircraft', 'plane'] 
+                tc.lower() in ["airplane", "aeroplane", "aircraft", "plane"]
                 for tc in flat_target_classes
             )
             separator_has_bird = any(
-                tc.lower() in ['bird', 'avian'] 
-                for tc in flat_target_classes
+                tc.lower() in ["bird", "avian"] for tc in flat_target_classes
             )
-            
+
             # Determine classifier's COI type
-            classifier_is_airplane = (self.coi_synonyms == AIRPLANE_SYNONYMS)
-            
+            classifier_is_airplane = self.coi_synonyms == AIRPLANE_SYNONYMS
+
             # Warn if classifier needs a COI type that separator wasn't trained for
             if classifier_is_airplane and not separator_has_airplane:
                 print(f"\n{'!' * 60}")
@@ -1014,7 +1037,9 @@ class ValidationPipeline:
                 print(f"  Classifier is configured for: AIRPLANE")
                 print(f"  But separator target_classes: {self.target_classes}")
                 print(f"  does NOT include airplane-related classes.")
-                print(f"\n  The separator may not effectively separate airplane sounds.")
+                print(
+                    f"\n  The separator may not effectively separate airplane sounds."
+                )
                 print(f"{'!' * 60}\n")
             elif not classifier_is_airplane and not separator_has_bird:
                 print(f"\n{'!' * 60}")
@@ -1269,19 +1294,32 @@ class ValidationPipeline:
         if hasattr(self.separator, "separate_batch"):
             return self.separator.separate_batch(waveforms)
         elif isinstance(self.separator, SeparationPipeline):
-            return torch.stack([self.separator.separate_waveform(w, return_dict=False) for w in waveforms])
+            return torch.stack(
+                [
+                    self.separator.separate_waveform(w, return_dict=False)
+                    for w in waveforms
+                ]
+            )
         else:
             return torch.stack([self.separator.separate_waveform(w) for w in waveforms])
 
-    def _get_classifier_params(self, classify_fn: Callable) -> Tuple[int, int, Optional[Callable]]:
+    def _get_classifier_params(
+        self, classify_fn: Callable
+    ) -> Tuple[int, int, Optional[Callable]]:
         """Return (target_sample_rate, segment_samples, batch_classify_fn) for a classify_fn.
 
         segment_samples is at target_sample_rate.
         batch_classify_fn is None if no batch path exists.
         """
         if classify_fn == self._classify:
-            batch_fn = self._classify_batch if hasattr(self.classifier, "predict_batch") else None
-            seg = getattr(self.classifier, "segment_samples", self.classifier_segment_samples)
+            batch_fn = (
+                self._classify_batch
+                if hasattr(self.classifier, "predict_batch")
+                else None
+            )
+            seg = getattr(
+                self.classifier, "segment_samples", self.classifier_segment_samples
+            )
             return self.classifier_sample_rate, seg, batch_fn
         elif classify_fn == self._classify_ast_finetuned:
             m = self.ast_finetuned_model
@@ -1297,7 +1335,9 @@ class ValidationPipeline:
         # Unknown classify_fn — fall back to single-sample calls
         return self.classifier_sample_rate, self.classifier_segment_samples, None
 
-    def _classify_recording(self, waveform: torch.Tensor, classify_fn: Callable) -> Tuple[int, float]:
+    def _classify_recording(
+        self, waveform: torch.Tensor, classify_fn: Callable
+    ) -> Tuple[int, float]:
         """Classify a full recording waveform (at self.sample_rate) using classify_fn.
 
         Correct flow regardless of separator window size:
@@ -1318,7 +1358,9 @@ class ValidationPipeline:
         if self.sample_rate != target_sr:
             key = (self.sample_rate, target_sr)
             if key not in self._resamplers:
-                self._resamplers[key] = create_high_quality_resampler(self.sample_rate, target_sr)
+                self._resamplers[key] = create_high_quality_resampler(
+                    self.sample_rate, target_sr
+                )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
 
         # Split into classifier-native chunks
@@ -1332,7 +1374,9 @@ class ValidationPipeline:
                 start = c * cls_seg
                 chunk = wav[start : start + cls_seg]
                 if chunk.shape[0] < cls_seg:
-                    chunk = torch.nn.functional.pad(chunk, (0, cls_seg - chunk.shape[0]))
+                    chunk = torch.nn.functional.pad(
+                        chunk, (0, cls_seg - chunk.shape[0])
+                    )
                 chunks.append(chunk)
 
         chunks_tensor = torch.stack(chunks)  # (N, cls_seg)
@@ -1344,7 +1388,9 @@ class ValidationPipeline:
             # Primary classifier: _classify_batch expects self.sample_rate input,
             # but we already resampled — call classifier.predict_batch directly.
             if hasattr(self.classifier, "predict_batch"):
-                preds_t, confs_t = self.classifier.predict_batch(chunks_tensor.to(self.device))
+                preds_t, confs_t = self.classifier.predict_batch(
+                    chunks_tensor.to(self.device)
+                )
                 preds = [int(p.item()) for p in preds_t]
                 confs = [float(c.item()) for c in confs_t]
             else:
@@ -1407,15 +1453,15 @@ class ValidationPipeline:
 
     def _classify_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
         """Run batch classification for better performance.
-        
+
         Args:
             waveforms: Batch of waveforms (B, T) at self.sample_rate
-            
+
         Returns:
             Tuple of (predictions, confidences) as lists
         """
         wavs = waveforms.detach().cpu()
-        
+
         # Resample if needed
         if self.classifier_sample_rate != self.sample_rate:
             key = (self.sample_rate, self.classifier_sample_rate)
@@ -1424,7 +1470,7 @@ class ValidationPipeline:
                     self.sample_rate, self.classifier_sample_rate
                 )
             wavs = self._resamplers[key](wavs)
-        
+
         # Pad/truncate all waveforms to target length
         batch_size, current_len = wavs.shape
         if current_len < self.classifier_segment_samples:
@@ -1432,12 +1478,14 @@ class ValidationPipeline:
                 wavs, (0, self.classifier_segment_samples - current_len)
             )
         else:
-            wavs = wavs[:, :self.classifier_segment_samples]
-        
+            wavs = wavs[:, : self.classifier_segment_samples]
+
         # Use batch prediction if available, otherwise fall back to loop
-        if hasattr(self.classifier, 'predict_batch'):
+        if hasattr(self.classifier, "predict_batch"):
             preds_tensor, confs_tensor = self.classifier.predict_batch(wavs)
-            return [int(p.item()) for p in preds_tensor], [float(c.item()) for c in confs_tensor]
+            return [int(p.item()) for p in preds_tensor], [
+                float(c.item()) for c in confs_tensor
+            ]
         else:
             # Fallback to single predictions
             preds, confs = [], []
@@ -1500,12 +1548,14 @@ class ValidationPipeline:
         This matches the source/noise preprocessing used by
         ``_create_mixture_rms`` so callers can generate consistent clean
         references and saved examples.
-        
+
         Uses unit RMS (1.0) to match TUSS training normalization.
         For SudoRM-RF, the inference code applies its own z-score normalization.
         """
         eps = 1e-8
-        target_rms = 1.0  # Unit RMS to match TUSS training (was 0.1, which was 100x too quiet)
+        target_rms = (
+            1.0  # Unit RMS to match TUSS training (was 0.1, which was 100x too quiet)
+        )
 
         signal_rms = torch.sqrt(torch.mean(waveform**2)) + eps
         return waveform * (target_rms / signal_rms)
@@ -1650,8 +1700,8 @@ class ValidationPipeline:
                 continue
             # Equal-power Hann cross-fade.
             ramp = torch.hann_window(2 * f, periodic=False)
-            fade_out = ramp[f:]            # 1 → 0
-            fade_in = ramp[:f]             # 0 → 1
+            fade_out = ramp[f:]  # 1 → 0
+            fade_in = ramp[:f]  # 0 → 1
             tail = out[-f:] * fade_out + nxt[:f] * fade_in
             out = torch.cat([out[:-f], tail, nxt[f:]], dim=0)
         return out
@@ -1662,7 +1712,7 @@ class ValidationPipeline:
         # Unwrap SeparationPipeline if needed
         if isinstance(sep, SeparationPipeline):
             sep = sep.tuss
-        
+
         if isinstance(sep, TUSSInference):
             return sep.target_coi_index
         if isinstance(sep, CLAPSepInference):
@@ -1681,7 +1731,9 @@ class ValidationPipeline:
         if self.sample_rate != ast_sr:
             key = (self.sample_rate, ast_sr)
             if key not in self._resamplers:
-                self._resamplers[key] = create_high_quality_resampler(self.sample_rate, ast_sr)
+                self._resamplers[key] = create_high_quality_resampler(
+                    self.sample_rate, ast_sr
+                )
             wav = self._resamplers[key](wav.unsqueeze(0)).squeeze(0)
         return self.ast_finetuned_model(wav)
 
@@ -1743,7 +1795,9 @@ class ValidationPipeline:
         # Call the wrapper using unified interface
         return self.audioprotopnet_model(wav)
 
-    def _classify_batch_generic(self, waveforms: torch.Tensor, model: AudioClassifier, target_sample_rate: int) -> Tuple[List[int], List[float]]:
+    def _classify_batch_generic(
+        self, waveforms: torch.Tensor, model: AudioClassifier, target_sample_rate: int
+    ) -> Tuple[List[int], List[float]]:
         """Generic batch classification for any AudioClassifier that implements predict_batch.
 
         Resamples waveforms to target_sample_rate and calls model.predict_batch.
@@ -1768,33 +1822,57 @@ class ValidationPipeline:
             wavs = self._resamplers[key](wavs)
 
         preds_tensor, confs_tensor = model.predict_batch(wavs)
-        return [int(p.item()) for p in preds_tensor], [float(c.item()) for c in confs_tensor]
+        return [int(p.item()) for p in preds_tensor], [
+            float(c.item()) for c in confs_tensor
+        ]
 
-    def _classify_bird_mae_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
+    def _classify_bird_mae_batch(
+        self, waveforms: torch.Tensor
+    ) -> Tuple[List[int], List[float]]:
         """Batch classification using Bird-MAE model."""
         if self.bird_mae_model is None:
-            raise RuntimeError("Bird-MAE model is not loaded. Call load_models(use_bird_mae=True).")
-        return self._classify_batch_generic(waveforms, self.bird_mae_model, self.bird_mae_model.sample_rate)
+            raise RuntimeError(
+                "Bird-MAE model is not loaded. Call load_models(use_bird_mae=True)."
+            )
+        return self._classify_batch_generic(
+            waveforms, self.bird_mae_model, self.bird_mae_model.sample_rate
+        )
 
-    def _classify_audioprotopnet_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
+    def _classify_audioprotopnet_batch(
+        self, waveforms: torch.Tensor
+    ) -> Tuple[List[int], List[float]]:
         """Batch classification using AudioProtoPNet model."""
         if self.audioprotopnet_model is None:
-            raise RuntimeError("AudioProtoPNet model is not loaded. Call load_models(use_audioprotopnet=True).")
-        return self._classify_batch_generic(waveforms, self.audioprotopnet_model, self.audioprotopnet_model.sample_rate)
+            raise RuntimeError(
+                "AudioProtoPNet model is not loaded. Call load_models(use_audioprotopnet=True)."
+            )
+        return self._classify_batch_generic(
+            waveforms, self.audioprotopnet_model, self.audioprotopnet_model.sample_rate
+        )
 
-    def _classify_ast_finetuned_batch(self, waveforms: torch.Tensor) -> Tuple[List[int], List[float]]:
+    def _classify_ast_finetuned_batch(
+        self, waveforms: torch.Tensor
+    ) -> Tuple[List[int], List[float]]:
         """Batch classification using fine-tuned AST model."""
         if self.ast_finetuned_model is None:
-            raise RuntimeError("Fine-tuned AST model is not loaded. Call load_models(use_ast_finetuned=True).")
-        return self._classify_batch_generic(waveforms, self.ast_finetuned_model, self.ast_finetuned_model.sample_rate)
+            raise RuntimeError(
+                "Fine-tuned AST model is not loaded. Call load_models(use_ast_finetuned=True)."
+            )
+        return self._classify_batch_generic(
+            waveforms, self.ast_finetuned_model, self.ast_finetuned_model.sample_rate
+        )
 
     def _get_batch_classify_fn(self, classify_fn: Callable) -> Optional[Callable]:
         """Get the batch classification function for a given single-sample classify function.
-        
+
         Returns None if no batch function is available.
         """
         if classify_fn == self._classify:
-            return self._classify_batch if hasattr(self.classifier, 'predict_batch') else None
+            return (
+                self._classify_batch
+                if hasattr(self.classifier, "predict_batch")
+                else None
+            )
         elif classify_fn == self._classify_bird_mae:
             return self._classify_bird_mae_batch
         elif classify_fn == self._classify_audioprotopnet:
@@ -1855,7 +1933,14 @@ class ValidationPipeline:
         # to fail with a singular-matrix error inside the SDR metric.
         _EPS = 1e-8
         if est.abs().max() < _EPS or ref.abs().max() < _EPS:
-            return float("nan"), float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+            return (
+                float("nan"),
+                float("nan"),
+                float("nan"),
+                float("nan"),
+                float("nan"),
+                float("nan"),
+            )
 
         si_snr = self._si_snr(est.unsqueeze(0), ref.unsqueeze(0)).item()
         try:
@@ -1874,15 +1959,15 @@ class ValidationPipeline:
 
         # RMS error: 20*log10(rms_est / rms_ref)  — indicates energy gain/loss
         rms_error_db = float("nan")
-        rms_ref = torch.sqrt(torch.mean(ref ** 2))
-        rms_est = torch.sqrt(torch.mean(est ** 2))
+        rms_ref = torch.sqrt(torch.mean(ref**2))
+        rms_est = torch.sqrt(torch.mean(est**2))
         if rms_ref > _EPS and rms_est > _EPS:
             rms_error_db = float(20.0 * torch.log10(rms_est / rms_ref).item())
 
         # SEL error: 10*log10(sum(est^2) / sum(ref^2)) — total energy error
         sel_error_db = float("nan")
-        sel_ref = torch.sum(ref ** 2)
-        sel_est = torch.sum(est ** 2)
+        sel_ref = torch.sum(ref**2)
+        sel_est = torch.sum(est**2)
         if sel_ref > _EPS and sel_est > _EPS:
             sel_error_db = float(10.0 * torch.log10(sel_est / sel_ref).item())
 
@@ -1929,7 +2014,9 @@ class ValidationPipeline:
             save_dir.mkdir(parents=True, exist_ok=True)
             n = min(save_n_examples, len(df_coi))
             sample_choices = list(
-                np.random.default_rng(seed).choice(len(df_coi), size=n, replace=False).tolist()
+                np.random.default_rng(seed)
+                .choice(len(df_coi), size=n, replace=False)
+                .tolist()
             )
 
         # Process COI samples (label=1)
@@ -1983,7 +2070,9 @@ class ValidationPipeline:
 
                     for i in range(0, len(segments_tensor), batch_size):
                         batch_seg = segments_tensor[i : i + batch_size]
-                        separated_batch = self._separate_batch(batch_seg)  # (B, n_sources, T) or (B, T)
+                        separated_batch = self._separate_batch(
+                            batch_seg
+                        )  # (B, n_sources, T) or (B, T)
 
                         if separated_batch.dim() == 2:
                             coi_est = separated_batch
@@ -1994,8 +2083,8 @@ class ValidationPipeline:
 
                         # Signal metrics stay per separator segment
                         for b_idx, s_est in enumerate(coi_est):
-                            snr, sdr_val, si_sdr_val, snri, rms_err, sel_err = self._compute_signal_metrics(
-                                batch_seg[b_idx], s_est
+                            snr, sdr_val, si_sdr_val, snri, rms_err, sel_err = (
+                                self._compute_signal_metrics(batch_seg[b_idx], s_est)
                             )
                             seg_si_snr.append(snr)
                             seg_sdr.append(sdr_val)
@@ -2164,7 +2253,9 @@ class ValidationPipeline:
             save_dir.mkdir(parents=True, exist_ok=True)
             n = min(save_n_examples, len(df_coi))
             sample_choices = list(
-                np.random.default_rng(seed).choice(len(df_coi), size=n, replace=False).tolist()
+                np.random.default_rng(seed)
+                .choice(len(df_coi), size=n, replace=False)
+                .tolist()
             )
 
         # Process COI + background mixtures (label=1)
@@ -2190,7 +2281,11 @@ class ValidationPipeline:
                         bg_rec.get("start_time"),
                         bg_rec.get("end_time"),
                     )
-                    if _bg_candidate.numel() > 0 and torch.mean(_bg_candidate**2).item() > _bg_zero_power_threshold:
+                    if (
+                        _bg_candidate.numel() > 0
+                        and torch.mean(_bg_candidate**2).item()
+                        > _bg_zero_power_threshold
+                    ):
                         bg_full = _bg_candidate
                         break
                     print(
@@ -2232,7 +2327,10 @@ class ValidationPipeline:
                             )
                             _alt_segs = self._split_into_segments(_alt_full)
                             _alt_seg = _alt_segs[0] if _alt_segs else bg_seg
-                            if torch.mean(_alt_seg**2).item() > _bg_zero_power_threshold:
+                            if (
+                                torch.mean(_alt_seg**2).item()
+                                > _bg_zero_power_threshold
+                            ):
                                 bg_seg = _alt_seg
                                 _replaced = True
                                 break
@@ -2306,7 +2404,9 @@ class ValidationPipeline:
                 # When use_separation is True we also accumulate the FULL separator
                 # output (all sources) across every segment, so the saved example
                 # file covers the entire recording rather than just the first batch.
-                separated_chunks_full: List[torch.Tensor] = []  # each: (B, n_sources, T) or (B, T)
+                separated_chunks_full: List[torch.Tensor] = (
+                    []
+                )  # each: (B, n_sources, T) or (B, T)
 
                 for i in range(0, len(mixtures_tensor), batch_size):
                     batch_mix = mixtures_tensor[i : i + batch_size]
@@ -2314,13 +2414,17 @@ class ValidationPipeline:
 
                     if use_separation:
                         # Batched separation
-                        separated_batch = self._separate_batch(batch_mix)  # (B, n_sources, T) or (B, T)
+                        separated_batch = self._separate_batch(
+                            batch_mix
+                        )  # (B, n_sources, T) or (B, T)
 
                         # Get COI sources
                         if separated_batch.dim() == 2:
                             coi_est_batch = separated_batch
                         else:
-                            coi_est_batch = separated_batch[:, self._get_coi_head_index()]
+                            coi_est_batch = separated_batch[
+                                :, self._get_coi_head_index()
+                            ]
 
                         coi_chunks_mix.append(coi_est_batch.cpu())
                         # Keep the full separator output for end-of-recording saving.
@@ -2329,9 +2433,12 @@ class ValidationPipeline:
 
                         # Compute signal metrics for each item in batch
                         for b_idx, s_est in enumerate(coi_est_batch):
-                            snr, sdr_val, si_sdr_val, snri, rms_err, sel_err = self._compute_signal_metrics(
-                                batch_coi_n[b_idx], s_est,
-                                mixture=batch_mix[b_idx],
+                            snr, sdr_val, si_sdr_val, snri, rms_err, sel_err = (
+                                self._compute_signal_metrics(
+                                    batch_coi_n[b_idx],
+                                    s_est,
+                                    mixture=batch_mix[b_idx],
+                                )
                             )
                             seg_si_snr.append(snr)
                             seg_sdr.append(sdr_val)
@@ -2670,7 +2777,7 @@ class ValidationPipeline:
                 else:
                     # Unknown COI type, fall back to orig_label
                     target_coi_class = None
-                
+
                 if target_coi_class is not None:
                     # coi_class == -1 is a sentinel for independent test set rows
                     # (e.g. Risoux) that were appended to the training CSV without
@@ -2685,13 +2792,17 @@ class ValidationPipeline:
                     # COI positives via substring matching.  risoux_test rows appended
                     # without a coi_class index are the only ones that need this path.
                     if "dataset" in df_split.columns:
-                        unknown_mask = ~known_mask & (df_split["dataset"] == "risoux_test")
+                        unknown_mask = ~known_mask & (
+                            df_split["dataset"] == "risoux_test"
+                        )
                     else:
                         unknown_mask = ~known_mask
                     if unknown_mask.any():
                         if "orig_label" in df_split.columns:
                             fallback = df_split.loc[unknown_mask, "orig_label"].apply(
-                                lambda x: 1 if _is_coi_label(x, self.coi_synonyms) else 0
+                                lambda x: (
+                                    1 if _is_coi_label(x, self.coi_synonyms) else 0
+                                )
                             )
                             new_labels = new_labels.copy()
                             new_labels.loc[unknown_mask] = fallback
@@ -2763,15 +2874,15 @@ class ValidationPipeline:
         # ------------------------------------------------------------------
         n_coi_before_balance = len(df_coi)
         n_bg_before_balance = len(df_bg)
-        
+
         if balance_classes:
             n_coi = len(df_coi)
             n_bg = len(df_bg)
-            
+
             # Calculate imbalance ratio
             if n_coi > 0 and n_bg > 0:
                 ratio = max(n_coi, n_bg) / min(n_coi, n_bg)
-                
+
                 # Always balance when counts differ to ensure equal positive/negative
                 # samples in the confusion matrix.
                 if n_bg != n_coi:
@@ -2780,26 +2891,50 @@ class ValidationPipeline:
                         print(f"\n{'=' * 60}")
                         print(f"CLASS BALANCING")
                         print(f"{'=' * 60}")
-                        print(f"  Before: {n_coi} COI, {n_bg} background (ratio 1:{ratio:.1f})")
-                        df_bg = df_bg.sample(n=n_coi, random_state=seed).reset_index(drop=True)
-                        print(f"  After:  {len(df_coi)} COI, {len(df_bg)} background (ratio 1:1)")
-                        print(f"  ✓ Downsampled background from {n_bg} to {len(df_bg)} samples")
+                        print(
+                            f"  Before: {n_coi} COI, {n_bg} background (ratio 1:{ratio:.1f})"
+                        )
+                        df_bg = df_bg.sample(n=n_coi, random_state=seed).reset_index(
+                            drop=True
+                        )
+                        print(
+                            f"  After:  {len(df_coi)} COI, {len(df_bg)} background (ratio 1:1)"
+                        )
+                        print(
+                            f"  ✓ Downsampled background from {n_bg} to {len(df_bg)} samples"
+                        )
                         print(f"{'=' * 60}\n")
                     elif n_coi > n_bg:
                         print(f"\n{'=' * 60}")
                         print(f"CLASS BALANCING")
                         print(f"{'=' * 60}")
-                        print(f"  Before: {n_coi} COI, {n_bg} background (ratio {ratio:.1f}:1)")
-                        df_coi = df_coi.sample(n=n_bg, random_state=seed).reset_index(drop=True)
-                        print(f"  After:  {len(df_coi)} COI, {len(df_bg)} background (ratio 1:1)")
-                        print(f"  ✓ Downsampled COI from {n_coi} to {len(df_coi)} samples")
+                        print(
+                            f"  Before: {n_coi} COI, {n_bg} background (ratio {ratio:.1f}:1)"
+                        )
+                        df_coi = df_coi.sample(n=n_bg, random_state=seed).reset_index(
+                            drop=True
+                        )
+                        print(
+                            f"  After:  {len(df_coi)} COI, {len(df_bg)} background (ratio 1:1)"
+                        )
+                        print(
+                            f"  ✓ Downsampled COI from {n_coi} to {len(df_coi)} samples"
+                        )
                         print(f"{'=' * 60}\n")
                 else:
-                    print(f"[Info] Classes are already balanced ({n_coi} COI, {n_bg} background)")
+                    print(
+                        f"[Info] Classes are already balanced ({n_coi} COI, {n_bg} background)"
+                    )
             elif n_coi == 0:
-                print("[Warning] No COI samples available for evaluation!", file=sys.stderr)
+                print(
+                    "[Warning] No COI samples available for evaluation!",
+                    file=sys.stderr,
+                )
             elif n_bg == 0:
-                print("[Warning] No background samples available for evaluation!", file=sys.stderr)
+                print(
+                    "[Warning] No background samples available for evaluation!",
+                    file=sys.stderr,
+                )
         else:
             # If balancing is disabled, warn about severe imbalance
             if len(df_coi) > 0 and len(df_bg) > 0:
@@ -2808,8 +2943,12 @@ class ValidationPipeline:
                     print(f"\n{'!' * 60}")
                     print(f"⚠️  WARNING: SEVERE CLASS IMBALANCE")
                     print(f"{'!' * 60}")
-                    print(f"  COI: {len(df_coi)}, Background: {len(df_bg)} (ratio 1:{ratio:.1f})")
-                    print(f"  Consider setting balance_classes=True for fair evaluation")
+                    print(
+                        f"  COI: {len(df_coi)}, Background: {len(df_bg)} (ratio 1:{ratio:.1f})"
+                    )
+                    print(
+                        f"  Consider setting balance_classes=True for fair evaluation"
+                    )
                     print(f"  and confusion matrix visualization.")
                     print(f"{'!' * 60}\n")
 
@@ -3034,7 +3173,8 @@ class ValidationPipeline:
             for metrics_obj in results.values():
                 metrics_obj.contaminated_backgrounds_removed = n_contaminated
                 metrics_obj.classes_balanced = balance_classes and (
-                    n_coi_before_balance != len(df_coi) or n_bg_before_balance != len(df_bg)
+                    n_coi_before_balance != len(df_coi)
+                    or n_bg_before_balance != len(df_bg)
                 )
                 metrics_obj.original_coi_count = n_coi_before_balance
                 metrics_obj.original_background_count = n_bg_before_balance
@@ -3056,10 +3196,14 @@ class ValidationPipeline:
                 # Record the AST checkpoint path for auditability.
                 if cls_name == "ast_finetuned":
                     # AST was the primary classifier — path is in cls_checkpoint_path
-                    results_dict["checkpoint_paths"]["ast_classifier"] = str(self.cls_checkpoint_path)
+                    results_dict["checkpoint_paths"]["ast_classifier"] = str(
+                        self.cls_checkpoint_path
+                    )
                 elif self.ast_checkpoint_path is not None:
                     # AST was the auxiliary classifier
-                    results_dict["checkpoint_paths"]["ast_classifier"] = str(self.ast_checkpoint_path)
+                    results_dict["checkpoint_paths"]["ast_classifier"] = str(
+                        self.ast_checkpoint_path
+                    )
                 # Include positive-label config for AudioSet classifiers.
                 if cls_name == "ast_finetuned":
                     results_dict["positive_class"] = CNN_POSITIVE_CLASS
