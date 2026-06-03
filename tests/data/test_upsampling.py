@@ -1,6 +1,11 @@
 """Test STFT/iSTFT upsampling to verify reconstruction quality."""
+import sys
+from pathlib import Path
 from src.common.paths import get_project_root, setup_python_path
 setup_python_path()
+
+# Also add TUSS base path for STFT/iSTFT utilities
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src" / "models" / "tuss" / "base"))
 
 import torch
 import soundfile as sf

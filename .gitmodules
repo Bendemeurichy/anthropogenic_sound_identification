@@ -7,7 +7,7 @@
 	url = https://github.com/merlresearch/unified-source-separation.git
 
 [submodule "src/models/clapsep/checkpoint/CLAPSep"]
-	path = src/modules/clapsep/checkpoint/CLAPSep
+	path = src/models/clapsep/checkpoint/CLAPSep
 	url = https://huggingface.co/spaces/AisakaMikoto/CLAPSep
 
 [submodule "src/models/clapsep/base"]

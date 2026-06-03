@@ -14,7 +14,7 @@ _SCRIPT_DIR = Path(__file__).parent
 _SRC_DIR = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SRC_DIR))
 
-from activity_filter.mask_recycler import MaskRecycler
+from src.activity_filter.mask_recycler import MaskRecycler
 
 
 def test_mask_recycler():

@@ -257,11 +257,6 @@ class ValidationPipeline:
             if tuss_coi_prompt in ["bird", "airplane"]:
                 print(f"  (auto-detected from classifier_type='{classifier_type}')")
 
-            # Determine COI prompts: multi-COI list overrides single prompt
-            coi_prompts = (
-                tuss_coi_prompts if tuss_coi_prompts is not None else tuss_coi_prompt
-            )
-
             # Load base TUSS model
             tuss_model = TUSSInference.from_checkpoint(
                 sep_path,
@@ -1197,6 +1192,14 @@ class ValidationPipeline:
             out = torch.cat([out[:-f], tail, nxt[f:]], dim=0)
         return out
 
+    def _flatten_and_concat(self, chunks_list: List[torch.Tensor]) -> torch.Tensor:
+        """Flatten a list of batched chunks into per-segment tensors and concat with crossfade."""
+        segments: List[torch.Tensor] = []
+        for chunk in chunks_list:
+            for b in range(chunk.shape[0]):
+                segments.append(chunk[b])
+        return self._concat_with_crossfade(segments)
+
     def _get_coi_head_index(self) -> int:
         """Return the COI head index for the current separator model."""
         sep = self.separator
@@ -1584,15 +1587,7 @@ class ValidationPipeline:
                             seg_rms_error.append(rms_err)
                             seg_sel_error.append(sel_err)
 
-                    # Concatenate all COI estimates into one waveform and classify
-                    # Cross-fade across separator-segment boundaries before
-                    # passing to the classifier (matches the audio that gets
-                    # saved for example WAVs and avoids hard discontinuities).
-                    _seg_list_cls: List[torch.Tensor] = []
-                    for _c in coi_chunks:
-                        for _b in range(_c.shape[0]):
-                            _seg_list_cls.append(_c[_b])
-                    coi_full = self._concat_with_crossfade(_seg_list_cls)
+                    coi_full = self._flatten_and_concat(coi_chunks)
                     pred, conf = self._classify_recording(coi_full, classify_fn)
 
                     si_snr_scores.append(float(np.mean(seg_si_snr)))
@@ -1646,14 +1641,7 @@ class ValidationPipeline:
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
                         coi_chunks.append(coi_est.cpu())
-                    # Cross-fade across separator-segment boundaries before
-                    # passing to the classifier (matches the audio that gets
-                    # saved for example WAVs and avoids hard discontinuities).
-                    _seg_list_cls: List[torch.Tensor] = []
-                    for _c in coi_chunks:
-                        for _b in range(_c.shape[0]):
-                            _seg_list_cls.append(_c[_b])
-                    coi_full = self._concat_with_crossfade(_seg_list_cls)
+                    coi_full = self._flatten_and_concat(coi_chunks)
                     pred, conf = self._classify_recording(coi_full, classify_fn)
                 else:
                     pred, conf = self._classify_recording(waveform_full, classify_fn)
@@ -2014,12 +2002,7 @@ class ValidationPipeline:
                 # sees the same audio that gets saved to disk for the example WAV
                 # (no hard discontinuities every separator segment_samples).
                 if use_separation:
-                    seg_list_cls: List[torch.Tensor] = []
-                    for c in coi_chunks_mix:
-                        # c is (B, T) per batch; unroll batch dim to per-segment.
-                        for b in range(c.shape[0]):
-                            seg_list_cls.append(c[b])
-                    coi_full_mix = self._concat_with_crossfade(seg_list_cls)
+                    coi_full_mix = self._flatten_and_concat(coi_chunks_mix)
                     pred, conf = self._classify_recording(coi_full_mix, classify_fn)
                 else:
                     # No separation: classify the full mixture waveform directly.
@@ -2078,14 +2061,7 @@ class ValidationPipeline:
                         else:
                             coi_est = separated_batch[:, self._get_coi_head_index()]
                         coi_chunks.append(coi_est.cpu())
-                    # Cross-fade across separator-segment boundaries before
-                    # passing to the classifier (matches the audio that gets
-                    # saved for example WAVs and avoids hard discontinuities).
-                    _seg_list_cls: List[torch.Tensor] = []
-                    for _c in coi_chunks:
-                        for _b in range(_c.shape[0]):
-                            _seg_list_cls.append(_c[_b])
-                    coi_full = self._concat_with_crossfade(_seg_list_cls)
+                    coi_full = self._flatten_and_concat(coi_chunks)
                     pred, conf = self._classify_recording(coi_full, classify_fn)
                 else:
                     pred, conf = self._classify_recording(waveform_full, classify_fn)
@@ -2915,24 +2891,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # import random
-
-    # example_src = Path("./ho6sg-47RD0.wav")
-    # example_noise = Path("./LEEC02__0__20161128_183900_ma.wav")
-
-    # if not example_src.exists() or not example_noise.exists():
-    #     missing = []
-    #     if not example_src.exists():
-    #         missing.append(str(example_src))
-    #     if not example_noise.exists():
-    #         missing.append(str(example_noise))
-    #     print("Example WAV files not found; skipping demo. Missing:", *missing)
-    # else:
-    #     demo_two_wav_separation(
-    #         src_path=str(example_src),
-    #         noise_path=str(example_noise),
-    #         snr_db=random.uniform(-5, 5),
-    #         sep_checkpoint=PROJECT_ROOT
-    #         / "src/models/sudormrf/checkpoints/20251226_170458/best_model.pt",
-    #         out_dir="./separation_output_demo",
-    #     )

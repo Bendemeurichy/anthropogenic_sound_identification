@@ -160,22 +160,11 @@ def train_epoch(
     for step_idx, sources in enumerate(pbar, start=1):
         sources = sources.to(device, non_blocking=True)
         
-        # Apply GPU augmentations (10-100x faster than CPU)
-        # Only augment COI channels (not background), matching original behavior
+        # Only augment COI channels (not background)
         if use_gpu_augmentations and str(device).startswith("cuda"):
-            # sources shape: (B, n_coi_classes + 1, T)
-            # COI channels: sources[:, :-1]  (all except last)
-            # Background:   sources[:, -1:]  (last channel only)
             coi_sources = sources[:, :-1, :]  # (B, n_coi, T)
             bg_sources = sources[:, -1:, :]   # (B, 1, T)
 
-            # Bug-fix: record which COI channels are silent (absent class) BEFORE
-            # augmentation.  add_noise_batch injects Gaussian noise at amplitude
-            # 0.001–0.01, giving per-sample energy ≈ 1e-6 – right at
-            # SILENCE_ENERGY_EPS.  Without this guard, ~50 % of absent-class
-            # channels cross the threshold and are incorrectly treated as active
-            # sources by snr_with_zeroref_loss and COIWeightedSNRLoss.
-            # Shape: (B, n_coi, 1) – True where the channel was all-zeros.
             silent_coi_mask = (
                 coi_sources.pow(2).mean(dim=-1, keepdim=True) < SILENCE_ENERGY_EPS
             )
@@ -191,8 +180,6 @@ def train_epoch(
             )
 
             # Restore exact zeros for channels that were silent before augmentation
-            # so that downstream silence detection (SILENCE_ENERGY_EPS threshold)
-            # continues to work correctly.
             coi_sources = torch.where(
                 silent_coi_mask.expand_as(coi_sources),
                 torch.zeros_like(coi_sources),
@@ -212,10 +199,7 @@ def train_epoch(
             continue
 
         # Build per-batch prompts list
-        # With variable_prompts: generate new prompt config for each batch
-        # Without variable_prompts: use fixed template (backward compatible)
         if variable_prompts and coi_prompts is not None and bg_prompt is not None:
-            # Generate single prompt configuration for this batch
             # All samples in batch use same prompts (required by TUSS architecture)
             batch_prompt_config = generate_variable_prompts(
                 coi_prompts, bg_prompt, batch_size=1,
@@ -225,12 +209,6 @@ def train_epoch(
             )[0]
             prompts = [batch_prompt_config] * B
             
-            # CRITICAL: Select corresponding ground truth channels to match variable prompts
-            # Dropped COI sources are merged into background so model learns to separate
-            # only what's prompted and put everything else in the residual.
-            # Example:
-            #   clean_wavs from dataset: (B, 3, T) = [airplane, birds, background]
-            #   If prompts = ["birds", "background"], output: (B, 2, T) = [birds, (airplane+background)]
             clean_wavs = select_sources_for_prompts(
                 clean_wavs, coi_prompts, bg_prompt, batch_prompt_config
             )
@@ -269,14 +247,14 @@ def train_epoch(
 
             loss = criterion(outputs.float(), clean_wavs.float())
         
-        # Track per-class active samples for visibility (before deletion)
+        # Track per-class active samples for visibility
         active_class_counts = None
         actual_n_coi = clean_wavs.shape[1] - 1  # Infer from tensor (last channel is background)
         if step_idx % 10 == 0 and actual_n_coi >= 1:
             with torch.no_grad():
                 ref_power = (clean_wavs[:, :actual_n_coi] ** 2).mean(dim=-1)
                 is_active = ref_power > SILENCE_ENERGY_EPS
-                active_class_counts = is_active.sum(dim=0).cpu()  # (actual_n_coi,)
+                active_class_counts = is_active.sum(dim=0).cpu()
 
         del outputs, mixture, clean_wavs
 
@@ -341,7 +319,7 @@ def train_epoch(
         pbar.set_postfix(postfix)
 
         # Reduce cache clearing frequency for better performance
-        # Only clear every 100 steps instead of 20 (cache clearing is slow)
+        # Only clear every 100 steps instead of 20
         if str(device).startswith("cuda") and step_idx % 100 == 0:
             torch.cuda.empty_cache()
 
