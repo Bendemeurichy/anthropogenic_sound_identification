@@ -31,6 +31,23 @@ import soundfile as sf
 import torch
 import torchaudio
 
+# Global matplotlib style for publication-quality spectrograms
+plt.rcParams.update(
+    {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Nimbus Roman", "DejaVu Serif"],
+        "font.size": 14,
+        "axes.titlesize": 17,
+        "axes.labelsize": 15,
+        "xtick.labelsize": 13,
+        "ytick.labelsize": 13,
+        "figure.dpi": 300,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.1,
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -198,7 +215,7 @@ def plot_spectrogram(
     :func:`compute_energy_metrics`) the values are rendered as a small annotation box in
     the upper-right corner of the axes.
     """
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(14, 5))
     # time extent in seconds
     time_sec = spec.shape[1] * HOP_LENGTH / sr
     n_mels = spec.shape[0]
@@ -268,13 +285,14 @@ def plot_spectrogram(
             transform=ax.transAxes,
             ha="right",
             va="top",
-            fontsize=8,
+            fontsize=12,
+            fontfamily="monospace",
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
         )
 
     fig.colorbar(im, ax=ax, label="dB")
     fig.tight_layout()
-    fig.savefig(str(save_path), dpi=150)
+    fig.savefig(str(save_path))
     plt.close(fig)
     print(f"  Saved spectrogram -> {save_path}")
 
@@ -355,8 +373,8 @@ def plot_combined_spectrograms(
     has_metrics = metrics is not None and len(metrics) == n_plots
 
     # Total figure width: slightly wider when the metrics column is present
-    fig_w = 14 if has_metrics else 12
-    fig = plt.figure(figsize=(fig_w, 3.5 * n_plots))
+    fig_w = 18 if has_metrics else 16
+    fig = plt.figure(figsize=(fig_w, 4.0 * n_plots))
 
     if has_metrics:
         gs = gridspec.GridSpec(
@@ -364,11 +382,11 @@ def plot_combined_spectrograms(
             2,
             width_ratios=[5, 1],
             figure=fig,
-            hspace=0.45,
+            hspace=0.50,
             wspace=0.05,
         )
     else:
-        gs = gridspec.GridSpec(n_plots, 1, figure=fig, hspace=0.45)
+        gs = gridspec.GridSpec(n_plots, 1, figure=fig, hspace=0.50)
 
     def mel_to_hz(mel_val: float) -> float:
         return 700.0 * (10.0 ** (mel_val / 2595.0) - 1.0)
@@ -458,16 +476,17 @@ def plot_combined_spectrograms(
                 transform=tax.transAxes,
                 ha="left",
                 va="center",
-                fontsize=8,
+                fontsize=11,
                 fontfamily="monospace",
                 bbox=dict(boxstyle="round,pad=0.4", facecolor="#f5f5f5", alpha=0.9),
             )
 
     # Add a single colorbar for all spectrograms to the right of the figure
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    fig.colorbar(im, cax=cbar_ax, label="Magnitude (dB, normalized)")
+    cbar = fig.colorbar(im, cax=cbar_ax, label="Magnitude (dB, normalized)")
+    cbar.ax.yaxis.label.set_size(14)
 
-    fig.savefig(str(save_path), dpi=150, bbox_inches="tight")
+    fig.savefig(str(save_path))
     plt.close(fig)
     print(f"  Saved combined spectrogram -> {save_path}")
 

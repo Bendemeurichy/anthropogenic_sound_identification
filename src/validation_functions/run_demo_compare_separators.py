@@ -5,7 +5,7 @@ side-by-side spectrogram comparison.
 Two modes
 --------
 Single-WAV  (default)    python run_demo_compare_separators.py [mixture.wav]
-3-WAV       (--coi ...)  python run_demo_compare_separators.py --coi plane.wav --bg bg.wav --mixture mix.wav
+3-WAV       (--coi ...)  python run_demo_compare_separators.py --coi plane.wav --bg bg.wav [--mixture mix.wav]
 
 SuDoRM-RF  → airplane checkpoint
 CLAPSep    → pretrained with text_pos="airplane engine"
@@ -24,9 +24,21 @@ import torch
 import torchaudio
 import yaml
 
+_torchaudio_load_original = torchaudio.load
+
+
+def _sf_load(path, *args, **kwargs):
+    data, _sr = sf.read(str(path), always_2d=True, dtype="float32")
+    wav = torch.from_numpy(data.T.copy())
+    return wav, _sr
+
+
+torchaudio.load = _sf_load
+
 PREFIX = "/home/bendm/Thesis/project/code/src"
 sys.path.insert(0, PREFIX)
 
+from common.audio_utils import resample_with_padding
 from models.clapsep.inference import CLAPSepInference, COI_HEAD_INDEX as CLAPSEP_COI
 from models.sudormrf.inference import COI_HEAD_INDEX as SUDORMRF_COI
 from models.sudormrf.inference import SeparationInference
@@ -48,20 +60,23 @@ DEFAULT_MIXTURE = (
 
 SUDORMRF_CKPT = (
     "/home/bendm/Thesis/project/code/src/models/sudormrf/checkpoints/"
-    "sudormrf_planes_10_5/best_model.pt"
+    "sudormrf_planes_26_3/best_model.pt"
 )
 
 TUSS_CKPT = (
-    "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/multi_coi_11_05"
+    "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/multi_coi_14_05"
 )
 
-OUT_DIR = Path("/home/bendm/Thesis/project/code/src/validation_functions/demo_output_compare")
-COMMON_SR = 44_100  # resample all outputs to this rate for a shared spectrogram axis
+OUT_DIR = Path(
+    "/home/bendm/Thesis/project/code/src/validation_functions/demo_output_compare"
+)
+COMMON_SR = 48_000  # resample all outputs to this rate for a shared spectrogram axis
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def peak_normalize(waveform: torch.Tensor, target_peak: float = 0.95) -> torch.Tensor:
     peak = waveform.abs().max()
@@ -81,8 +96,13 @@ def make_mono(wav: torch.Tensor) -> torch.Tensor:
 def resample_if_needed(wav: torch.Tensor, src_sr: int, tgt_sr: int) -> torch.Tensor:
     if src_sr == tgt_sr:
         return wav
-    w = wav.unsqueeze(0) if wav.ndim == 1 else wav
-    return torchaudio.transforms.Resample(src_sr, tgt_sr)(w).squeeze(0)
+    was_1d = wav.ndim == 1
+    if was_1d:
+        wav = wav.unsqueeze(0)
+    result = resample_with_padding(wav, src_sr, tgt_sr)
+    if was_1d:
+        result = result.squeeze(0)
+    return result
 
 
 def save_wav(path: Path, wav: torch.Tensor, sr: int) -> None:
@@ -107,8 +127,9 @@ def get_first_coi(sources: torch.Tensor, coi_idx: int = 0) -> torch.Tensor:
     return make_mono(sources[coi_idx])
 
 
-def _run_models(wav_path: str, common_sr: int, out_dir: Path,
-                device: str) -> list[tuple[Path, str]]:
+def _run_models(
+    wav_path: str, common_sr: int, out_dir: Path, device: str
+) -> list[tuple[Path, str]]:
     """Run all 3 separation models on *wav_path*.  Returns list of
     (saved_wav_path, display_label) in the order they should appear in the plot.
     """
@@ -131,7 +152,9 @@ def _run_models(wav_path: str, common_sr: int, out_dir: Path,
     # -- 2. CLAPSep ---------------------------------------------------------
     print(f"\n--- CLAPSep ---")
     clapsep = CLAPSepInference.from_pretrained(
-        device=device, text_pos="airplane engine", text_neg="",
+        device=device,
+        text_pos="airplane engine",
+        text_neg="",
     )
     print(f"  Sample rate: {clapsep.sample_rate} Hz")
     with torch.inference_mode():
@@ -156,7 +179,10 @@ def _run_models(wav_path: str, common_sr: int, out_dir: Path,
     print(f"  Checkpoint: {TUSS_CKPT}")
     print(f"  COI: {coi_prompts}, BG: {bg_prompt}")
     tuss = TUSSInference.from_checkpoint(
-        TUSS_CKPT, device=device, coi_prompt=coi_prompts, bg_prompt=bg_prompt,
+        TUSS_CKPT,
+        device=device,
+        coi_prompt=coi_prompts,
+        bg_prompt=bg_prompt,
     )
     print(f"  Sample rate: {tuss.sample_rate} Hz")
     with torch.inference_mode():
@@ -175,8 +201,8 @@ def _run_models(wav_path: str, common_sr: int, out_dir: Path,
 # Single-WAV mode (mixture only)
 # ---------------------------------------------------------------------------
 
-def run_single_wav(wav_path: str, out_dir: Path, common_sr: int,
-                   device: str) -> None:
+
+def run_single_wav(wav_path: str, out_dir: Path, common_sr: int, device: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Save resampled mixture
@@ -198,8 +224,13 @@ def run_single_wav(wav_path: str, out_dir: Path, common_sr: int,
     specs, metrics = _compute_specs_and_metrics(paths, common_sr)
     save_png = out_dir / "spectrogram_comparison_all_separators.png"
     plot_combined_spectrograms(
-        specs, titles, save_png, sr=common_sr,
-        metrics=metrics, ref_idx=0, delta_indices=[1, 2, 3],
+        specs,
+        titles,
+        save_png,
+        sr=common_sr,
+        metrics=metrics,
+        ref_idx=0,
+        delta_indices=[1, 2, 3],
     )
     print(f"Done. Figure -> {save_png}")
 
@@ -208,8 +239,34 @@ def run_single_wav(wav_path: str, out_dir: Path, common_sr: int,
 # 3-WAV mode (COI + BG + Mixture as ground truth)
 # ---------------------------------------------------------------------------
 
-def run_three_wav(coi_path: str, bg_path: str, mixture_path: str,
-                  out_dir: Path, common_sr: int, device: str) -> None:
+
+def mix_coi_bg(coi: torch.Tensor, bg: torch.Tensor, snr_db: float) -> torch.Tensor:
+    """Mix COI and BG at a given SNR (dB). COI is treated as the signal."""
+    import random
+
+    min_len = min(coi.shape[-1], bg.shape[-1])
+    coi = coi[..., :min_len]
+    if bg.shape[-1] > min_len:
+        start = random.randint(0, bg.shape[-1] - min_len)
+        bg = bg[..., start : start + min_len]
+    else:
+        bg = bg[..., :min_len]
+    coi_power = coi.pow(2).mean()
+    bg_power = bg.pow(2).mean()
+    if bg_power < 1e-12:
+        return coi
+    alpha = torch.sqrt(coi_power / (bg_power * (10 ** (snr_db / 10))))
+    return coi + alpha * bg
+
+
+def run_three_wav(
+    coi_path: str,
+    bg_path: str,
+    mixture_path: Optional[str],
+    out_dir: Path,
+    common_sr: int,
+    device: str,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Load & resample ground-truth sources
@@ -228,37 +285,61 @@ def run_three_wav(coi_path: str, bg_path: str, mixture_path: str,
     save_wav(bg_out, bg, common_sr)
     print(f"  BG   -> {bg_out}")
 
-    # Save resampled mixture
-    mixture, mix_sr = load_audio(mixture_path)
-    mixture = make_mono(mixture)
-    mixture = resample_if_needed(mixture, mix_sr, common_sr)
+    # Load or generate mixture
+    if mixture_path is not None:
+        print(f"\nLoading mixture from file:")
+        mixture, mix_sr = load_audio(mixture_path)
+        mixture = make_mono(mixture)
+        mixture = resample_if_needed(mixture, mix_sr, common_sr)
+        snr_info = None
+    else:
+        import random
+
+        snr_db = random.uniform(-3.0, 3.0)
+        snr_info = f" (SNR = {snr_db:.1f} dB)"
+        print(f"\nGenerating mixture at {snr_db:.1f} dB SNR:")
+        coi_mix = coi.clone()
+        bg_mix = bg.clone()
+        mixture = mix_coi_bg(coi_mix, bg_mix, snr_db)
+
     mix_out = out_dir / "mixture.wav"
     save_wav(mix_out, mixture, common_sr)
-    print(f"  Mixture -> {mix_out}  (sr={mix_sr} Hz)")
+    print(f"  Mixture -> {mix_out}{snr_info or ''}")
+
+    # Save temporary mixture so _run_models can load it from disk
+    mix_temp = out_dir / "_mix_for_sep.wav"
+    save_wav(mix_temp, mixture, common_sr)
 
     # Run separators on the mixture
-    sep_results = _run_models(mixture_path, common_sr, out_dir, device)
+    sep_results = _run_models(str(mix_temp), common_sr, out_dir, device)
 
     # Plot: [COI, BG, Mixture, sudo, clap, tuss]
     paths = [coi_out, bg_out, mix_out] + [p for p, _ in sep_results]
+    mix_title = "Mixture (COI+BG)" if snr_info else "Mixture (Model Input)"
     titles = [
         "COI (Ground Truth)",
         "Background (Ground Truth)",
-        "Mixture (Model Input)",
+        mix_title,
     ] + [t for _, t in sep_results]
 
     print("\nPlotting comparison ...")
     specs, metrics = _compute_specs_and_metrics(paths, common_sr)
     save_png = out_dir / "spectrogram_comparison_three_wav.png"
     plot_combined_spectrograms(
-        specs, titles, save_png, sr=common_sr,
-        metrics=metrics, ref_idx=0, delta_indices=[3, 4, 5],
+        specs,
+        titles,
+        save_png,
+        sr=common_sr,
+        metrics=metrics,
+        ref_idx=0,
+        delta_indices=[3, 4, 5],
     )
     print(f"Done. Figure -> {save_png}")
 
 
 def _compute_specs_and_metrics(
-    paths: list[Path], common_sr: int,
+    paths: list[Path],
+    common_sr: int,
 ) -> tuple[list[np.ndarray], list[dict]]:
     specs, metrics_list = [], []
     for p in paths:
@@ -284,16 +365,25 @@ Examples:
   # Real-world mixture only
   %(prog)s recording.wav
 
-  # Ground-truth sources + mixture
+  # Ground-truth sources (auto-mix at random SNR)
+  %(prog)s --coi plane.wav --bg bg.wav
+
+  # Ground-truth sources + pre-made mixture
   %(prog)s --coi plane.wav --bg bg.wav --mixture mix.wav
 """,
     )
     parser.add_argument(
-        "wav", nargs="?", default=DEFAULT_MIXTURE,
-        help="Mixture WAV (single-file mode; default: airplane recording)")
+        "wav",
+        nargs="?",
+        default=DEFAULT_MIXTURE,
+        help="Mixture WAV (single-file mode; default: airplane recording)",
+    )
     parser.add_argument("--coi", help="Ground-truth COI WAV (enables 3-file mode)")
     parser.add_argument("--bg", help="Ground-truth background WAV (requires --coi)")
-    parser.add_argument("--mixture", help="Mixture WAV (requires --coi)")
+    parser.add_argument(
+        "--mixture",
+        help="Mixture WAV (optional; if omitted, COI+BG are mixed at a random SNR in [-3, 3] dB)",
+    )
     parser.add_argument("--output-dir", type=Path, default=OUT_DIR)
     parser.add_argument("--device", default=None)
     parser.add_argument("--common-sr", type=int, default=COMMON_SR)
@@ -304,14 +394,20 @@ Examples:
     print(f"Device: {device}")
 
     if args.coi:
-        if not args.bg or not args.mixture:
-            parser.error("--coi requires --bg and --mixture")
+        if not args.bg:
+            parser.error("--coi requires --bg")
         run_three_wav(
-            coi_path=args.coi, bg_path=args.bg, mixture_path=args.mixture,
-            out_dir=args.output_dir, common_sr=args.common_sr, device=device,
+            coi_path=args.coi,
+            bg_path=args.bg,
+            mixture_path=args.mixture,
+            out_dir=args.output_dir,
+            common_sr=args.common_sr,
+            device=device,
         )
     else:
         run_single_wav(
-            wav_path=args.wav, out_dir=args.output_dir,
-            common_sr=args.common_sr, device=device,
+            wav_path=args.wav,
+            out_dir=args.output_dir,
+            common_sr=args.common_sr,
+            device=device,
         )
