@@ -172,11 +172,12 @@ def validate_dataset(csv_path, base_path=None, max_samples=100):
 
 def main():
     import argparse
+    from src.common.paths import get_project_root
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--csv",
-        default="/home/bendm/Thesis/project/code/src/models/sudormrf/checkpoints/20251217_120142/separation_dataset.csv",
+        default=str(get_project_root() / "src/models/sudormrf/checkpoints/20251217_120142/separation_dataset.csv"),
     )
     parser.add_argument("--max-samples", type=int, default=100)
     args = parser.parse_args()

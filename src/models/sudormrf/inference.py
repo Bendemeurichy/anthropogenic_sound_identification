@@ -19,6 +19,8 @@ from typing import Optional, Union
 import torch
 import torchaudio
 
+from src.models.base import BaseSeparator
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from common.audio_utils import create_high_quality_resampler
@@ -97,7 +99,7 @@ def _create_model_for_inference(config: "Config") -> torch.nn.Module:
     return model
 
 
-class SeparationInference:
+class SeparationInference(BaseSeparator):
     """Inference wrapper for trained SuDORMRF separation model.
 
     This class provides methods for loading a trained model and performing
@@ -505,31 +507,6 @@ class SeparationInference:
             Background audio tensor with shape (T,)
         """
         return sources[BACKGROUND_HEAD_INDEX]
-
-    def save_audio(self, waveform: torch.Tensor, path: Union[str, Path]):
-        """Save waveform to file."""
-        if waveform.dim() == 1:
-            waveform = waveform.unsqueeze(0)
-
-        # First try torchaudio.save (may use torchcodec). If torchcodec
-        # fails to load (FFmpeg mismatch), fall back to pysoundfile.
-        try:
-            torchaudio.save(str(path), waveform, self.sample_rate)
-            print(f"Saved: {path}")
-            return
-        except Exception:
-            try:
-                import soundfile as sf
-            except Exception:
-                raise RuntimeError(
-                    "Failed to save audio via torchaudio and 'soundfile' is not installed. "
-                    "Install pysoundfile (`pip install soundfile`) or fix torchcodec/FFmpeg."
-                )
-
-            # waveform: (channels, frames) -> data: (frames, channels)
-            data = waveform.detach().cpu().numpy().T
-            sf.write(str(path), data, self.sample_rate)
-            print(f"Saved: {path} (via soundfile)")
 
 
 def main():

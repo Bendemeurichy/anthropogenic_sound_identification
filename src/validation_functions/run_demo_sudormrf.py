@@ -4,7 +4,9 @@ from pathlib import Path
 import torch
 import soundfile as sf
 
-sys.path.insert(0, "/home/bendm/Thesis/project/code/src")
+from src.common.paths import get_data_dir, get_project_root, get_output_dir, setup_python_path
+setup_python_path()
+
 from models.sudormrf.inference import SeparationInference, COI_HEAD_INDEX, BACKGROUND_HEAD_INDEX
 from validation_functions.demo_separation import plot_combined_spectrograms_from_wavs
 
@@ -17,14 +19,15 @@ def peak_normalize(waveform: torch.Tensor, target_peak: float = 0.95) -> torch.T
 
 
 def main():
-    ckpt_path = (
-        "/home/bendm/Thesis/project/code/src/models/sudormrf/checkpoints/sudormrf_planes_10_5/best_model.pt"
+    ckpt_path = str(
+        get_project_root() / "src/models/sudormrf/checkpoints/sudormrf_planes_10_5/best_model.pt"
     )
-    wav_path = "/home/bendm/Thesis/project/data/misclassifications/239_as_is_sep_cls_['plane',_'wind',_'biophony']_conf0.456_S4A04430_20180716_113000.wav"
+    wav_path = str(
+        get_data_dir() / "misclassifications/"
+        "239_as_is_sep_cls_['plane',_'wind',_'biophony']_conf0.456_S4A04430_20180716_113000.wav"
+    )
 
-    out_dir = Path(
-        "/home/bendm/Thesis/project/code/src/validation_functions/demo_output_sudormrf"
-    )
+    out_dir = get_output_dir() / "demo_sudormrf"
     out_dir.mkdir(exist_ok=True, parents=True)
 
     print("Loading model...")

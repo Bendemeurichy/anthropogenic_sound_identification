@@ -547,30 +547,16 @@ def plot_combined_spectrograms_from_wavs(
 
 
 if __name__ == "__main__":
-    # ---------------------------------------------------------------------------
-    # Dev shortcut — bypasses any command-line interface.  Edit wav_files,
-    # save_path, titles, and ref_idx directly, then run:
-    #   python demo_separation.py
-    # ---------------------------------------------------------------------------
-    _detected_sr = sf.info(
-        "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test/cnn/mixture_sep/mixture_coi_clean_0.wav"
-    ).samplerate
+    from src.common.paths import get_project_root
+
+    _BASE = get_project_root() / "src/validation_functions/meeting_26_03/validation_examples_test/cnn/mixture_sep"
+    _detected_sr = sf.info(str(_BASE / "mixture_coi_clean_0.wav")).samplerate
     wav_files = [
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test/cnn/mixture_sep/mixture_coi_clean_0.wav"
-        ),
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test/cnn/mixture_sep/mixture_bg_clean_0.wav"
-        ),
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test/cnn/mixture_sep/mixture_created_0.wav"
-        ),
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test/cnn/mixture_sep/mixture_separated_src0_0.wav"
-        ),
-        Path(
-            "/home/bendm/Thesis/project/code/src/validation_functions/meeting_26_03/validation_examples_test/cnn/mixture_sep/mixture_separated_src1_0.wav"
-        ),
+        _BASE / "mixture_coi_clean_0.wav",
+        _BASE / "mixture_bg_clean_0.wav",
+        _BASE / "mixture_created_0.wav",
+        _BASE / "mixture_separated_src0_0.wav",
+        _BASE / "mixture_separated_src1_0.wav",
     ]
     plot_combined_spectrograms_from_wavs(
         wav_files,

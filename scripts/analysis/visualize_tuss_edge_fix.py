@@ -1,6 +1,6 @@
 """Visual comparison: Before and After edge artifact fix for TUSS."""
 import sys
-sys.path.insert(0, '/home/bendm/Thesis/project/code/src')
+from src.common.paths import setup_python_path; setup_python_path()
 
 import torch
 import matplotlib.pyplot as plt
@@ -146,7 +146,7 @@ axes[2].text(1.5, spec_new.shape[0]*0.9, 'CLEAN\nEDGES',
            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
 plt.tight_layout()
-output_path = '/home/bendm/Thesis/project/code/test_separation_outputs/tuss_edge_fix_comparison.png'
+output_path = str(get_project_root() / 'test_separation_outputs/tuss_edge_fix_comparison.png'
 plt.savefig(output_path, dpi=150, bbox_inches='tight')
 print(f"\n✅ Saved comparison to: {output_path}")
 

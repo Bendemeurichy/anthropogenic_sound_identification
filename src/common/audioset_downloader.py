@@ -82,8 +82,10 @@ def download_missing_files_from_df(
     failed = 0
 
     # Load label mapping once outside the loop for better performance
+    from src.common.paths import get_data_dir
+
     display_names_df = pd.read_csv(
-        "/mnt/d/Users/bdmeuric/masterproef/anthropogenic_sound_identification/data/audioset/mid_to_display_name.tsv",
+        str(get_data_dir() / "audioset/mid_to_display_name.tsv"),
         sep="\t",
         header=None,
         names=["mid", "display_name"],

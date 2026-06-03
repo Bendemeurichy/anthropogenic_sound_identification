@@ -18,25 +18,22 @@ requested COI rather than relying on the legacy ``COI_HEAD_INDEX`` constant.
 Usage:
     from models.tuss.inference import TUSSInference
 
-    inferencer = TUSSInference.from_checkpoint(
-        "path/to/checkpoint_dir",
-        device="cuda",
-        coi_prompt="birds",   # must match the exact trained prompt name
-        bg_prompt="background"
-    )
-
-    # Separate a waveform
-    sources = inferencer.separate_waveform(waveform)  # (n_sources, T) tensor
-    coi_audio = sources[inferencer.target_coi_index]
-    bg_audio   = sources[-1]
+    tuss = TUSSInference.from_checkpoint("/path/to/best_model.pt")
+    sources = tuss.separate("audio.wav")
+    coi_audio = tuss.get_coi_audio(sources)
 """
 
+import argparse
+import os
 import sys
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
+
 import torch
 import torchaudio
 import yaml
+
+from src.models.base import BaseSeparator
 
 # Add paths for imports
 _SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -60,7 +57,7 @@ BACKGROUND_HEAD_INDEX: int = 1  # only correct for 2-source (single-COI) checkpo
 NUM_SOURCES: int = 2            # only correct for 2-source (single-COI) checkpoints
 
 
-class TUSSInference:
+class TUSSInference(BaseSeparator):
     """Inference wrapper for trained TUSS separation model.
 
     This class provides methods for loading a trained model and performing
@@ -745,32 +742,3 @@ class TUSSInference:
             result[prompt] = sources[i]
         result[self.bg_prompt] = sources[-1]
         return result
-
-    def save_audio(self, waveform: torch.Tensor, path: Union[str, Path]):
-        """Save waveform to file.
-
-        Args:
-            waveform: Audio tensor (T,) or (1, T)
-            path: Output file path
-        """
-        if waveform.dim() == 1:
-            waveform = waveform.unsqueeze(0)
-
-        # Try torchaudio.save first, fall back to soundfile
-        try:
-            torchaudio.save(str(path), waveform, self.sample_rate)
-            print(f"Saved: {path}")
-            return
-        except Exception:
-            try:
-                import soundfile as sf
-            except Exception:
-                raise RuntimeError(
-                    "Failed to save audio via torchaudio and 'soundfile' is not installed. "
-                    "Install pysoundfile (`pip install soundfile`) or fix torchcodec/FFmpeg."
-                )
-
-            # waveform: (channels, frames) -> data: (frames, channels)
-            data = waveform.detach().cpu().numpy().T
-            sf.write(str(path), data, self.sample_rate)
-            print(f"Saved: {path} (via soundfile)")

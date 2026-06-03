@@ -1,6 +1,6 @@
 """Verify TUSS uses padded resampling (edge artifact fix)."""
-import sys
-sys.path.insert(0, '/home/bendm/Thesis/project/code/src')
+from src.common.paths import get_project_root, setup_python_path
+setup_python_path()
 
 import torch
 import numpy as np
@@ -95,7 +95,7 @@ print("="*70)
 
 try:
     # Check that inference.py imports resample_with_padding
-    with open('/home/bendm/Thesis/project/code/src/models/tuss/inference.py') as f:
+    with open(str(get_project_root() / 'src/models/tuss/inference.py')) as f:
         content = f.read()
         if 'resample_with_padding' in content:
             print("✅ TUSS inference.py imports resample_with_padding")
@@ -115,7 +115,7 @@ print("TEST 6: Verify TUSS train.py uses padded resampling")
 print("="*70)
 
 try:
-    with open('/home/bendm/Thesis/project/code/src/models/tuss/train.py') as f:
+    with open(str(get_project_root() / 'src/models/tuss/train.py')) as f:
         content = f.read()
         if 'resample_padded' in content:
             print("✅ TUSS train.py uses resample_padded()")

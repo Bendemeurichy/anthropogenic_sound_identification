@@ -78,7 +78,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         csv_path = sys.argv[1]
     else:
-        csv_path = "/home/bendm/Thesis/project/code/src/models/sudormrf/checkpoints/20260316_191707/separation_dataset.csv"
+        from src.common.paths import get_project_root
+        csv_path = str(get_project_root() / "src/models/sudormrf/checkpoints/20260316_191707/separation_dataset.csv")
 
     if not Path(csv_path).exists():
         print(f"Error: CSV file not found: {csv_path}")

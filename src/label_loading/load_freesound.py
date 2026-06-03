@@ -105,9 +105,11 @@ def _get_index(filename: str) -> int:
 
 def test_freesound_loading():
     """Test function for load_freesound."""
+    from src.common.paths import get_data_dir
+
     df = load_freesound(
-        audio_base_path="/home/bendm/Thesis/project/data/freesound/audio",
-        metadata="/home/bendm/Thesis/project/data/freesound_curation/metadata.csv",
+        audio_base_path=str(get_data_dir() / "freesound/audio"),
+        metadata=str(get_data_dir() / "freesound_curation/metadata.csv"),
     )
     print(df.head())
 

@@ -53,7 +53,8 @@ def load_aerosonic_db(path: str) -> pd.DataFrame:
 
 
 def test_load_aerosonic_db():
-    path = "/home/bendm/Thesis/project/code/data/metadata/aerosonicDB/sample_meta.csv"
+    from src.common.paths import get_project_root
+    path = str(get_project_root() / "data/metadata/aerosonicDB/sample_meta.csv")
     df = load_aerosonic_db(path)
     assert not df.empty, "DataFrame should not be empty"
     assert any(

@@ -28,7 +28,7 @@ def compute_spectrogram(waveform, sr, n_fft=2048, hop=512):
     
     return mag_db.numpy()
 
-output_dir = '/home/bendm/Thesis/project/code/src/validation_functions/demo_output'
+output_dir = str(get_output_dir() / 'demo'
 
 # Load all files
 print("Loading audio files...")
@@ -91,7 +91,7 @@ for i, (spec, title, cmap) in enumerate(specs):
 axes[-1].set_xlabel('Time (s)')
 
 plt.tight_layout()
-output_path = '/home/bendm/Thesis/project/code/test_separation_outputs/demo_separation_spectrograms.png'
+output_path = str(get_project_root() / 'test_separation_outputs/demo_separation_spectrograms.png'
 plt.savefig(output_path, dpi=150, bbox_inches='tight')
 print(f"\nSaved spectrograms to: {output_path}")
 
@@ -141,7 +141,7 @@ for i, (diff, title, cmap) in enumerate(diffs):
 axes2[-1].set_xlabel('Time (s)')
 
 plt.tight_layout()
-output_path2 = '/home/bendm/Thesis/project/code/test_separation_outputs/demo_separation_differences.png'
+output_path2 = str(get_project_root() / 'test_separation_outputs/demo_separation_differences.png'
 plt.savefig(output_path2, dpi=150, bbox_inches='tight')
 print(f"Saved difference spectrograms to: {output_path2}")
 

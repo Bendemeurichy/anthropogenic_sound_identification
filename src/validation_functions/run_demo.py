@@ -22,6 +22,9 @@ import torch
 import torchaudio
 import yaml
 
+from src.common.paths import get_data_dir, get_project_root, get_output_dir, setup_python_path
+setup_python_path()
+
 _torchaudio_load_original = torchaudio.load
 
 
@@ -32,9 +35,6 @@ def _sf_load(path, *args, **kwargs):
 
 
 torchaudio.load = _sf_load
-
-PREFIX = "/home/bendm/Thesis/project/code/src"
-sys.path.insert(0, PREFIX)
 
 from models.tuss.inference import TUSSInference
 from validation_functions.demo_separation import (
@@ -47,16 +47,14 @@ from validation_functions.demo_separation import (
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_MIXTURE = (
-    "/home/bendm/Thesis/project/data/misclassifications/"
+DEFAULT_MIXTURE = str(
+    get_data_dir() / "misclassifications/"
     "239_as_is_sep_cls_['plane',_'wind',_'biophony']_conf0.456_S4A04430_20180716_113000.wav"
 )
 
-TUSS_CKPT = (
-    "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/multi_coi_11_05"
-)
+TUSS_CKPT = str(get_project_root() / "src/models/tuss/checkpoints/multi_coi_11_05")
 
-OUT_DIR = Path("/home/bendm/Thesis/project/code/src/validation_functions/demo_output")
+OUT_DIR = get_output_dir() / "demo"
 
 
 # ---------------------------------------------------------------------------

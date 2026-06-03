@@ -63,7 +63,8 @@ def load_birdset(path: str) -> pd.DataFrame:
 
 
 def test_load_birdset():
-    path = "/home/bendm/Thesis/project/code/data/metadata/birdset/annotations.csv"
+    from src.common.paths import get_project_root
+    path = str(get_project_root() / "data/metadata/birdset/annotations.csv")
     df = load_birdset(path)
     
     assert not df.empty, "DataFrame should not be empty"

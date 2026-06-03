@@ -96,7 +96,7 @@ if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
 # ---------------------------------------------------------------------------
 from pathlib import Path
 
-_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 

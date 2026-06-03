@@ -1,12 +1,12 @@
 """Analyze the separation outputs from demo."""
 import sys
-sys.path.insert(0, '/home/bendm/Thesis/project/code/src')
+from src.common.paths import setup_python_path; setup_python_path()
 
 import torch
 import soundfile as sf
 import numpy as np
 
-output_dir = '/home/bendm/Thesis/project/code/src/validation_functions/demo_output'
+output_dir = str(get_output_dir() / 'demo'
 
 # Load all files
 mixture, sr = sf.read(f'{output_dir}/mixture.wav')

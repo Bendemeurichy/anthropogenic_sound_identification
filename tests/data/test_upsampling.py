@@ -1,7 +1,6 @@
 """Test STFT/iSTFT upsampling to verify reconstruction quality."""
-import sys
-sys.path.insert(0, '/home/bendm/Thesis/project/code/src')
-sys.path.insert(0, '/home/bendm/Thesis/project/code/src/models/tuss/base')
+from src.common.paths import get_project_root, setup_python_path
+setup_python_path()
 
 import torch
 import soundfile as sf
@@ -9,7 +8,7 @@ import numpy as np
 from utils.audio_utils import do_stft, do_istft
 
 # Test with the input file
-wav_path = '/home/bendm/Thesis/project/code/test_separation_outputs/test_input.wav'
+wav_path = str(get_project_root() / 'test_separation_outputs/test_input.wav')
 data, sr = sf.read(wav_path, always_2d=True)
 waveform = torch.from_numpy(data.T).float()
 
@@ -66,7 +65,7 @@ print(f"  Mean error: {diff.mean():.6f}")
 print(f"  SNR: {10 * torch.log10((waveform_trim**2).mean() / (diff**2).mean()):.2f} dB")
 
 # Save for inspection
-output_dir = '/home/bendm/Thesis/project/code/test_separation_outputs'
+output_dir = str(get_project_root() / 'test_separation_outputs')
 sf.write(f'{output_dir}/stft_reconstructed.wav', reconstructed.squeeze().numpy(), sr)
 print(f"\nSaved reconstructed audio to: {output_dir}/stft_reconstructed.wav")
 

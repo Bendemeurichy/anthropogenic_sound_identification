@@ -236,7 +236,8 @@ def get_freesound_labels_batched(csv_path: str):
 
 
 def main():
-    csv_path = "/home/bendm/Thesis/project/code/data/metadata/freesound_curation/source_freesound_field_recordings_links.csv"
+    from src.common.paths import get_project_root
+    csv_path = str(get_project_root() / "data/metadata/freesound_curation/source_freesound_field_recordings_links.csv")
     print("putting labels in freesound dataset")
     get_freesound_labels_batched(csv_path)
     # remove_empty_labels(csv_path.replace(".csv", "_with_labels.csv"))

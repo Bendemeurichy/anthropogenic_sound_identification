@@ -1,6 +1,6 @@
 """Test edge artifact fix for Kaiser window sinc interpolation."""
 import sys
-sys.path.insert(0, '/home/bendm/Thesis/project/code/src')
+from src.common.paths import setup_python_path; setup_python_path()
 
 import torch
 import soundfile as sf
@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from common.audio_utils import create_high_quality_resampler, resample_with_padding
 
 # Load test input
-wav_path = '/home/bendm/Thesis/project/code/test_separation_outputs/test_input.wav'
+wav_path = str(get_project_root() / 'test_separation_outputs/test_input.wav'
 data, sr_orig = sf.read(wav_path, always_2d=True)
 waveform = torch.from_numpy(data.T).float()
 
@@ -112,7 +112,7 @@ axes[2].annotate('Clean edge\n(no artifacts)',
                 fontsize=11, color='green', fontweight='bold')
 
 plt.tight_layout()
-output_path = '/home/bendm/Thesis/project/code/test_separation_outputs/edge_artifacts_comparison.png'
+output_path = str(get_project_root() / 'test_separation_outputs/edge_artifacts_comparison.png'
 plt.savefig(output_path, dpi=150, bbox_inches='tight')
 print(f"\nSaved comparison to: {output_path}")
 
@@ -145,9 +145,9 @@ analyze_edges(spec_standard, "Standard Resampling")
 analyze_edges(spec_padded, "Padded Resampling")
 
 # Save audio files for comparison
-sf.write('/home/bendm/Thesis/project/code/test_separation_outputs/resampled_standard.wav',
+sf.write(str(get_project_root() / 'test_separation_outputs/resampled_standard.wav',
          resampled_standard.squeeze(0).numpy(), target_sr)
-sf.write('/home/bendm/Thesis/project/code/test_separation_outputs/resampled_padded.wav',
+sf.write(str(get_project_root() / 'test_separation_outputs/resampled_padded.wav',
          resampled_padded.squeeze(0).numpy(), target_sr)
 
 print("\n" + "="*70)

@@ -13,8 +13,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Add paths
-sys.path.insert(0, "/home/bendm/Thesis/project/code/src")
+from src.common.paths import get_project_root, setup_python_path
+setup_python_path()
 
 
 def load_checkpoint_prompts(ckpt_path: Path):
@@ -242,9 +242,7 @@ def plot_similarity_heatmap(cos_sim_matrix, prompt_names, save_path: Path):
 
 
 def main():
-    ckpt_path = Path(
-        "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/multi_coi_29_04"
-    )
+    ckpt_path = get_project_root() / "src/models/tuss/checkpoints/multi_coi_29_04"
     
     # Load prompts
     prompt_vectors, coi_prompts, bg_prompt = load_checkpoint_prompts(ckpt_path)
@@ -262,9 +260,7 @@ def main():
     print_analysis(cos_sim_matrix, l2_dist_matrix, prompt_names)
     
     # Plot heatmap
-    save_path = Path(
-        "/home/bendm/Thesis/project/code/src/validation_functions/demo_output/prompt_similarity_heatmap.png"
-    )
+    save_path = get_project_root() / "src/validation_functions/demo_output/prompt_similarity_heatmap.png"
     save_path.parent.mkdir(exist_ok=True, parents=True)
     plot_similarity_heatmap(cos_sim_matrix, prompt_names, save_path)
 

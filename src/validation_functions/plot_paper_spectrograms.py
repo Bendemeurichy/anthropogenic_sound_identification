@@ -16,9 +16,8 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 import torch
 
-import sys
-
-sys.path.insert(0, "/home/bendm/Thesis/project/code/src")
+from src.common.paths import get_project_root, get_output_dir, setup_python_path
+setup_python_path()
 
 from validation_functions.demo_separation import (
     compute_spectrogram,
@@ -29,11 +28,11 @@ from validation_functions.demo_separation import (
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-AUDIO_DIR = Path(
-    "/home/bendm/Thesis/project/code/src/validation_functions/"
-    "final_results/dissertation_figures/qualitative/audio"
+AUDIO_DIR = (
+    get_project_root()
+    / "src/validation_functions/final_results/dissertation_figures/qualitative/audio"
 )
-OUTPUT_DIR = Path("/home/bendm/Thesis/writing/images/results/paper")
+OUTPUT_DIR = get_output_dir() / "paper/spectrograms"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # The Risoux plane scenario: 4 files to compare

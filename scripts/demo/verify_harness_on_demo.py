@@ -34,8 +34,10 @@ def _sf_load(path, *args, **kwargs):
 
 torchaudio.load = _sf_load  # noqa: E402
 
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from src.common.paths import get_data_dir, setup_python_path
+
+setup_python_path()
 
 from src.validation_functions.test_pipeline import ValidationPipeline  # noqa: E402
 from src.label_loading.coi_labels import (  # noqa: E402
@@ -48,7 +50,7 @@ SEP_CHECKPOINT = str(
     PROJECT_ROOT / "src/models/tuss/checkpoints/multi_coi_14_05/best_model.pt"
 )
 DEMO_DIR = PROJECT_ROOT / "src/validation_functions/demo_output"
-WEBDATASET_DIR = Path("/home/bendm/Thesis/project/data/webdataset")
+WEBDATASET_DIR = get_data_dir() / "webdataset"
 TEST_SHARDS = sorted(WEBDATASET_DIR.glob("test-*.tar"))
 N_AIRPLANE = 3
 N_BACKGROUND = 3

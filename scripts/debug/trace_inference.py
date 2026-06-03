@@ -1,7 +1,7 @@
 """Trace through the full inference pipeline with the demo audio."""
 import sys
-sys.path.insert(0, '/home/bendm/Thesis/project/code/src')
-sys.path.insert(0, '/home/bendm/Thesis/project/code/src/models/tuss/base')
+from src.common.paths import setup_python_path; setup_python_path()
+# base path handled by setup_python_path()
 
 import torch
 import soundfile as sf
@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from models.tuss.inference import TUSSInference
 
 # Load demo audio
-demo_path = '/home/bendm/Thesis/project/code/src/validation_functions/demo_output/520539__szegvari__forest-wind-birds-tree-airplane-mastered.wav'
+demo_path = str(get_output_dir() / 'demo/520539__szegvari__forest-wind-birds-tree-airplane-mastered.wav'
 data, sr_orig = sf.read(demo_path, always_2d=True)
 waveform_orig = torch.from_numpy(data.T).float()
 
@@ -22,7 +22,7 @@ print(f"Duration: {waveform_orig.shape[-1] / sr_orig:.2f}s")
 print(f"Max amplitude: {waveform_orig.abs().max():.4f}")
 
 # Load the model
-ckpt_path = "/home/bendm/Thesis/project/code/src/models/tuss/checkpoints/20260423_105141"
+ckpt_path = str(get_project_root() / 'src/models/tuss/checkpoints/20260423_105141"
 print(f"\nLoading model from: {ckpt_path}")
 
 inferencer = TUSSInference.from_checkpoint(
@@ -177,7 +177,7 @@ for i, (spec, title) in enumerate([
 axes[-1].set_xlabel('Time (frames)')
 
 plt.tight_layout()
-output_path = '/home/bendm/Thesis/project/code/test_separation_outputs/full_inference_spectrograms.png'
+output_path = str(get_project_root() / 'test_separation_outputs/full_inference_spectrograms.png'
 plt.savefig(output_path, dpi=150, bbox_inches='tight')
 print(f"\nSaved full inference spectrograms to: {output_path}")
 

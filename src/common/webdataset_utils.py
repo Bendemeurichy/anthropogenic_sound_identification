@@ -173,61 +173,23 @@ def robust_decode_audio_bytes(audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
 # =============================================================================
 
 
+from src.common.augmentations import (
+    add_noise,
+    gain,
+    low_pass_filter,
+    time_shift,
+    time_stretch,
+)
+
+
 class AudioAugmentations:
     """Audio augmentation utilities for training."""
-    
-    @staticmethod
-    def time_stretch(waveform: torch.Tensor, rate: float) -> torch.Tensor:
-        """Time stretch waveform by given rate."""
-        if rate == 1.0:
-            return waveform
-        orig_len = waveform.shape[-1]
-        stretched = (
-            torch.nn.functional.interpolate(
-                waveform.unsqueeze(0).unsqueeze(0),
-                scale_factor=1.0 / rate,
-                mode="linear",
-                align_corners=False,
-            )
-            .squeeze(0)
-            .squeeze(0)
-        )
-        if stretched.shape[-1] > orig_len:
-            return stretched[:orig_len]
-        return torch.nn.functional.pad(stretched, (0, orig_len - stretched.shape[-1]))
 
-    @staticmethod
-    def add_noise(waveform: torch.Tensor, noise_level: float = 0.005) -> torch.Tensor:
-        """Add gaussian noise to waveform."""
-        return waveform + torch.randn_like(waveform) * noise_level
-
-    @staticmethod
-    def gain(waveform: torch.Tensor, gain_db: float) -> torch.Tensor:
-        """Apply gain in dB to waveform."""
-        return waveform * (10 ** (gain_db / 20.0))
-
-    @staticmethod
-    def time_shift(waveform: torch.Tensor, shift_samples: int) -> torch.Tensor:
-        """Circularly shift waveform by given number of samples."""
-        return torch.roll(waveform, shifts=shift_samples, dims=-1)
-
-    @staticmethod
-    def low_pass_filter(
-        waveform: torch.Tensor, cutoff_ratio: float = 0.8
-    ) -> torch.Tensor:
-        """Apply low-pass filter with given cutoff ratio."""
-        if cutoff_ratio >= 1.0:
-            return waveform
-        fft = torch.fft.rfft(waveform)
-        n_freqs = fft.shape[-1]
-        cutoff_idx = int(n_freqs * cutoff_ratio)
-        mask = torch.ones(n_freqs, device=waveform.device)
-        rolloff_width = max(1, n_freqs // 20)
-        for i in range(rolloff_width):
-            if cutoff_idx + i < n_freqs:
-                mask[cutoff_idx + i] = 1.0 - (i / rolloff_width)
-        mask[cutoff_idx + rolloff_width :] = 0.0
-        return torch.fft.irfft(fft * mask, n=waveform.shape[-1])
+    time_stretch = staticmethod(time_stretch)
+    add_noise = staticmethod(add_noise)
+    gain = staticmethod(gain)
+    time_shift = staticmethod(time_shift)
+    low_pass_filter = staticmethod(low_pass_filter)
 
     @staticmethod
     def random_augment(

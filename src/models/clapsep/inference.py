@@ -23,6 +23,8 @@ import torch
 import torch.nn as nn
 import torchaudio
 
+from src.models.base import BaseSeparator
+
 _src_root = Path(__file__).resolve().parent.parent.parent
 if str(_src_root) not in sys.path:
     sys.path.insert(0, str(_src_root))
@@ -327,7 +329,7 @@ class _COIModelAdapter(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class CLAPSepInference:
+class CLAPSepInference(BaseSeparator):
     """Drop-in replacement for ``SeparationInference`` from sudormrf.
 
     Attributes: model, sample_rate, segment_samples, device
@@ -503,12 +505,6 @@ class CLAPSepInference:
 
     def get_background_audio(self, sources: torch.Tensor) -> torch.Tensor:
         return sources[BACKGROUND_HEAD_INDEX]
-
-    def save_audio(self, waveform: torch.Tensor, path) -> None:
-        if waveform.dim() == 1:
-            waveform = waveform.unsqueeze(0)
-        torchaudio.save(str(path), waveform.cpu(), self.sample_rate)
-        print(f"Saved: {path}")
 
     def _update_text_embeddings(self, text_pos, text_neg):
         """Update text embeddings for models that support dynamic prompts."""

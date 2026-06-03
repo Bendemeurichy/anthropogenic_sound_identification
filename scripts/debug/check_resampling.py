@@ -2,7 +2,7 @@
 
 import sys
 
-sys.path.insert(0, "/home/bendm/Thesis/project/code/src")
+from src.common.paths import setup_python_path; setup_python_path()
 
 import torch
 import soundfile as sf
@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 from common.audio_utils import resample_with_padding
 
 # Load test input
-wav_path = "/home/bendm/Thesis/project/code/test_separation_outputs/test_input.wav"
+wav_path = str(get_project_root() / 'test_separation_outputs/test_input.wav"
 data, sr_orig = sf.read(wav_path, always_2d=True)
 # data is (frames, channels), convert to (channels, frames)
 waveform = torch.from_numpy(data.T).float()
@@ -155,7 +155,7 @@ fig.update_layout(
 )
 
 output_path = (
-    "/home/bendm/Thesis/project/code/test_separation_outputs/resampling_comparison.pdf"
+    str(get_project_root() / 'test_separation_outputs/resampling_comparison.pdf"
 )
 png_path = output_path.replace(".pdf", ".png")
 fig.write_image(output_path)
@@ -198,7 +198,7 @@ else:
     print("  ⚠ Warning: Some energy above original Nyquist")
 
 # Save resampled audio for listening
-output_wav = "/home/bendm/Thesis/project/code/test_separation_outputs/test_input_resampled_48k.wav"
+output_wav = str(get_project_root() / 'test_separation_outputs/test_input_resampled_48k.wav"
 sf.write(output_wav, waveform_resampled.squeeze(0).numpy(), target_sr)
 print(f"\nSaved resampled audio to: {output_wav}")
 
