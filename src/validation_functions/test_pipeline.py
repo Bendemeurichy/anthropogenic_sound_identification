@@ -314,12 +314,7 @@ class ValidationPipeline:
                 text_pos=clapsep_text_pos,
                 text_neg=clapsep_text_neg,
             )
-            # Propagate sample_rate AND segment_samples from CLAPSep so the
-            # pipeline operates at the separator's native chunk length
-            # (DEFAULT_CHUNK_SAMPLES = 320000 = 10 s @ 32 kHz). Previously the
-            # pipeline kept its hardcoded 5 s default, which silently truncated
-            # CLAPSep input chunks to half their native length and left
-            # classifier_segment_samples derived from the wrong window.
+            # Use the separator's native sample_rate and chunk length.
             self.sample_rate = self.separator.sample_rate
             self.segment_samples = self.separator.segment_samples
             self.segment_length = self.segment_samples / self.sample_rate
@@ -338,10 +333,7 @@ class ValidationPipeline:
             self.separator = SeparationInference.from_checkpoint(
                 sep_path, device=self.device
             )
-            # Propagate sample_rate and segment_length from the checkpoint config,
-            # mirroring what is done for CLAPSep above. Without this the pipeline
-            # would keep its hardcoded defaults (16 kHz / 5 s) while the model
-            # was trained at a different rate / window length (e.g. 32 kHz / 4 s).
+            # Use the separator's native sample_rate and chunk length.
             self.sample_rate = self.separator.sample_rate
             self.segment_samples = self.separator.segment_samples
             self.segment_length = self.segment_samples / self.sample_rate
@@ -465,12 +457,8 @@ class ValidationPipeline:
                 f"Must be one of: 'plane', 'pann_finetuned', 'ast_finetuned', 'bird_mae', 'audioprotopnet'"
             )
 
-        # Derive classifier_segment_samples from the classifier's own native
-        # segment length (if exposed), NOT from the separator's window size.
-        # Using the separator's segment_length here would silently make the
-        # classifier operate on differently-sized windows depending on which
-        # separator is loaded (e.g. CLAPSep uses 10 s chunks vs TUSS 5 s),
-        # causing incomparable results between experiments.
+        # Derive classifier segment size from the classifier's own native
+        # window when available, falling back to the separator's segment length.
         cls_native_seg = getattr(self.classifier, "segment_samples", None)
         if cls_native_seg is not None:
             self.classifier_segment_samples = int(cls_native_seg)

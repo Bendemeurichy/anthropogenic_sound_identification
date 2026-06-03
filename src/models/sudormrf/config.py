@@ -47,12 +47,10 @@ class DataConfig:
     segment_length: float = 5.0
     snr_range: List[float] = field(default_factory=lambda: [-5, 5])
     n_coi_classes: int = 1
-    # list of semantic labels that define the class(es) of interest we want
-    # the separation model to focus on.  This replaces the hard‑coded
-    # `target_classes` list that used to live in `train.py`.  During training
-    # the dataframe is filtered based on these labels and saved alongside the
-    # checkpoint; during inference the same list can be recovered from the
-    # checkpoint config.
+    # Semantic labels that define the class(es) of interest the separation
+    # model should focus on.  During training the dataframe is filtered based
+    # on these labels and saved alongside the checkpoint; during inference the
+    # same list can be recovered from the checkpoint config.
     #
     # Single-class mode (n_coi_classes=1): set target_classes only.
     # Multi-class mode  (n_coi_classes>1): set coi_classes instead;
@@ -118,8 +116,8 @@ class TrainingConfig:
     device: str = "cuda"
     compile_model: bool = True
     compile_backend: str = "inductor"
-    # Class-weight for COI-focused loss (used by COILoss). Higher -> more
-    # emphasis on COI reconstruction. Default 1.5 matches prior code.
+    # Weight for COI-focused loss. Higher values increase emphasis on COI
+    # reconstruction. Default is 1.5.
     class_weight: float = 1.5
     # Optional auxiliary L1 weight on waveforms to stabilize early training.
     # Set to 0.0 to disable.

@@ -102,12 +102,7 @@ class GpuAudioAugmentations:
     def add_noise_batch(
         waveform: torch.Tensor, noise_level_range: tuple[float, float] = (0.001, 0.01)
     ) -> torch.Tensor:
-        """Add white Gaussian noise to each sample in batch.
-
-        Simulates microphone/preamp self-noise typical of field recording equipment.
-        White noise = flat frequency spectrum (equal power across all frequencies).
-        Range 0.001-0.01 = approximately -60 to -40 dB SNR (typical noise floor).
-        """
+        """Add white Gaussian noise to each sample in batch."""
         noise_levels = torch.empty(
             waveform.shape[0], device=waveform.device
         ).uniform_(*noise_level_range)

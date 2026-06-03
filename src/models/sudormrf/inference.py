@@ -426,12 +426,9 @@ class SeparationInference(BaseSeparator):
     def _separate_segment(self, segment: torch.Tensor) -> torch.Tensor:
         """Separate a single segment.
 
-        The model is trained with independent normalization: the mixture input
-        is normalized to zero-mean unit-variance, and each target source is
-        also independently normalized to zero-mean unit-variance. Outputs are
-        rescaled by the mixture std to restore a reasonable amplitude level.
-        Note: relative amplitude between COI and background outputs is not
-        preserved — both are scaled to roughly mixture energy.
+        The mixture input is normalized to zero-mean unit-variance (matching
+        training), and each model output source is independently normalized.
+        Outputs are rescaled by the mixture std to restore amplitude level.
 
         Returns: (n_sources, T)
         """

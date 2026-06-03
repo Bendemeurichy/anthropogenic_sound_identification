@@ -437,14 +437,9 @@ class TUSSInference(BaseSeparator):
             audio_path: Path to audio file
 
         Returns:
-            sources: (n_sources, T) tensor where:
-                     sources[0:len(coi_prompts)] = COI classes (alphabetically sorted)
+            sources: (n_sources, T) tensor with sources in config prompt order:
+                     sources[0:len(coi_prompts)] = COI classes
                      sources[-1] = background
-                     
-                     Example with coi_prompts=["airplane", "bird"]:
-                     sources[0] = airplane audio
-                     sources[1] = bird audio
-                     sources[2] = background audio
                      
                      Use get_coi_by_name() for named access.
         """
@@ -479,8 +474,8 @@ class TUSSInference(BaseSeparator):
             waveform: Input waveform tensor (T,) or (1, T)
 
         Returns:
-            sources: (n_sources, T) tensor where:
-                     sources[0:len(coi_prompts)] = COI classes (alphabetically sorted)
+            sources: (n_sources, T) tensor with sources in config prompt order:
+                     sources[0:len(coi_prompts)] = COI classes
                      sources[-1] = background
                      
                      Use get_coi_by_name() for named access.
@@ -542,15 +537,9 @@ class TUSSInference(BaseSeparator):
             segment: Input waveform (T,) of length segment_samples
 
         Returns:
-            sources: (n_sources, T) tensor where:
-                    sources[0:len(coi_prompts)] = COI classes (alphabetically sorted)
+            sources: (n_sources, T) tensor with sources in config prompt order:
+                    sources[0:len(coi_prompts)] = COI classes
                     sources[-1] = background
-                    
-                    Example with coi_prompts=["airplane", "bird", "car"]:
-                    sources[0] = airplane
-                    sources[1] = bird
-                    sources[2] = car
-                    sources[3] = background
         """
         # Match training: variance normalization only (no mean subtraction)
         std = segment.std() + 1e-8
@@ -576,31 +565,9 @@ class TUSSInference(BaseSeparator):
     ) -> torch.Tensor:
         """Process long audio with weighted overlap-add (WOLA).
 
-        Uses a Hann analysis window with 75% overlap (hop = segment_samples // 4).
-        The reconstruction follows the standard weighted-OLA formula
+        Uses a Hann window with 75% overlap (hop = N // 4) and reflective
+        padding to eliminate boundary attenuation."""
 
-            y[n] = Σ_k (x_k[n] * hann[n-kH]) / Σ_k hann[n-kH]^2
-
-        which is the minimum-norm inverse for redundant Hann frames. The Σhann²
-        denominator is COLA-flat in the steady-state interior at hop ≤ N/2.
-
-        Edge handling: the input is reflect-padded by ``segment_samples - hop``
-        on both sides before the OLA loop, so that the first and last output
-        samples are covered by the same number of overlapping windows as the
-        interior. The padded region is cropped after normalization. This
-        eliminates the boundary attenuation (and the corresponding edge boost
-        caused by dividing by a small Σhann² near n=0 and n=T-1) that the
-        previous unpadded implementation suffered from.
-
-        Args:
-            waveform: Input waveform (T,) where T > segment_samples
-            original_length: Original length to trim output to
-
-        Returns:
-            sources: (n_sources, T) tensor where:
-                    sources[0:len(coi_prompts)] = COI classes
-                    sources[-1] = background
-        """
         N = self.segment_samples
         hop = max(1, N // 4)
         # Pad both ends by N - hop so every original sample is covered by the

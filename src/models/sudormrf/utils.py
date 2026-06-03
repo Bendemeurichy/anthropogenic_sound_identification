@@ -29,14 +29,9 @@ def prepare_batch(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Prepare mixture and clean targets from source tensor.
 
-    Follows the same convention as the base SuDORMRF training script:
-      - The mixture input is normalized to zero-mean unit-variance.
-      - Each target source is normalized independently to zero-mean unit-variance.
-      - SI-SNR is scale-invariant, so additivity (sum(targets) == mixture) is
-        NOT required and NOT enforced. Enforcing it (joint normalization) was
-        found to create an easy local minimum where the model outputs the mixture
-        for all heads and still achieves artificially high SI-SNR on training
-        batches, while failing to separate on validation.
+    The mixture input is normalized to zero-mean unit-variance, and each target
+    source is independently normalized to zero-mean unit-variance.  SI-SNR is
+    scale-invariant, so additivity (sum(targets) == mixture) is not required.
 
     Args:
         sources: (B, n_src, T) tensor with COI sources and background (last channel)

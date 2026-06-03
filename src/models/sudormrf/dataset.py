@@ -292,16 +292,14 @@ class AudioDataset(Dataset):
                 orig_sr, total_frames = _get_audio_info(filepath)
                 self._file_native_info[filepath] = (orig_sr, total_frames)
             except Exception:
-                # Can't even read the header – load a bounded chunk and
-                # hope for the best.  Cap at 2× segment length so we
-                # never pull in the entire file.
+                # Fallback: use a bounded chunk since the header cannot be read.
                 max_load = self.segment_samples * 2
                 try:
                     waveform, sr = torchaudio.load(
                         filepath, frame_offset=0, num_frames=max_load
                     )
                 except Exception:
-                    # Absolute last resort – return silence
+                    # Return silence as a last-resort fallback.
                     return torch.zeros(self.segment_samples)
                 orig_sr = sr
                 total_frames = waveform.shape[-1]
@@ -348,8 +346,8 @@ class AudioDataset(Dataset):
                 filepath, frame_offset=offset, num_frames=int(seg_frames)
             )
         except Exception:
-            # Retry without offset constraints (some backends dislike
-            # frame_offset near EOF).  Still bounded to seg_frames.
+            # Retry from start of file when frame_offset is unsupported
+            # (some backends reject near-EOF offsets).
             try:
                 waveform, sr = torchaudio.load(
                     filepath, frame_offset=0, num_frames=int(seg_frames)

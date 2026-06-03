@@ -62,6 +62,7 @@ DEFAULT_CHUNK_SAMPLES = 320000  # 10 s @ 32 kHz
 
 
 def _validate_weight_file(path: Path, label: str = "Checkpoint") -> None:
+    """Check that a weight file exists and is not a Git LFS pointer."""
     if not path.exists():
         raise FileNotFoundError(f"{label} not found: {path}")
     if path.stat().st_size < 512:

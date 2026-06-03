@@ -300,6 +300,10 @@ class AudioDataset(Dataset):
     def _jittered_offset(
         self, base_offset: int, seg_frames: int | None, filepath: str
     ) -> int:
+        """Return base_offset with a small random jitter, clamped to file bounds.
+
+        The jitter is at most ±half-stride (in native-sr frames) to provide
+        training diversity while still systematically covering the file."""
         if seg_frames is None:
             return base_offset
         cached = self._file_native_info.get(filepath)

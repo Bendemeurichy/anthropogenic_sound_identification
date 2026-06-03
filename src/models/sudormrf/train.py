@@ -89,11 +89,6 @@ LOSS_EPS = 1e-8
 
 
 
-# =============================================================================
-# Training and Validation Loops
-# =============================================================================
-
-
 def train_epoch(
     model,
     dataloader,
@@ -293,9 +288,6 @@ def validate_epoch(
     """Validate for one epoch."""
     model.eval()
     running_loss, n_samples = 0.0, 0
-    # Split COI metrics into COI-present vs COI-absent (background-only) samples
-    # so the reported number reflects actual separation quality, not a blend of
-    # the two very different regimes.
     all_coi_present_sisnr: list[float] = []
     all_coi_absent_sisnr: list[float] = []
     all_bg_sisnr: list[float] = []
@@ -543,12 +535,6 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
         getattr(config.training, "pin_memory", False) and torch.cuda.is_available()
     )
 
-    # prefetch_factor controls how many batches each worker pre-loads into the
-    # shared-memory queue ahead of time.  The PyTorch default is 2, which means
-    # up to 2 * num_workers batches sit in Windows shared file mappings at once.
-    # Capping it at 2 (or allowing the user to lower it) keeps the number of
-    # simultaneous shared-memory handles small and reduces the risk of
-    # exhausting the Windows paging file (error 1455).
     prefetch_factor = (
         int(getattr(config.training, "prefetch_factor", 2)) if num_workers > 0 else None
     )
@@ -727,9 +713,6 @@ def train(config: Config, timestamp: str | None = None):
     history = {"train_loss": [], "val_loss": [], "grad_norms": []}
     start_epoch = 1
 
-    # ------------------------------------------------------------------ #
-    # Resume from last checkpoint if one exists in checkpoint_dir         #
-    # ------------------------------------------------------------------ #
     last_ckpt_path = checkpoint_dir / "last_checkpoint.pt"
     best_ckpt_path = checkpoint_dir / "best_model.pt"
     if last_ckpt_path.exists():
@@ -767,9 +750,6 @@ def train(config: Config, timestamp: str | None = None):
         epochs_without_improvement = 0
         if "history" in ckpt:
             history = ckpt["history"]
-        # Scheduler state was not saved in best_model.pt — fast-forward the
-        # freshly-created scheduler by stepping it global_step times so the
-        # LR curve continues from the correct position.
         print(
             f"  Fast-forwarding scheduler {global_step} steps to restore LR position..."
         )
@@ -858,9 +838,6 @@ def train(config: Config, timestamp: str | None = None):
             history["val_loss"].append(None)
             print(f"Train: {train_loss:.4f}")
 
-        # ------------------------------------------------------------------ #
-        # Save last checkpoint every epoch so training can be resumed        #
-        # ------------------------------------------------------------------ #
         last_ckpt = {
             "epoch": epoch,
             "global_step": global_step,
@@ -902,9 +879,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # ------------------------------------------------------------------ #
-    # Resume path: reuse the existing run directory as-is                 #
-    # ------------------------------------------------------------------ #
     if args.resume:
         resume_dir = Path(args.resume)
         if not resume_dir.is_dir():
@@ -935,17 +909,11 @@ def main():
         train(config, timestamp=timestamp)
         return
 
-    # ------------------------------------------------------------------ #
-    # Normal (fresh) path                                                  #
-    # ------------------------------------------------------------------ #
     config = Config.from_yaml(str(Path(args.config)))
     print("Configuration:")
     print(f"  Model: {config.model.type} ({config.model.num_blocks} blocks)")
     print(f"  Device: {config.training.device}")
 
-    # ------------------------------------------------------------------ #
-    # Check if using WebDataset mode                                       #
-    # ------------------------------------------------------------------ #
     use_webdataset = getattr(config.data, "use_webdataset", False)
     webdataset_path = getattr(config.data, "webdataset_path", "")
 
@@ -965,7 +933,6 @@ def main():
         print("  Data will be loaded directly from tar shards")
         print("=" * 70 + "\n")
         
-        # Set dummy df_path (not used in WebDataset mode but needed for validation)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         checkpoint_dir = Path(config.training.checkpoint_dir) / timestamp
         checkpoint_dir.mkdir(exist_ok=True, parents=True)
@@ -975,9 +942,6 @@ def main():
         train(config, timestamp=timestamp)
         return
 
-    # ------------------------------------------------------------------ #
-    # CSV-based mode: Load dataset metadata                               #
-    # ------------------------------------------------------------------ #
     print("\nLoading dataset metadata...")
     project_root = Path(__file__).parent.parent.parent.parent
     datasets_path = str(project_root / "data")
@@ -989,20 +953,6 @@ def main():
     print(f"Loaded {len(all_metadata)} total samples")
     print(f"Using {len(separation_metadata)} for separation training (80%)")
 
-    # ------------------------------------------------------------------
-    # Build the training dataset
-    #
-    # Multi-class (n_coi_classes > 1):
-    #   Each COIClassConfig entry defines one output head with its own label
-    #   set and an optional dataset identifier.  We call get_coi() per class,
-    #   optionally filter by dataset, tag each row with its class index, then
-    #   concatenate and call sample_non_coi() once with the full label union.
-    #   The coi_class column is assigned BEFORE sample_non_coi so it flows
-    #   through naturally; non-COI rows get coi_class=-1 via fillna().
-    #
-    # Single-class (n_coi_classes == 1):
-    #   Unchanged from the original single-class path.
-    # ------------------------------------------------------------------
     if config.data.n_coi_classes > 1:
         coi_class_cfgs = config.data.coi_classes
         if not coi_class_cfgs:

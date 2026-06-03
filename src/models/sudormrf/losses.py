@@ -57,20 +57,12 @@ def sisnr(est: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.T
     )
     sisnr_db = 10.0 * torch.log10(sisnr_lin + eps)
 
-    # Handle silent/weak targets
-    # For truly silent targets, reward low output energy with scores up to 12 dB.
-    #
-    # Key design constraints:
-    #   1. Standard SI-SNR gives zero gradient when target == 0 (s_true = 0 always),
-    #      so we need a separate energy-based penalty for silent targets.
-    #   2. Use MEAN energy (not sum) so the score is T-independent and comparable
-    #      in magnitude to typical SI-SNR values.
-    #   3. NO lower clamp here — the outer return clamp handles the reporting floor.
-    #      A min clamp here would kill the gradient whenever the score falls below it,
-    #      which for a unit-variance output (mean_energy ≈ 1) would be:
-    #          -10 * log10(1 + eps) ≈ 0 dB  → NOT clamped → gradient flows ✓
-    #      With the old sum-based formula and min=-30 clamp the score was always
-    #      ≈ -60 dB → clamped to -30 → zero gradient on every background-only sample.
+    # Handle silent/weak targets.
+    # Standard SI-SNR yields zero gradient when target == 0 (s_target = 0
+    # always), so silent targets use an energy-based score that rewards low
+    # output energy. Mean energy is used so the score is T-independent and
+    # comparable in magnitude to typical SI-SNR values. Weak targets are
+    # clamped to [-20, 20] dB to avoid amplifying noise.
     est_mean_energy = est_zm.pow(2).mean(dim=-1)
     silence_score = torch.clamp(-10.0 * torch.log10(est_mean_energy + eps), max=12.0)
     sisnr_db = torch.where(target_is_zero, silence_score, sisnr_db)

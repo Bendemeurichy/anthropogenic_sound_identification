@@ -85,16 +85,10 @@ def prepare_batch(
     mixture = (raw_mixture - mix_mean) / mix_std_safe
     mixture = torch.where(is_silent, torch.zeros_like(mixture), mixture)
 
-    # Normalise each clean source with the mixture's mean/std.
-    # Use mix_mean for all sources to preserve additivity:
-    # mixture = sum(norm_cois) + norm_bg
-    #
-    # Bug-fix: subtracting mix_mean from a zero-amplitude (absent) COI channel
-    # produces a small DC offset (0 - mix_mean) / mix_std \\u2260 0.  That phantom
-    # energy causes snr_with_zeroref_loss to treat the silent stream as active
-    # (ref_power > 0) and apply full SNR loss instead of the down-weighted
-    # zero-ref penalty.  Re-zero any channel that was silent before
-    # normalization so the loss function's coef mask fires correctly.
+    # Normalise each source with the mixture statistics.
+    # Silent COI channels must be re-zeroed after normalization to avoid
+    # phantom DC offsets that would trigger the full SNR loss instead of
+    # the zero-reference penalty.
     norm_cois = []
     for c in cois:
         # Capture silence before normalization (per sample in the batch).

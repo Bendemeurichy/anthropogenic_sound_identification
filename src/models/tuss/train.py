@@ -318,8 +318,7 @@ def train_epoch(
                 postfix[f"c{cls_i}"] = int(active_class_counts[cls_i])
         pbar.set_postfix(postfix)
 
-        # Reduce cache clearing frequency for better performance
-        # Only clear every 100 steps instead of 20
+        # Periodically release cached CUDA memory
         if str(device).startswith("cuda") and step_idx % 100 == 0:
             torch.cuda.empty_cache()
 
@@ -506,8 +505,8 @@ def validate_epoch(
             except Exception:
                 pbar.set_postfix(loss=f"{batch_loss:.4f}")
 
-            # Reduce cache clearing frequency for better performance
             del outputs, loss, mixture, clean_wavs
+            # Periodically release cached CUDA memory
             if str(device).startswith("cuda") and val_step % 100 == 0:
                 torch.cuda.empty_cache()
 
@@ -840,11 +839,7 @@ def create_model(
         if prompt_name not in prompts_dict:
             init_val = _get_init_vector(init_from)
             # Add noise so each new COI prompt starts from a different position
-            # even if they all init from the same source (e.g., "sfx")
-            # Increased from 0.15 to 0.50 based on divergence analysis:
-            #   - At 0.15: prompts stayed 84% similar to init source, only 65% similar to each other
-            #   - Target: 30-45% inter-prompt similarity for excellent separation
-            #   - 0.50 provides strong initial divergence while maintaining pretrained benefits
+            # even if they all initialize from the same source (e.g., "sfx").
             noise = torch.randn_like(init_val) * 0.50
             prompts_dict[prompt_name] = torch.nn.Parameter(init_val + noise)
             newly_injected.append(prompt_name)

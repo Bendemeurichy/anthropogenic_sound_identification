@@ -605,10 +605,6 @@ def prepare_dataset(config: FinetuneConfig, checkpoint_dir: Path) -> str:
     sep_metadata, _ = split_seperation_classification(all_metadata)
     print(f"Loaded {len(all_metadata)} samples, {len(sep_metadata)} for separation")
 
-    # pull the list of semantic labels from the configuration object rather than
-    # keeping it hard‑coded here.  The dataclass default means the attribute
-    # will always exist, but we enforce that it is non‑empty so the user is
-    # reminded to specify something sensible.
     target_classes = getattr(config.data, "target_classes", None)
     if not target_classes:
         raise ValueError(

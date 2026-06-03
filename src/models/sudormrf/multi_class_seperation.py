@@ -107,10 +107,7 @@ def wrap_model_for_multiclass(
 ):
     """Wraps a SuDoRM-RF model with a Multi-class COI separation head.
 
-    Fixes applied vs. the original implementation:
-    - Decoder is rebuilt to match the new n_src (Bug 1 fix).
-    - MaskEstimationBranch is used so num_conv_blocks / expanded_channels are
-      respected consistently with the single-class path (Bug 5 fix).
+    Restructures the mask_net and decoder for n_coi_classes + 1 sources.
 
     Args:
         model: SuDoRM-RF model instance (SuDORMRF or GroupCommSudoRmRf)
@@ -162,14 +159,9 @@ def wrap_model_for_multiclass(
     # x correctly: x.view(B, num_sources, enc_num_basis, T)
     model.num_sources = n_src
 
-    # ------------------------------------------------------------------
-    # Replace decoder (Bug 1 fix)
-    #
+    # Replace decoder to match the new number of sources.
     # The decoder's in_channels must equal n_src * enc_num_basis (times
-    # in_audio_channels for GroupCommSudoRmRf).  The original decoder was
-    # created with num_sources=2; leaving it unchanged causes a shape
-    # mismatch at runtime for any n_coi_classes != 1.
-    # ------------------------------------------------------------------
+    # in_audio_channels for GroupCommSudoRmRf).
     in_audio_channels = getattr(model, "in_audio_channels", 1)
     model.decoder = nn.ConvTranspose1d(
         in_channels=out_channels * n_src * in_audio_channels,
