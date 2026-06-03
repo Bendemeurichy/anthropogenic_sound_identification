@@ -42,7 +42,7 @@ Each model has a different command-line interface for training:
    - Solution: Temporarily replace training_config.yaml, restore after trial
    - Note: Loads pretrained TUSS model from pretrained_path in config
 
-3. CLAPSep (train_text_coi.py):
+3. CLAPSep (train.py):
    - Accepts: --config <path_to_yaml>
    - Uses text prompts + LoRA fine-tuning for parameter-efficient adaptation
    - Solution: Create temporary YAML file with trial config (like SuDoRMRF)
@@ -267,7 +267,7 @@ def run_training(
     IMPORTANT: Each model has different command-line interfaces:
     - SuDoRMRF: Accepts --config argument for YAML config file
     - TUSS: Reads from hardcoded training_config.yaml (no --config arg)
-    - CLAPSep: Accepts --config argument (uses train_text_coi.py)
+    - CLAPSep: Accepts --config argument (uses train.py)
 
     This function handles these differences by:
     1. SuDoRMRF: Writing config to temp file and passing via --config
@@ -345,7 +345,7 @@ def run_training(
             cleanup_path = None  # Will restore from backup instead
 
         elif model_name == "clapsep":
-            # CLAPSep uses train_text_coi.py with text prompts and LoRA
+            # CLAPSep uses train.py with text prompts and LoRA
             # Accepts --config argument (like SuDoRMRF)
             config["training"]["device"] = device
 
@@ -355,7 +355,7 @@ def run_training(
                 yaml.dump(config, f, default_flow_style=False)
                 config_path = f.name
 
-            script = str(_src_dir / "models" / "clapsep" / "train_text_coi.py")
+            script = str(_src_dir / "models" / "clapsep" / "train.py")
             
             # Build command with config file and optional overrides
             cmd = [sys.executable, script, "--config", config_path, "--device", device]

@@ -174,4 +174,4 @@ Expected on plane detection task:
 - [FINETUNING.md](FINETUNING.md) - Detailed training guide
 - [PANN GitHub](https://github.com/qiuqiangkong/audioset_tagging_cnn)
 - [Pretrained Weights](https://zenodo.org/record/3987831)
-- `plane_clasifier/` - YAMNet-based implementation for comparison
+- `plane_classifier/` - YAMNet-based implementation for comparison

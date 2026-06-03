@@ -47,7 +47,7 @@ from tqdm import tqdm
 # Add paths for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(
-    0, str(Path(__file__).parent / "classification_models" / "plane_clasifier")
+    0, str(Path(__file__).parent / "classification_models" / "plane_classifier")
 )
 
 from src.label_loading.coi_labels import (
@@ -72,7 +72,7 @@ from src.models.sudormrf.inference import SeparationInference
 from src.models.tuss.inference import COI_HEAD_INDEX as TUSS_COI_HEAD
 from src.models.tuss.inference import TUSSInference
 from src.pipeline.separation_pipeline import SeparationPipeline
-from src.validation_functions.classification_models.plane_clasifier.config import (
+from src.validation_functions.classification_models.plane_classifier.config import (
     TrainingConfig,
 )
 from src.validation_functions.classification_models.Classifier import (
@@ -621,7 +621,7 @@ class ValidationPipeline:
     SEP_CHECKPOINT = PROJECT_ROOT / "src/models/sudormrf/checkpoints/best_model.pt"
     CLS_WEIGHTS = (
         PROJECT_ROOT
-        / "src/validation_functions/classification_models/plane_clasifier/results/checkpoints/final_model.weights.h5"
+        / "src/validation_functions/classification_models/plane_classifier/results/checkpoints/final_model.weights.h5"
     )
     DATA_CSV = PROJECT_ROOT / "src/models/sudormrf/checkpoints/separation_dataset.csv"
 
@@ -3372,7 +3372,7 @@ def main():
     SEP_CHECKPOINT = PROJECT_ROOT / "src/models/tuss/checkpoints/multi_coi_29_04"
     CLS_WEIGHTS = (
         PROJECT_ROOT
-        / "src/validation_functions/classification_models/plane_clasifier/results/checkpoints/final_model.weights.h5"
+        / "src/validation_functions/classification_models/plane_classifier/results/checkpoints/final_model.weights.h5"
     )
     # Trains
     DATA_CSV = (

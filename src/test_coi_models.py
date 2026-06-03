@@ -261,7 +261,7 @@ def test_clapsep_model(clap_checkpoint: str):
 
     from common.coi_training import COIWeightedLoss, prepare_batch
     from models.clapsep.base.model.CLAPSep_decoder import HTSAT_Decoder
-    from models.clapsep.train_coi import COICLAPSep, COICLAPSepDecoder
+    from models.clapsep.coi_model import COICLAPSep, COICLAPSepDecoder
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n1. Using device: {device}")

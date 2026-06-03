@@ -1,0 +1,14 @@
+{
+  "best_value": 0.9635044932365417,
+  "best_params": {
+    "phase1_lr": 0.003739071347266895,
+    "phase2_lr": 3.6354455290287045e-06,
+    "batch_size": 64,
+    "dropout_rate_1": 0.2380903303269794,
+    "dropout_rate_2": 0.2768290173703309,
+    "label_smoothing": 0.056975723209947024,
+    "class_weight_mode": null
+  },
+  "n_trials": 20,
+  "study_name": "plane_classifier"
+}

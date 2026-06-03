@@ -112,177 +112,261 @@ def print_checkpoint_info(checkpoint_path: str | Path, verbose: bool = False):
     return info
 
 
-def analyze_prompt_divergence(checkpoint_path: str | Path, target_prompts: list[str] | None = None):
-    """Analyze how much prompts have diverged from each other.
-    
-    Args:
-        checkpoint_path: Path to the .pt checkpoint file
-        target_prompts: Optional list of specific prompts to analyze. If None, analyzes all.
-    """
+def _cosine_similarity(a, b):
+    a_flat = a.flatten()
+    b_flat = b.flatten()
+    dot = (a_flat @ b_flat).item()
+    norm_a = torch.norm(a_flat).item()
+    norm_b = torch.norm(b_flat).item()
+    return dot / (norm_a * norm_b + 1e-8)
+
+
+def _euclidean_distance(a, b):
+    return torch.norm(a.flatten() - b.flatten()).item()
+
+
+def _load_and_compute_divergence(checkpoint_path, target_prompts=None):
     checkpoint_path = Path(checkpoint_path)
-    
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    
-    print(f"\nLoading checkpoint: {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    
-    # Extract prompt vectors from model state
     model_state = ckpt.get("model_state_dict", {})
-    
+
     prompts = {}
     for key, value in model_state.items():
         if key.startswith("separator.prompts."):
             prompt_name = key.replace("separator.prompts.", "", 1)
             prompts[prompt_name] = value
-    
+
     if not prompts:
         print("❌ No prompts found in checkpoint!")
-        return
-    
-    # Filter to target prompts if specified
+        return None
+
     if target_prompts:
         prompts = {name: vec for name, vec in prompts.items() if name in target_prompts}
         if not prompts:
             print(f"❌ None of the target prompts {target_prompts} found in checkpoint!")
-            return
-    
+            return None
+
+    prompt_names = sorted(prompts.keys())
+    n = len(prompt_names)
+
+    if n < 2:
+        print("\n⚠ Need at least 2 prompts for divergence analysis")
+        return None
+
+    cosine_matrix = np.zeros((n, n))
+    euclidean_matrix = np.zeros((n, n))
+    similarities = []
+    distances = []
+    pairwise_info = []
+
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                cosine_matrix[i, j] = 1.0
+                euclidean_matrix[i, j] = 0.0
+            else:
+                sim = _cosine_similarity(prompts[prompt_names[i]], prompts[prompt_names[j]])
+                dist = _euclidean_distance(prompts[prompt_names[i]], prompts[prompt_names[j]])
+                cosine_matrix[i, j] = sim
+                euclidean_matrix[i, j] = dist
+                if i < j:
+                    similarities.append(sim)
+                    distances.append(dist)
+                    pairwise_info.append((prompt_names[i], prompt_names[j], sim, dist))
+
+    pairwise_info.sort(key=lambda x: x[2], reverse=True)
+
+    return {
+        "prompts": prompts,
+        "prompt_names": prompt_names,
+        "n": n,
+        "cosine_matrix": cosine_matrix,
+        "euclidean_matrix": euclidean_matrix,
+        "similarities": similarities,
+        "distances": distances,
+        "pairwise_info": pairwise_info,
+        "avg_sim": float(np.mean(similarities)),
+        "std_sim": float(np.std(similarities)),
+        "min_sim": float(np.min(similarities)),
+        "max_sim": float(np.max(similarities)),
+        "avg_dist": float(np.mean(distances)),
+        "std_dist": float(np.std(distances)),
+        "min_dist": float(np.min(distances)),
+        "max_dist": float(np.max(distances)),
+        "n_pairs": len(similarities),
+        "ckpt": ckpt,
+    }
+
+
+def _format_divergence_tables(results):
+    prompt_names = results["prompt_names"]
+    cosine_matrix = results["cosine_matrix"]
+    euclidean_matrix = results["euclidean_matrix"]
+    n = results["n"]
+
+    lines = []
+
+    lines.append(f"\n{'─'*70}")
+    lines.append("Cosine Similarity (1.0 = identical, 0.0 = orthogonal, -1.0 = opposite)")
+    lines.append(f"{'─'*70}")
+
+    header = f"{'':20}"
+    for name in prompt_names:
+        header += f"{name[:15]:>15}"
+    lines.append(header)
+
+    for i, name_i in enumerate(prompt_names):
+        row = f"{name_i:20}"
+        for j in range(n):
+            if i == j:
+                row += f"{'1.0000':>15}"
+            else:
+                sim = cosine_matrix[i, j]
+                if sim > 0.95:
+                    marker = "⚠️"
+                elif sim > 0.90:
+                    marker = "⚠ "
+                elif sim < 0.70:
+                    marker = "✓ "
+                else:
+                    marker = "  "
+                row += f"{marker}{sim:>13.4f}"
+        lines.append(row)
+
+    lines.append(f"\n{'─'*70}")
+    lines.append("Euclidean Distance (higher = more diverged)")
+    lines.append(f"{'─'*70}")
+
+    header = f"{'':20}"
+    for name in prompt_names:
+        header += f"{name[:15]:>15}"
+    lines.append(header)
+
+    for i, name_i in enumerate(prompt_names):
+        row = f"{name_i:20}"
+        for j in range(n):
+            if i == j:
+                row += f"{'0.0000':>15}"
+            else:
+                dist = euclidean_matrix[i, j]
+                if dist < 1.0:
+                    marker = "⚠️"
+                elif dist < 2.0:
+                    marker = "⚠ "
+                elif dist > 5.0:
+                    marker = "✓ "
+                else:
+                    marker = "  "
+                row += f"{marker}{dist:>13.4f}"
+        lines.append(row)
+
+    return "\n".join(lines)
+
+
+def _interpret_divergence(results):
+    avg_sim = results["avg_sim"]
+    ckpt = results["ckpt"]
+
+    lines = []
+    lines.append(f"\n{'='*70}")
+    lines.append("INTERPRETATION")
+    lines.append(f"{'='*70}\n")
+
+    if avg_sim > 0.95:
+        lines.append("❌ CRITICAL PROBLEM: Prompts are nearly identical!")
+        lines.append("   Average cosine similarity > 0.95 indicates prompts have NOT diverged.\n")
+        lines.append("   Root causes:")
+        lines.append("   • Learning rate too low → prompts can't move away from initialization")
+        lines.append("   • Weight decay too high → regularization prevents divergence")
+        lines.append("   • Initialization noise too small → prompts start too close together")
+        lines.append("   • Prompts are frozen or not receiving gradients\n")
+        lines.append("   Recommended fixes:")
+        lines.append(f"   1. Increase learning rate: 1e-4 or 2e-4 (currently using {ckpt.get('config', {}).get('training', {}).get('lr', 'unknown')})")
+        lines.append("   2. Increase initialization noise: 0.15-0.25 (in train.py)")
+        lines.append("   3. Reduce weight decay temporarily: 5e-3")
+        lines.append("   4. Check that prompts have requires_grad=True")
+        lines.append("   5. Verify gradients are flowing to prompt parameters")
+
+    elif avg_sim > 0.90:
+        lines.append("⚠️  WARNING: Prompts are quite similar")
+        lines.append("   Average cosine similarity > 0.90 indicates insufficient divergence.\n")
+        lines.append("   Prompts have started to separate but need more training or stronger signals.\n")
+        lines.append("   Recommended adjustments:")
+        lines.append(f"   1. Increase learning rate: 1e-4 (currently using {ckpt.get('config', {}).get('training', {}).get('lr', 'unknown')})")
+        lines.append("   2. Increase initialization noise: 0.10-0.15 (in train.py)")
+        lines.append("   3. Continue training for more epochs")
+        lines.append("   4. Consider class-specific data augmentation")
+
+    elif avg_sim > 0.80:
+        lines.append("⚠  MODERATE: Prompts show some divergence")
+        lines.append("   Average cosine similarity 0.80-0.90 indicates partial separation.\n")
+        lines.append("   This may be acceptable depending on:")
+        lines.append("   • How acoustically similar your classes are (airplane vs birds = quite different)")
+        lines.append("   • How many training epochs have run")
+        lines.append("   • Whether separation metrics are good enough\n")
+        lines.append("   Consider:")
+        lines.append("   • Continuing training to see if divergence improves")
+        lines.append("   • Checking per-class separation performance")
+
+    elif avg_sim > 0.70:
+        lines.append("✓ ACCEPTABLE: Prompts have moderate divergence")
+        lines.append("   Average cosine similarity 0.70-0.80 indicates reasonable separation.\n")
+        lines.append("   Classes are distinguishable but share some common features.")
+        lines.append("   This is often appropriate when classes have acoustic overlap.")
+
+    else:
+        lines.append("✅ EXCELLENT: Prompts have diverged well!")
+        lines.append("   Average cosine similarity < 0.70 indicates strong separation.\n")
+        lines.append("   Prompts have learned distinct representations for each class.")
+        lines.append("   This suggests good class discrimination capability.")
+
+    return "\n".join(lines)
+
+
+def analyze_prompt_divergence(checkpoint_path: str | Path, target_prompts: list[str] | None = None):
+    """Analyze how much prompts have diverged from each other.
+
+    Args:
+        checkpoint_path: Path to the .pt checkpoint file
+        target_prompts: Optional list of specific prompts to analyze. If None, analyzes all.
+    """
+    checkpoint_path = Path(checkpoint_path)
+
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    print(f"\nLoading checkpoint: {checkpoint_path}")
+    results = _load_and_compute_divergence(checkpoint_path, target_prompts)
+    if results is None:
+        return
+
     print(f"\n{'='*70}")
     print(f"PROMPT DIVERGENCE ANALYSIS")
     print(f"{'='*70}")
-    print(f"\nAnalyzing {len(prompts)} prompts:")
-    for name, vec in prompts.items():
+    print(f"\nAnalyzing {results['n']} prompts:")
+    for name in results["prompt_names"]:
+        vec = results["prompts"][name]
         norm = torch.norm(vec.flatten()).item()
         print(f"  {name:20s} shape: {tuple(vec.shape)}, L2 norm: {norm:.4f}")
-    
-    # Compute pairwise similarities and distances
-    prompt_names = sorted(prompts.keys())
-    n = len(prompt_names)
-    
-    if n < 2:
-        print("\n⚠ Need at least 2 prompts for divergence analysis")
-        return
-    
-    # Helper functions
-    def cosine_similarity(a, b):
-        a_flat = a.flatten()
-        b_flat = b.flatten()
-        dot = (a_flat @ b_flat).item()
-        norm_a = torch.norm(a_flat).item()
-        norm_b = torch.norm(b_flat).item()
-        return dot / (norm_a * norm_b + 1e-8)
-    
-    def euclidean_distance(a, b):
-        return torch.norm(a.flatten() - b.flatten()).item()
-    
-    # Cosine similarity matrix
-    print(f"\n{'─'*70}")
-    print("Cosine Similarity (1.0 = identical, 0.0 = orthogonal, -1.0 = opposite)")
-    print(f"{'─'*70}")
-    
-    # Header
-    print(f"{'':20}", end="")
-    for name in prompt_names:
-        print(f"{name[:15]:>15}", end="")
-    print()
-    
-    similarities = []
-    distances = []
-    
-    for i, name_i in enumerate(prompt_names):
-        print(f"{name_i:20}", end="")
-        for j, name_j in enumerate(prompt_names):
-            if i == j:
-                print(f"{'1.0000':>15}", end="")
-            else:
-                sim = cosine_similarity(prompts[name_i], prompts[name_j])
-                if i < j:  # Only collect upper triangle for statistics
-                    similarities.append(sim)
-                
-                # Color code based on similarity
-                if sim > 0.95:
-                    marker = "⚠️"  # Very similar - problem
-                elif sim > 0.90:
-                    marker = "⚠ "  # Quite similar - warning
-                elif sim < 0.70:
-                    marker = "✓ "  # Good divergence
-                else:
-                    marker = "  "  # Moderate
-                
-                print(f"{marker}{sim:>13.4f}", end="")
-        print()
-    
-    # Euclidean distance matrix
-    print(f"\n{'─'*70}")
-    print("Euclidean Distance (higher = more diverged)")
-    print(f"{'─'*70}")
-    
-    # Header
-    print(f"{'':20}", end="")
-    for name in prompt_names:
-        print(f"{name[:15]:>15}", end="")
-    print()
-    
-    for i, name_i in enumerate(prompt_names):
-        print(f"{name_i:20}", end="")
-        for j, name_j in enumerate(prompt_names):
-            if i == j:
-                print(f"{'0.0000':>15}", end="")
-            else:
-                dist = euclidean_distance(prompts[name_i], prompts[name_j])
-                if i < j:  # Only collect upper triangle for statistics
-                    distances.append(dist)
-                
-                # Color code based on distance
-                if dist < 1.0:
-                    marker = "⚠️"  # Very close - problem
-                elif dist < 2.0:
-                    marker = "⚠ "  # Quite close - warning
-                elif dist > 5.0:
-                    marker = "✓ "  # Good distance
-                else:
-                    marker = "  "  # Moderate
-                
-                print(f"{marker}{dist:>13.4f}", end="")
-        print()
-    
-    # Summary statistics
+
+    print(_format_divergence_tables(results))
+
     print(f"\n{'='*70}")
     print("SUMMARY STATISTICS")
     print(f"{'='*70}")
-    
+
+    similarities = results["similarities"]
     if similarities:
-        avg_sim = np.mean(similarities)
-        std_sim = np.std(similarities)
-        min_sim = np.min(similarities)
-        max_sim = np.max(similarities)
-        
-        avg_dist = np.mean(distances)
-        std_dist = np.std(distances)
-        min_dist = np.min(distances)
-        max_dist = np.max(distances)
-        
-        print(f"\nPairwise Comparisons ({len(similarities)} pairs):")
+        print(f"\nPairwise Comparisons ({results['n_pairs']} pairs):")
         print(f"  Cosine Similarity:")
-        print(f"    Mean:  {avg_sim:.4f} ± {std_sim:.4f}")
-        print(f"    Range: [{min_sim:.4f}, {max_sim:.4f}]")
+        print(f"    Mean:  {results['avg_sim']:.4f} ± {results['std_sim']:.4f}")
+        print(f"    Range: [{results['min_sim']:.4f}, {results['max_sim']:.4f}]")
         print(f"\n  Euclidean Distance:")
-        print(f"    Mean:  {avg_dist:.4f} ± {std_dist:.4f}")
-        print(f"    Range: [{min_dist:.4f}, {max_dist:.4f}]")
-        
-        # Detailed pairwise info
+        print(f"    Mean:  {results['avg_dist']:.4f} ± {results['std_dist']:.4f}")
+        print(f"    Range: [{results['min_dist']:.4f}, {results['max_dist']:.4f}]")
+
         print(f"\nDetailed Pairwise Analysis:")
-        pairwise_info = []
-        for i in range(n):
-            for j in range(i+1, n):
-                sim = cosine_similarity(prompts[prompt_names[i]], prompts[prompt_names[j]])
-                dist = euclidean_distance(prompts[prompt_names[i]], prompts[prompt_names[j]])
-                pairwise_info.append((prompt_names[i], prompt_names[j], sim, dist))
-        
-        # Sort by similarity (most similar first = potential problem)
-        pairwise_info.sort(key=lambda x: x[2], reverse=True)
-        
-        for name_i, name_j, sim, dist in pairwise_info:
+        for name_i, name_j, sim, dist in results["pairwise_info"]:
             status = ""
             if sim > 0.95:
                 status = "❌ TOO SIMILAR"
@@ -290,74 +374,23 @@ def analyze_prompt_divergence(checkpoint_path: str | Path, target_prompts: list[
                 status = "⚠️  WARNING"
             elif sim < 0.70:
                 status = "✓ GOOD"
-            
+
             print(f"  {name_i:15s} <-> {name_j:15s}  |  cos: {sim:6.4f}  |  dist: {dist:6.4f}  {status}")
-        
-        # Interpretation
-        print(f"\n{'='*70}")
-        print("INTERPRETATION")
-        print(f"{'='*70}\n")
-        
-        if avg_sim > 0.95:
-            print("❌ CRITICAL PROBLEM: Prompts are nearly identical!")
-            print("   Average cosine similarity > 0.95 indicates prompts have NOT diverged.\n")
-            print("   Root causes:")
-            print("   • Learning rate too low → prompts can't move away from initialization")
-            print("   • Weight decay too high → regularization prevents divergence")
-            print("   • Initialization noise too small → prompts start too close together")
-            print("   • Prompts are frozen or not receiving gradients\n")
-            print("   Recommended fixes:")
-            print(f"   1. Increase learning rate: 1e-4 or 2e-4 (currently using {ckpt.get('config', {}).get('training', {}).get('lr', 'unknown')})")
-            print("   2. Increase initialization noise: 0.15-0.25 (in train.py)")
-            print("   3. Reduce weight decay temporarily: 5e-3")
-            print("   4. Check that prompts have requires_grad=True")
-            print("   5. Verify gradients are flowing to prompt parameters")
-            
-        elif avg_sim > 0.90:
-            print("⚠️  WARNING: Prompts are quite similar")
-            print("   Average cosine similarity > 0.90 indicates insufficient divergence.\n")
-            print("   Prompts have started to separate but need more training or stronger signals.\n")
-            print("   Recommended adjustments:")
-            print(f"   1. Increase learning rate: 1e-4 (currently using {ckpt.get('config', {}).get('training', {}).get('lr', 'unknown')})")
-            print("   2. Increase initialization noise: 0.10-0.15 (in train.py)")
-            print("   3. Continue training for more epochs")
-            print("   4. Consider class-specific data augmentation")
-            
-        elif avg_sim > 0.80:
-            print("⚠  MODERATE: Prompts show some divergence")
-            print("   Average cosine similarity 0.80-0.90 indicates partial separation.\n")
-            print("   This may be acceptable depending on:")
-            print("   • How acoustically similar your classes are (airplane vs birds = quite different)")
-            print("   • How many training epochs have run")
-            print("   • Whether separation metrics are good enough\n")
-            print("   Consider:")
-            print("   • Continuing training to see if divergence improves")
-            print("   • Checking per-class separation performance")
-            
-        elif avg_sim > 0.70:
-            print("✓ ACCEPTABLE: Prompts have moderate divergence")
-            print("   Average cosine similarity 0.70-0.80 indicates reasonable separation.\n")
-            print("   Classes are distinguishable but share some common features.")
-            print("   This is often appropriate when classes have acoustic overlap.")
-            
-        else:
-            print("✅ EXCELLENT: Prompts have diverged well!")
-            print("   Average cosine similarity < 0.70 indicates strong separation.\n")
-            print("   Prompts have learned distinct representations for each class.")
-            print("   This suggests good class discrimination capability.")
-        
-        # Training info from checkpoint
-        print(f"\n{'─'*70}")
-        print("Checkpoint Training Info:")
-        print(f"{'─'*70}")
-        config = ckpt.get("config", {})
-        training_cfg = config.get("training", {})
-        print(f"  Learning rate: {training_cfg.get('lr', 'unknown')}")
-        print(f"  Weight decay: {training_cfg.get('weight_decay', 'unknown')}")
-        print(f"  Epochs trained: {ckpt.get('epoch', 'unknown')}")
-        print(f"  Global steps: {ckpt.get('global_step', 'unknown')}")
-        print(f"  Best val loss: {ckpt.get('val_loss', 'unknown')}")
-        
+
+    print(_interpret_divergence(results))
+
+    ckpt = results["ckpt"]
+    print(f"\n{'─'*70}")
+    print("Checkpoint Training Info:")
+    print(f"{'─'*70}")
+    config = ckpt.get("config", {})
+    training_cfg = config.get("training", {})
+    print(f"  Learning rate: {training_cfg.get('lr', 'unknown')}")
+    print(f"  Weight decay: {training_cfg.get('weight_decay', 'unknown')}")
+    print(f"  Epochs trained: {ckpt.get('epoch', 'unknown')}")
+    print(f"  Global steps: {ckpt.get('global_step', 'unknown')}")
+    print(f"  Best val loss: {ckpt.get('val_loss', 'unknown')}")
+
     print(f"\n{'='*70}\n")
 
 

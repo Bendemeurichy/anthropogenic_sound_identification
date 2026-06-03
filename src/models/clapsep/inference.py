@@ -3,7 +3,7 @@ Inference module for CLAPSep separation model.
 
 Supports:
   1. Pretrained text-query model (HuggingFace checkpoint)
-  2. COI-trained models (from train_coi.py Lightning checkpoints)
+  2. COI-trained models (from train.py Lightning checkpoints)
 
 Usage:
     sep = CLAPSepInference.from_pretrained(device="cuda")
@@ -74,75 +74,84 @@ def _validate_weight_file(path: Path, label: str = "Checkpoint") -> None:
             pass
 
 
-def _import_clapsep_class():
-    """Import CLAPSep from checkpoint dir, falling back to base dir.
+def _make_synthetic_package(checkpoint_dir: Path, pkg_name: str = "_clapsep_ckpt_pkg"):
+    """Create a synthetic package so that relative imports resolve correctly."""
+    import types
 
-    Uses importlib.util to load modules directly from file paths, avoiding
-    conflicts with other 'model' packages on sys.path.
+    if pkg_name in sys.modules:
+        return pkg_name
+
+    pkg = types.ModuleType(pkg_name)
+    pkg.__path__ = [str(checkpoint_dir)]
+    pkg.__package__ = pkg_name
+    sys.modules[pkg_name] = pkg
+    return pkg_name
+
+
+def _try_import_from_checkpoint_dir(checkpoint_dir: Path):
+    """Try importing CLAPSep from a checkpoint directory.
+
+    Returns the CLAPSep class if successful, or None.
     """
     import importlib.util
 
-    # --- Attempt 1: Load from checkpoint/CLAPSep/model/CLAPSep.py ---------
-    ckpt_clapsep_py = _CKPT_MODEL_DIR / "CLAPSep.py"
-    ckpt_decoder_py = _CKPT_MODEL_DIR / "CLAPSep_decoder.py"
+    clapsep_py = checkpoint_dir / "CLAPSep.py"
+    decoder_py = checkpoint_dir / "CLAPSep_decoder.py"
 
-    if ckpt_clapsep_py.exists() and ckpt_decoder_py.exists():
-        try:
-            import types
+    if not (clapsep_py.exists() and decoder_py.exists()):
+        return None
 
-            # Create a synthetic package so that relative imports
-            # (e.g. ``from .CLAPSep_decoder import …``) resolve correctly.
-            pkg_name = "_clapsep_ckpt_pkg"
+    try:
+        pkg_name = _make_synthetic_package(checkpoint_dir)
 
-            if pkg_name not in sys.modules:
-                pkg = types.ModuleType(pkg_name)
-                pkg.__path__ = [str(_CKPT_MODEL_DIR)]
-                pkg.__package__ = pkg_name
-                sys.modules[pkg_name] = pkg
-
-            # -- Load decoder as a sub-module of the synthetic package ------
-            decoder_fqn = f"{pkg_name}.CLAPSep_decoder"
-            if decoder_fqn not in sys.modules:
-                decoder_spec = importlib.util.spec_from_file_location(
-                    decoder_fqn,
-                    str(ckpt_decoder_py),
-                    submodule_search_locations=[],
-                )
-                if decoder_spec and decoder_spec.loader:
-                    decoder_module = importlib.util.module_from_spec(decoder_spec)
-                    decoder_module.__package__ = pkg_name
-                    sys.modules[decoder_fqn] = decoder_module
-                    decoder_spec.loader.exec_module(decoder_module)
-
-            # -- Load CLAPSep as a sub-module of the synthetic package ------
-            clapsep_fqn = f"{pkg_name}.CLAPSep"
-            clapsep_spec = importlib.util.spec_from_file_location(
-                clapsep_fqn,
-                str(ckpt_clapsep_py),
+        # -- Load decoder as a sub-module of the synthetic package ------
+        decoder_fqn = f"{pkg_name}.CLAPSep_decoder"
+        if decoder_fqn not in sys.modules:
+            decoder_spec = importlib.util.spec_from_file_location(
+                decoder_fqn,
+                str(decoder_py),
                 submodule_search_locations=[],
             )
-            if clapsep_spec and clapsep_spec.loader:
-                clapsep_module = importlib.util.module_from_spec(clapsep_spec)
-                clapsep_module.__package__ = pkg_name
-                sys.modules[clapsep_fqn] = clapsep_module
-                clapsep_spec.loader.exec_module(clapsep_module)
+            if decoder_spec and decoder_spec.loader:
+                decoder_module = importlib.util.module_from_spec(decoder_spec)
+                decoder_module.__package__ = pkg_name
+                sys.modules[decoder_fqn] = decoder_module
+                decoder_spec.loader.exec_module(decoder_module)
 
-                # Extract and return the CLAPSep class
-                if hasattr(clapsep_module, "CLAPSep"):
-                    return clapsep_module.CLAPSep
-        except Exception as e:
-            # If checkpoint loading fails, fall through to base model
-            import traceback
-            import warnings
+        # -- Load CLAPSep as a sub-module of the synthetic package ------
+        clapsep_fqn = f"{pkg_name}.CLAPSep"
+        clapsep_spec = importlib.util.spec_from_file_location(
+            clapsep_fqn,
+            str(clapsep_py),
+            submodule_search_locations=[],
+        )
+        if clapsep_spec and clapsep_spec.loader:
+            clapsep_module = importlib.util.module_from_spec(clapsep_spec)
+            clapsep_module.__package__ = pkg_name
+            sys.modules[clapsep_fqn] = clapsep_module
+            clapsep_spec.loader.exec_module(clapsep_module)
 
-            print(f"[CLAPSep] Failed to load from checkpoint: {e}", file=sys.stderr)
-            traceback.print_exc()
-            warnings.warn(
-                f"Failed to load CLAPSep from checkpoint: {e}. "
-                f"Falling back to base model."
-            )
+            if hasattr(clapsep_module, "CLAPSep"):
+                return clapsep_module.CLAPSep
+    except Exception as e:
+        import traceback
+        import warnings
 
-    # --- Attempt 2: Load from base/model/CLAPSep.py ------------------------
+        print(f"[CLAPSep] Failed to load from checkpoint: {e}", file=sys.stderr)
+        traceback.print_exc()
+        warnings.warn(
+            f"Failed to load CLAPSep from checkpoint: {e}. "
+            f"Falling back to base model."
+        )
+
+    return None
+
+
+def _try_import_from_base():
+    """Try importing CLAPSep from base/model/CLAPSep.py.
+
+    Returns the CLAPSep class if successful, or None.
+    """
     try:
         from .base.model.CLAPSep import CLAPSep  # type: ignore
 
@@ -152,6 +161,25 @@ def _import_clapsep_class():
         import traceback
 
         traceback.print_exc()
+
+    return None
+
+
+def _import_clapsep_class():
+    """Import CLAPSep from checkpoint dir, falling back to base dir.
+
+    Uses importlib.util to load modules directly from file paths, avoiding
+    conflicts with other 'model' packages on sys.path.
+    """
+    # --- Attempt 1: Load from checkpoint/CLAPSep/model/ ---------
+    result = _try_import_from_checkpoint_dir(_CKPT_MODEL_DIR)
+    if result is not None:
+        return result
+
+    # --- Attempt 2: Load from base/model/ ------------------------
+    result = _try_import_from_base()
+    if result is not None:
+        return result
 
     # --- All attempts failed -----------------------------------------------
     raise ImportError(
@@ -267,43 +295,15 @@ class _TextPromptModelAdapter(nn.Module):
     @torch.inference_mode()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass using stored text embeddings.
-        
+
         Args:
             x: (B, 1, T) input mixture
-            
+
         Returns:
             (B, 2, T) separated sources [COI, background]
         """
-        B = x.shape[0]
         mixture = x.squeeze(1)  # (B, T)
-        
-        # Create dummy text prompts (embeddings are precomputed)
-        # The actual forward pass uses self.embed_pos/neg buffers
-        pos_texts = [""] * B  # Dummy, embeddings already computed
-        neg_texts = [""] * B
-        
-        # Get separation using stored embeddings
-        # We need to temporarily replace the text embedding computation
-        # with our precomputed embeddings
-        with torch.no_grad():
-            # Save original method
-            original_get_text = self.lm.clap_model.get_text_embedding
-            
-            # Replace with function that returns our precomputed embeddings
-            def return_stored_embeddings(texts, use_tensor=True):
-                if texts == pos_texts:
-                    return self.embed_pos.repeat(B, 1)
-                else:
-                    return self.embed_neg.repeat(B, 1)
-            
-            self.lm.clap_model.get_text_embedding = return_stored_embeddings
-            
-            try:
-                separated = self.lm.forward(mixture, pos_texts, neg_texts)
-            finally:
-                # Restore original method
-                self.lm.clap_model.get_text_embedding = original_get_text
-        
+        separated = self.lm.forward(mixture, self.embed_pos, self.embed_neg)
         return separated
 
 
@@ -372,11 +372,11 @@ class CLAPSepInference:
     # -- Factory: COI-trained Lightning checkpoint --------------------------
     @classmethod
     def from_checkpoint(cls, checkpoint_path, device=None, text_pos=None, text_neg=None):
-        """Load a COI-trained CLAPSep (from ``train_coi.py`` or ``train_text_coi.py``).
+        """Load a COI-trained CLAPSep (from ``train.py``).
         
         Automatically detects whether the checkpoint uses:
-        - Text-prompt conditioning (train_text_coi.py) → supports dynamic prompts at inference
-        - Learned embeddings (train_coi.py) → fixed to trained COI class
+        - Text-prompt conditioning (--text-conditioning) → supports dynamic prompts at inference
+        - Learned embeddings (default) → fixed to trained COI class
         
         Args:
             checkpoint_path: Path to Lightning checkpoint (.ckpt)
@@ -419,7 +419,7 @@ class CLAPSepInference:
 
         if is_text_prompt_model:
             # Text-prompt model: uses base CLAPSep decoder
-            from models.clapsep.train_text_coi import TextPromptCLAPSep
+            from models.clapsep.text_model import TextPromptCLAPSep
             
             decoder = HTSAT_Decoder(**DEFAULT_MODEL_CONFIG)
             lm = TextPromptCLAPSep(
@@ -451,7 +451,7 @@ class CLAPSepInference:
             
         else:
             # Learned-embedding model: uses COICLAPSepDecoder
-            from models.clapsep.train_coi import COICLAPSep, COICLAPSepDecoder
+            from models.clapsep.coi_model import COICLAPSep, COICLAPSepDecoder
             
             coi_decoder = COICLAPSepDecoder(
                 decoder=HTSAT_Decoder(**DEFAULT_MODEL_CONFIG),

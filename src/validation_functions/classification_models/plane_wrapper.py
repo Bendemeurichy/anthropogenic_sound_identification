@@ -8,8 +8,8 @@ from typing import Tuple, Optional
 import torch
 import numpy as np
 
-from .plane_clasifier.inference import PlaneClassifierInference
-from .plane_clasifier.config import TrainingConfig
+from .plane_classifier.inference import PlaneClassifierInference
+from .plane_classifier.config import TrainingConfig
 
 
 class PlaneClassifierWrapper:

@@ -21,11 +21,10 @@ import argparse
 import gc
 import io
 import json
-import math
+import os
 import sys
-import time
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass, field
+from .config import Config, DataConfig, ModelConfig, TrainingConfig, resolve_device
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -36,9 +35,7 @@ import torch
 import torch.optim as optim
 import torchaudio
 import yaml
-from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
-import os
+from torch.utils.data import DataLoader
 
 # Under pythonw there is no console and sys.stdout/stderr are None.
 # Wrap only when the underlying buffer actually exists.
@@ -52,139 +49,6 @@ if sys.stderr is not None and hasattr(sys.stderr, "buffer"):
     )
 
 # ---------------------------------------------------------------------------
-# Logging helpers for detached / pythonw runs
-# ---------------------------------------------------------------------------
-
-
-class _AutoFlushStream:
-    """Wraps a file object and flushes after every write."""
-
-    def __init__(self, f):
-        self._f = f
-
-    def write(self, text):
-        self._f.write(text)
-        self._f.flush()
-
-    def flush(self):
-        self._f.flush()
-
-    def __getattr__(self, name):
-        return getattr(self._f, name)
-
-
-def _redirect_to_log(log_path: Path) -> None:
-    """Redirect sys.stdout and sys.stderr to *log_path* (append mode).
-
-    Only used when stdout is truly absent (pythonw launched without
-    -RedirectStandardOutput).  When the caller has already redirected stdout
-    to a file we leave that handle in place and just ensure it auto-flushes.
-    """
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(log_path, "a", encoding="utf-8", buffering=1)
-    stream = _AutoFlushStream(fh)
-    sys.stdout = stream  # type: ignore[assignment]
-    sys.stderr = stream  # type: ignore[assignment]
-
-
-def _ensure_autoflush() -> None:
-    """Wrap sys.stdout/stderr with _AutoFlushStream if they exist but are not
-    a TTY.  This prevents Python's default block-buffering from holding output
-    in an 8 KB buffer when stdout is redirected to a file (e.g. via
-    Start-Process -RedirectStandardOutput)."""
-    if sys.stdout is not None and not _is_tty():
-        sys.stdout = _AutoFlushStream(sys.stdout)  # type: ignore[assignment]
-    if sys.stderr is not None and not _is_tty():
-        sys.stderr = _AutoFlushStream(sys.stderr)  # type: ignore[assignment]
-
-
-def _is_tty() -> bool:
-    """Return True only when stdout is an interactive terminal."""
-    try:
-        return sys.stdout is not None and sys.stdout.isatty()
-    except Exception:
-        return False
-
-
-class StepProgress:
-    """Minimal tqdm replacement that writes plain-text progress lines.
-
-    Used automatically when stdout is not a TTY (e.g. pythonw or a log file
-    redirect).  Prints one line every *log_every_pct* percent of steps so the
-    log file stays readable without being flooded.
-    """
-
-    def __init__(
-        self,
-        iterable,
-        desc: str = "",
-        total: int | None = None,
-        log_every_pct: float = 5.0,
-    ):
-        self._it = iterable
-        self._desc = desc
-        try:
-            self._total = total if total is not None else len(iterable)
-        except TypeError:
-            self._total = None
-        self._n = 0
-        self._postfix: dict = {}
-        self._start = time.time()
-        if self._total:
-            self._log_every = max(1, int(self._total * log_every_pct / 100))
-        else:
-            self._log_every = 10  # fallback when length is unknown
-
-    # Allow `with StepProgress(...) as p:` usage (mirrors tqdm interface)
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        pass
-
-    def __iter__(self):
-        for item in self._it:
-            yield item
-            self._n += 1
-            should_log = (self._n % self._log_every == 0) or (
-                self._total is not None and self._n == self._total
-            )
-            if should_log:
-                self._print_line()
-
-    def _print_line(self):
-        elapsed = time.time() - self._start
-        rate = self._n / elapsed if elapsed > 0 else 0.0
-        if self._total:
-            pct = 100.0 * self._n / self._total
-            eta = (self._total - self._n) / rate if rate > 0 else 0.0
-            progress = f"{self._n}/{self._total} ({pct:.0f}%) eta {eta:.0f}s"
-        else:
-            progress = f"{self._n} steps"
-        postfix = "  ".join(f"{k}={v}" for k, v in self._postfix.items())
-        sep = "  |  " if postfix else ""
-        print(f"  [{self._desc}] {progress}  {elapsed:.0f}s elapsed{sep}{postfix}")
-
-    def set_postfix(self, refresh=True, **kwargs):  # noqa: ARG002
-        self._postfix = {k: v for k, v in kwargs.items()}
-
-
-def progress_bar(iterable, desc: str = "", total: int | None = None, **tqdm_kwargs):
-    """Return a tqdm bar when interactive, StepProgress otherwise."""
-    if _is_tty():
-        return tqdm(
-            iterable,
-            desc=desc,
-            total=total,
-            leave=False,
-            ascii=True,
-            ncols=100,
-            **tqdm_kwargs,
-        )
-    return StepProgress(iterable, desc=desc, total=total)
-
-
-# ---------------------------------------------------------------------------
 # Resolve paths so imports work regardless of working directory
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -195,7 +59,13 @@ for _p in [str(_BASE_DIR), str(_SRC_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from common.audio_utils import ResamplerCache
+from common.training_utils import (
+    _ensure_autoflush,
+    _is_tty,
+    _redirect_to_log,
+    progress_bar,
+    set_seed,
+)
 from loss_functions.snr import snr_with_zeroref_loss
 from nets.model_wrapper import SeparationModel
 
@@ -209,1288 +79,25 @@ from label_loading.sampler import get_coi, sample_non_coi
 # Constants
 # ---------------------------------------------------------------------------
 LOSS_EPS = 1e-8
-ENERGY_EPS = 1e-8
-NORMALIZE_MIN_STD = 1e-3
 SILENCE_ENERGY_EPS = 1e-6
 WEAK_TARGET_ENERGY_EPS = 1e-4
-BG_SCALE_MIN = 0.1
-BG_SCALE_MAX = 3.0
-RESAMPLER_CACHE_MAX = 8
 
 CONFIG_PATH = _SCRIPT_DIR / "training_config.yaml"
 
-
-# =============================================================================
-# Device resolution
-# =============================================================================
-
-
-def resolve_device(device: str | int) -> str:
-    """Return a concrete device string from a flexible specification.
-
-    Accepted forms
-    ──────────────
-    "cuda"      → "cuda:<index of best GPU>" (or "cpu" if none available)
-    "cuda:N"    → validated, falls back to "cpu" if GPU N is absent
-    N  (int)    → "cuda:N"  (e.g. 0, 1, 2 …)
-    "cpu"       → "cpu"
-
-    The resolved string is always safe to pass to ``tensor.to(device)``.
-    """
-    if isinstance(device, int):
-        device = f"cuda:{device}"
-
-    device = str(device).strip().lower()
-
-    if device == "cpu":
-        return "cpu"
-
-    if device == "cuda":
-        if not torch.cuda.is_available():
-            print("No CUDA device found – falling back to CPU")
-            return "cpu"
-        idx = torch.cuda.current_device()
-        return f"cuda:{idx}"
-
-    if device.startswith("cuda:"):
-        if not torch.cuda.is_available():
-            print("No CUDA device found – falling back to CPU")
-            return "cpu"
-        try:
-            idx = int(device.split(":")[1])
-        except ValueError:
-            print(f"Invalid device string '{device}' – falling back to cuda:0")
-            idx = 0
-        n_gpus = torch.cuda.device_count()
-        if idx >= n_gpus:
-            print(
-                f"GPU {idx} requested but only {n_gpus} GPU(s) available – "
-                f"falling back to cuda:0"
-            )
-            idx = 0
-        return f"cuda:{idx}"
-
-    print(f"Unrecognised device '{device}' – falling back to CPU")
-    return "cpu"
-
-
-# =============================================================================
-# Configuration dataclasses
-# =============================================================================
-
-
-@dataclass
-class DataConfig:
-    df_path: str = "data/aircraft_data.csv"
-    sample_rate: int = 48000
-    segment_length: float = 6.0
-    snr_range: list = field(default_factory=lambda: [-5, 5])
-    # Nested list: target_classes[i] is a list of label strings mapping to
-    # coi_prompts[i].  A flat list is also accepted (treated as one class).
-    target_classes: list = field(default_factory=list)
-    background_only_prob: float = 0.15
-    background_mix_n: int = 2
-    augment_multiplier: int = 2
-    multi_coi_prob: float = 0.3
-    balance_classes: bool = False
-    coi_class_multipliers: Optional[list] = None  # Per-class augmentation multipliers
-    # WebDataset configuration
-    use_webdataset: bool = False
-    webdataset_path: str = ""
-
-
-@dataclass
-class ModelConfig:
-    pretrained_path: str = "base/pretrained_models/tuss.medium.2-4src"
-    coi_prompts: list = field(default_factory=lambda: ["airplane", "train", "bird"])
-    bg_prompt: str = "background"
-    coi_prompt_init_from: str = "sfx"
-    bg_prompt_init_from: str = "sfxbg"
-    freeze_backbone: bool = False
-    # From-scratch architecture (used when pretrained_path is null)
-    encoder_name: str = "stft"
-    encoder_conf: dict = field(default_factory=dict)
-    decoder_name: str = "stft"
-    decoder_conf: dict = field(default_factory=dict)
-    separator_name: str = "tuss"
-    separator_conf: dict = field(default_factory=dict)
-    css_conf: dict = field(default_factory=dict)
-    variance_normalization: bool = True
-
-
-@dataclass
-class TrainingConfig:
-    batch_size: int = 2
-    grad_accum_steps: int = 8
-    use_amp: bool = True
-    amp_dtype: str = "bf16"  # "bf16" (recommended, matches pretrained) or "fp16"
-    num_epochs: int = 200
-    lr: float = 5e-5
-    weight_decay: float = 1e-2
-    num_workers: int = 8  # Increased from 4 for faster data loading
-    pin_memory: bool = True
-    clip_grad_norm: float = 5.0
-    patience: int = 30
-    checkpoint_dir: str = "checkpoints"
-    device: str = "cuda"
-    coi_weight: float = 1.5
-    snr_max: int = 30
-    zero_ref_loss_weight: float = 0.1
-    warmup_steps: int = 300
-    validate_every_n_epochs: int = 1
-    resume_from: str = ""  # path to checkpoint .pt file to resume training
-    seed: int = 42
-    existing_prompt_lr_multiplier: float = (
-        0.1  # LR multiplier for prompts that exist in checkpoint
-    )
-    stabilization_epochs: int = 0  # Number of epochs to freeze old prompts and backbone
-    backbone_lr_multiplier: float = 0.05  # LR multiplier for backbone when unfreezing
-    # Prompt variability settings (similar to base TUSS training)
-    variable_prompts: bool = False  # Enable variable prompt configurations during training
-    prompt_dropout_prob: float = 0.5  # Probability of dropping each COI prompt during training
-    min_coi_prompts: int = 0  # Minimum number of COI prompts per sample (0 = allow background-only)
-    # ReduceLROnPlateau scheduler settings
-    scheduler_patience: int = 5    # epochs without improvement before reducing LR
-    scheduler_factor: float = 0.5  # multiplicative factor when reducing LR
-    scheduler_min_lr: float = 1e-7  # floor LR for all param groups
-    # GPU augmentation settings (10-100x faster than CPU)
-    use_gpu_augmentations: bool = True  # Apply augmentations on GPU instead of CPU
-    gpu_aug_time_stretch_prob: float = 0.5
-    gpu_aug_gain_prob: float = 0.7
-    gpu_aug_noise_prob: float = 0.4
-    gpu_aug_shift_prob: float = 0.5
-    gpu_aug_lpf_prob: float = 0.3
-
-
-@dataclass
-class Config:
-    data: DataConfig = field(default_factory=DataConfig)
-    model: ModelConfig = field(default_factory=ModelConfig)
-    training: TrainingConfig = field(default_factory=TrainingConfig)
-
-    @classmethod
-    def from_yaml(cls, path: Path) -> "Config":
-        with open(path) as f:
-            raw = yaml.safe_load(f)
-        data_cfg = DataConfig(**raw.get("data", {}))
-        model_cfg = ModelConfig(**raw.get("model", {}))
-        training_cfg = TrainingConfig(**raw.get("training", {}))
-        config = cls(data=data_cfg, model=model_cfg, training=training_cfg)
-        config.validate()
-        return config
-
-    def validate(self):
-        """Validate configuration consistency."""
-        # Check that target_classes and coi_prompts have matching lengths
-        target_classes = self.data.target_classes
-        coi_prompts = self.model.coi_prompts
-        
-        if not target_classes:
-            raise ValueError(
-                "Configuration error: data.target_classes is empty.\n"
-                "Add class label lists to training_config.yaml under data.target_classes"
-            )
-        
-        if not coi_prompts:
-            raise ValueError(
-                "Configuration error: model.coi_prompts is empty.\n"
-                "Add prompt names to training_config.yaml under model.coi_prompts"
-            )
-        
-        # Normalize target_classes to list-of-lists for validation
-        # (single-class case: flat list is allowed)
-        if isinstance(target_classes[0], str):
-            target_classes_normalized = [target_classes]
-        else:
-            target_classes_normalized = target_classes
-        
-        n_coi_prompts = len(coi_prompts)
-        n_target_classes = len(target_classes_normalized)
-        
-        if n_target_classes != n_coi_prompts:
-            raise ValueError(
-                f"Configuration error: Length mismatch between target_classes and coi_prompts.\n"
-                f"  data.target_classes has {n_target_classes} groups: {target_classes_normalized}\n"
-                f"  model.coi_prompts has {n_coi_prompts} entries: {coi_prompts}\n"
-                f"These must match - one target_classes group per coi_prompt.\n"
-                f"Check training_config.yaml and ensure both lists have the same length."
-            )
-
-
-    def save(self, path: Path):
-        with open(path, "w") as f:
-            yaml.dump(asdict(self), f, default_flow_style=False)
-
-    def to_dict(self):
-        return asdict(self)
-
-
-# =============================================================================
-# Audio file info
-# =============================================================================
-
-
-def _get_audio_info(filepath: str) -> tuple[int, int]:
-    """Return (sample_rate, num_frames) using the best available backend."""
-    if hasattr(torchaudio, "info"):
-        try:
-            info = torchaudio.info(filepath)
-            return int(info.sample_rate), int(info.num_frames)
-        except Exception:
-            pass
-    try:
-        import soundfile as sf
-
-        info = sf.info(filepath)
-        return int(info.samplerate), int(info.frames)
-    except Exception:
-        pass
-    raise RuntimeError(f"Cannot read audio info for {filepath}")
-
-
-# =============================================================================
-# Loss
-# =============================================================================
-
-
-class COIWeightedSNRLoss(torch.nn.Module):
-    """SNR loss with zero-reference handling, weighted towards COI heads."""
-
-    def __init__(
-        self,
-        n_src: int,
-        coi_weight: float = 1.5,
-        snr_max: int = 30,
-        zero_ref_loss_weight: float = 0.1,
-        eps: float = 1e-7,
-        amp_dtype: torch.dtype = torch.bfloat16,
-    ):
-        super().__init__()
-        self.n_src = n_src
-        self.n_coi = n_src - 1  # last source is always background
-        self.coi_weight = float(coi_weight)
-        self.snr_max = snr_max
-        self.zero_ref_loss_weight = zero_ref_loss_weight
-        self.eps = eps
-        # Stored so train_epoch / validate_epoch can read the dtype
-        self._amp_dtype = amp_dtype
-
-    def forward(self, est: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            est: (B, n_src, T)
-            ref: (B, n_src, T)
-        Returns:
-            scalar loss
-            
-        Note:
-            When using variable prompts, n_src may differ from self.n_src.
-            The function infers the actual n_src from the tensor shape.
-        """
-        # Infer actual n_src from tensor shape (supports variable prompts)
-        actual_n_src = est.shape[1]
-        actual_n_coi = actual_n_src - 1  # Last source is always background
-        
-        # snr_with_zeroref_loss returns (B, n_src) with solve_perm=False
-        per_src = snr_with_zeroref_loss(
-            est,
-            ref,
-            n_src=actual_n_src,  # Use actual n_src from tensor
-            snr_max=self.snr_max,
-            zero_ref_loss_weight=self.zero_ref_loss_weight,
-            solve_perm=False,
-            eps=self.eps,
-        )  # (B, n_src)
-
-        # COI heads are 0 … n_coi-1, background is last
-        # Only average over ACTIVE COI classes (non-silent channels)
-        # This prevents silent classes from dominating the loss gradient
-        ref_power = (ref[:, :actual_n_coi] ** 2).mean(dim=-1)  # (B, actual_n_coi)
-        is_active = ref_power > SILENCE_ENERGY_EPS  # (B, actual_n_coi)
-        
-        coi_losses = per_src[:, :actual_n_coi]  # (B, actual_n_coi)
-        active_count = is_active.sum(dim=-1).clamp(min=1)  # (B,), prevent div by zero
-        coi_loss = (coi_losses * is_active.float()).sum(dim=-1) / active_count  # (B,)
-        
-        bg_loss = per_src[:, -1]  # (B,)
-
-        weighted = (self.coi_weight * coi_loss + bg_loss) / (self.coi_weight + 1.0)
-        return weighted.mean()
-
-
-# =============================================================================
-# Learning rate scheduler
-# =============================================================================
-
-
-class WarmupScheduler:
-    """Linear warm-up that scales each param group from 0 → its target LR.
-
-    After ``warmup_steps`` optimizer steps the scheduler becomes a no-op so
-    that ``ReduceLROnPlateau`` can take over without interference.
-
-    The per-group target LRs are captured from the optimizer at construction
-    time, so differential LRs (e.g. backbone at 0.05× base) are respected.
-    """
-
-    def __init__(self, optimizer: optim.Optimizer, warmup_steps: int):
-        self.optimizer = optimizer
-        self.warmup_steps = max(1, int(warmup_steps))
-        self._step_count = 0
-        # Capture per-group target LRs before we zero them out.
-        self.base_lrs = [g["lr"] for g in optimizer.param_groups]
-        # Start from zero so the first step sets lr = 1/warmup_steps × base.
-        for g in optimizer.param_groups:
-            g["lr"] = 0.0
-
-    def step(self) -> None:
-        """Advance by one optimizer step; no-op once warmup is complete."""
-        self._step_count += 1
-        if self._step_count <= self.warmup_steps:
-            scale = self._step_count / self.warmup_steps
-            for g, blr in zip(self.optimizer.param_groups, self.base_lrs):
-                g["lr"] = blr * scale
-        # After warmup: leave LR unchanged (ReduceLROnPlateau owns it).
-
-    @property
-    def done(self) -> bool:
-        return self._step_count >= self.warmup_steps
-
-    def state_dict(self) -> dict:
-        return {"step_count": self._step_count, "base_lrs": self.base_lrs}
-
-    def load_state_dict(self, state: dict) -> None:
-        self._step_count = state["step_count"]
-        self.base_lrs = state.get("base_lrs", self.base_lrs)
-        # Restore the current LR position.
-        if not self.done:
-            scale = self._step_count / self.warmup_steps
-            for g, blr in zip(self.optimizer.param_groups, self.base_lrs):
-                g["lr"] = blr * scale
-        else:
-            # Warmup finished: restore base_lrs (ReduceLROnPlateau may have
-            # reduced them further; its own state_dict handles that).
-            for g, blr in zip(self.optimizer.param_groups, self.base_lrs):
-                if g["lr"] == 0.0:
-                    g["lr"] = blr
-
-
-# =============================================================================
-# Audio augmentations
-# =============================================================================
-
-
-class AudioAugmentations:
-    @staticmethod
-    def time_stretch(waveform: torch.Tensor, rate: float) -> torch.Tensor:
-        if rate == 1.0:
-            return waveform
-        orig_len = waveform.shape[-1]
-        stretched = (
-            torch.nn.functional.interpolate(
-                waveform.unsqueeze(0).unsqueeze(0),
-                scale_factor=1.0 / rate,
-                mode="linear",
-                align_corners=False,
-            )
-            .squeeze(0)
-            .squeeze(0)
-        )
-        if stretched.shape[-1] > orig_len:
-            return stretched[:orig_len]
-        return torch.nn.functional.pad(stretched, (0, orig_len - stretched.shape[-1]))
-
-    @staticmethod
-    def add_noise(waveform: torch.Tensor, noise_level: float = 0.005) -> torch.Tensor:
-        """Add white Gaussian noise to simulate microphone self-noise.
-        
-        White noise has flat frequency spectrum (equal power at all frequencies),
-        making it representative of typical recording equipment noise floor.
-        """
-        return waveform + torch.randn_like(waveform) * noise_level
-
-    @staticmethod
-    def gain(waveform: torch.Tensor, gain_db: float) -> torch.Tensor:
-        return waveform * (10 ** (gain_db / 20.0))
-
-    @staticmethod
-    def time_shift(waveform: torch.Tensor, shift_samples: int) -> torch.Tensor:
-        """Apply time shift with zero-padding (not circular roll).
-        
-        Positive shift = delay (add silence at start), negative = advance (trim start).
-        """
-        if shift_samples == 0:
-            return waveform
-        
-        shifted = torch.zeros_like(waveform)
-        if shift_samples > 0:
-            # Delay: zero-pad at start, trim end
-            shifted[..., shift_samples:] = waveform[..., :-shift_samples]
-        else:
-            # Advance: trim start, zero-pad at end
-            shifted[..., :shift_samples] = waveform[..., -shift_samples:]
-        return shifted
-
-    @staticmethod
-    def low_pass_filter(
-        waveform: torch.Tensor, cutoff_ratio: float = 0.8
-    ) -> torch.Tensor:
-        if cutoff_ratio >= 1.0:
-            return waveform
-        fft = torch.fft.rfft(waveform)
-        n_freqs = fft.shape[-1]
-        cutoff_idx = int(n_freqs * cutoff_ratio)
-        mask = torch.ones(n_freqs, device=waveform.device)
-        rolloff_width = max(1, n_freqs // 20)
-        for i in range(rolloff_width):
-            if cutoff_idx + i < n_freqs:
-                mask[cutoff_idx + i] = 1.0 - (i / rolloff_width)
-        mask[cutoff_idx + rolloff_width :] = 0.0
-        return torch.fft.irfft(fft * mask, n=waveform.shape[-1])
-
-    @staticmethod
-    def random_augment(
-        waveform: torch.Tensor, rng: np.random.Generator | None = None
-    ) -> torch.Tensor:
-        if rng is None:
-            rng = np.random.default_rng()
-        aug = waveform.clone()
-        if rng.random() < 0.5:
-            aug = AudioAugmentations.time_stretch(aug, rng.uniform(0.9, 1.1))
-        if rng.random() < 0.7:
-            aug = AudioAugmentations.gain(aug, rng.uniform(-6, 6))
-        if rng.random() < 0.4:
-            aug = AudioAugmentations.add_noise(aug, rng.uniform(0.001, 0.01))
-        if rng.random() < 0.5:
-            max_shift = int(aug.shape[-1] * 0.1)
-            aug = AudioAugmentations.time_shift(
-                aug, int(rng.integers(-max_shift, max_shift + 1))
-            )
-        if rng.random() < 0.3:
-            aug = AudioAugmentations.low_pass_filter(aug, rng.uniform(0.6, 0.95))
-        return aug
-
-
-class GpuAudioAugmentations:
-    """GPU-accelerated audio augmentations for batch processing.
-    
-    All methods work on batched tensors (B, T) or (B, n_src, T) and run on GPU.
-    Provides 10-100x speedup compared to CPU augmentations.
-    """
-
-    @staticmethod
-    def time_stretch_batch(
-        waveform: torch.Tensor, rate_range: tuple[float, float] = (0.9, 1.1)
-    ) -> torch.Tensor:
-        """Apply random time stretch to each sample in batch."""
-        if waveform.dim() == 2:
-            B, T = waveform.shape
-            n_src = None
-        else:
-            B, n_src, T = waveform.shape
-            waveform = waveform.reshape(B * n_src, T)
-        
-        # Random rate per sample
-        rates = torch.empty(B if n_src is None else B * n_src, device=waveform.device).uniform_(*rate_range)
-        
-        result = []
-        for i, rate in enumerate(rates):
-            if abs(rate - 1.0) < 0.01:  # Skip if rate ~= 1.0
-                result.append(waveform[i])
-                continue
-            
-            stretched = torch.nn.functional.interpolate(
-                waveform[i].unsqueeze(0).unsqueeze(0),
-                scale_factor=1.0 / rate.item(),
-                mode="linear",
-                align_corners=False,
-            ).squeeze(0).squeeze(0)
-            
-            if stretched.shape[-1] > T:
-                result.append(stretched[:T])
-            else:
-                result.append(
-                    torch.nn.functional.pad(stretched, (0, T - stretched.shape[-1]))
-                )
-        
-        output = torch.stack(result, dim=0)
-        if n_src is not None:
-            output = output.reshape(B, n_src, T)
-        return output
-
-    @staticmethod
-    def add_noise_batch(
-        waveform: torch.Tensor, noise_level_range: tuple[float, float] = (0.001, 0.01)
-    ) -> torch.Tensor:
-        """Add white Gaussian noise to each sample in batch.
-        
-        Simulates microphone/preamp self-noise typical of field recording equipment.
-        White noise = flat frequency spectrum (equal power across all frequencies).
-        Range 0.001-0.01 = approximately -60 to -40 dB SNR (typical noise floor).
-        """
-        # Random noise level per sample
-        noise_levels = torch.empty(
-            waveform.shape[0], device=waveform.device
-        ).uniform_(*noise_level_range)
-        
-        if waveform.dim() == 3:
-            noise_levels = noise_levels.unsqueeze(1).unsqueeze(2)
-        else:
-            noise_levels = noise_levels.unsqueeze(1)
-        
-        noise = torch.randn_like(waveform) * noise_levels
-        return waveform + noise
-
-    @staticmethod
-    def gain_batch(
-        waveform: torch.Tensor, gain_db_range: tuple[float, float] = (-6.0, 6.0)
-    ) -> torch.Tensor:
-        """Apply random gain to each sample in batch."""
-        gain_db = torch.empty(
-            waveform.shape[0], device=waveform.device
-        ).uniform_(*gain_db_range)
-        
-        if waveform.dim() == 3:
-            gain_linear = (10 ** (gain_db / 20.0)).unsqueeze(1).unsqueeze(2)
-        else:
-            gain_linear = (10 ** (gain_db / 20.0)).unsqueeze(1)
-        
-        return waveform * gain_linear
-
-    @staticmethod
-    def time_shift_batch(
-        waveform: torch.Tensor, max_shift_ratio: float = 0.1
-    ) -> torch.Tensor:
-        """Apply random time shift to each sample in batch with zero-padding.
-        
-        Uses zero-padding instead of circular roll to avoid wraparound artifacts.
-        Positive shift = delay (add silence at start), negative = advance (trim start).
-        """
-        T = waveform.shape[-1]
-        max_shift = int(T * max_shift_ratio)
-        
-        # Random shift per sample
-        shifts = torch.randint(
-            -max_shift,
-            max_shift + 1,
-            (waveform.shape[0],),
-            device=waveform.device,
-        )
-        
-        result = []
-        for i, shift in enumerate(shifts):
-            shift_val = shift.item()
-            if shift_val == 0:
-                result.append(waveform[i])
-            elif shift_val > 0:
-                # Delay: zero-pad at start, trim end
-                shifted = torch.zeros_like(waveform[i])
-                shifted[..., shift_val:] = waveform[i, ..., :-shift_val]
-                result.append(shifted)
-            else:  # shift_val < 0
-                # Advance: trim start, zero-pad at end
-                shifted = torch.zeros_like(waveform[i])
-                shifted[..., :shift_val] = waveform[i, ..., -shift_val:]
-                result.append(shifted)
-        
-        return torch.stack(result, dim=0)
-
-    @staticmethod
-    def low_pass_filter_batch(
-        waveform: torch.Tensor, cutoff_ratio_range: tuple[float, float] = (0.6, 0.95)
-    ) -> torch.Tensor:
-        """Apply random low-pass filter to each sample in batch."""
-        if waveform.dim() == 2:
-            B, T = waveform.shape
-            n_src = None
-        else:
-            B, n_src, T = waveform.shape
-            waveform = waveform.reshape(B * n_src, T)
-        
-        # Random cutoff per sample
-        cutoff_ratios = torch.empty(
-            B if n_src is None else B * n_src, device=waveform.device
-        ).uniform_(*cutoff_ratio_range)
-        
-        fft = torch.fft.rfft(waveform, dim=-1)
-        n_freqs = fft.shape[-1]
-        
-        result = []
-        for i, ratio in enumerate(cutoff_ratios):
-            if ratio >= 0.99:
-                result.append(waveform[i])
-                continue
-            
-            cutoff_idx = int(n_freqs * ratio.item())
-            mask = torch.ones(n_freqs, device=waveform.device)
-            
-            # Smooth rolloff
-            rolloff_width = max(1, n_freqs // 20)
-            for j in range(rolloff_width):
-                if cutoff_idx + j < n_freqs:
-                    mask[cutoff_idx + j] = 1.0 - (j / rolloff_width)
-            mask[cutoff_idx + rolloff_width :] = 0.0
-            
-            filtered = torch.fft.irfft(fft[i] * mask, n=T)
-            result.append(filtered)
-        
-        output = torch.stack(result, dim=0)
-        if n_src is not None:
-            output = output.reshape(B, n_src, T)
-        return output
-
-    @staticmethod
-    def random_augment_batch(
-        waveform: torch.Tensor,
-        time_stretch_prob: float = 0.5,
-        gain_prob: float = 0.7,
-        noise_prob: float = 0.4,
-        shift_prob: float = 0.5,
-        lpf_prob: float = 0.3,
-    ) -> torch.Tensor:
-        """Apply random combination of augmentations to batch.
-        
-        Args:
-            waveform: (B, T) or (B, n_src, T) tensor on GPU
-            *_prob: Probability of applying each augmentation
-        
-        Returns:
-            Augmented waveform with same shape
-        """
-        aug = waveform.clone()
-        
-        # Apply augmentations with probability
-        if torch.rand(1).item() < time_stretch_prob:
-            aug = GpuAudioAugmentations.time_stretch_batch(aug)
-        
-        if torch.rand(1).item() < gain_prob:
-            aug = GpuAudioAugmentations.gain_batch(aug)
-        
-        if torch.rand(1).item() < noise_prob:
-            aug = GpuAudioAugmentations.add_noise_batch(aug)
-        
-        if torch.rand(1).item() < shift_prob:
-            aug = GpuAudioAugmentations.time_shift_batch(aug)
-        
-        if torch.rand(1).item() < lpf_prob:
-            aug = GpuAudioAugmentations.low_pass_filter_batch(aug)
-        
-        return aug
-
-
-# =============================================================================
-# Dataset
-# =============================================================================
-
-
-class AudioDataset(Dataset):
-    """Multi-class COI audio separation dataset.
-
-    Returns a (n_coi_classes + 1, T) source tensor per item:
-        sources[:n_coi_classes]  – one track per COI class (most are silent)
-        sources[-1]              – a single background / non-COI track
-
-    The mixture and normalisation are produced later in prepare_batch so that
-    they can be done efficiently on GPU.
-    """
-
-    def __init__(
-        self,
-        dataframe: pd.DataFrame,
-        split: str = "train",
-        sample_rate: int = 48000,
-        segment_length: float = 6.0,
-        snr_range: tuple = (-5, 5),
-        n_coi_classes: int = 1,
-        augment: bool = True,
-        segment_stride: float | None = None,
-        background_only_prob: float = 0.0,
-        background_mix_n: int = 2,
-        augment_multiplier: int = 1,
-        multi_coi_prob: float = 0.3,
-    ):
-        self.split = split
-        self.sample_rate = sample_rate
-        self.segment_samples = int(segment_length * sample_rate)
-        self.snr_range = snr_range
-        self.n_coi_classes = n_coi_classes
-        self.augment = augment and split == "train"
-        self.augment_multiplier = int(augment_multiplier) if self.augment else 1
-        self.background_only_prob = max(0.0, float(background_only_prob))
-        self.background_mix_n = int(background_mix_n)
-        self.segment_stride_samples = int(
-            (segment_stride or segment_length) * sample_rate
-        )
-        self.multi_coi_prob = multi_coi_prob if split == "train" else 0.0
-
-        self._rng = np.random.default_rng(42)
-        self._resampler_cache = ResamplerCache(max_size=RESAMPLER_CACHE_MAX)
-        self._file_native_info: dict[str, tuple[int, int]] = {}
-
-        if split == "test":
-            split_df = dataframe.iloc[0:0]
-        else:
-            split_df = dataframe[dataframe["split"] == split]
-
-        coi_mask = split_df["label"] == 1
-        self.non_coi_files = split_df.loc[~coi_mask, "filename"].tolist()
-
-        # Per-class file lists (index = coi_class)
-        self.coi_files_by_class: list[list[str]] = [[] for _ in range(n_coi_classes)]
-        for _, row in split_df[coi_mask].iterrows():
-            cls_idx = int(row.get("coi_class", 0))
-            if 0 <= cls_idx < n_coi_classes:
-                self.coi_files_by_class[cls_idx].append(row["filename"])
-
-        # Flattened list used for segment pre-computation
-        self.coi_files = [f for cls in self.coi_files_by_class for f in cls]
-        self.file_to_class = {}
-        for cls_idx, files in enumerate(self.coi_files_by_class):
-            for f in files:
-                self.file_to_class[f] = cls_idx
-
-        # Bounds
-        self.file_to_bounds: dict[str, tuple[float, float | None]] = {}
-        if "start_time" in split_df.columns or "end_time" in split_df.columns:
-            for _, row in split_df.iterrows():
-                fname = row["filename"]
-                try:
-                    st = (
-                        float(row["start_time"])
-                        if pd.notna(row.get("start_time"))
-                        else 0.0
-                    )
-                except (ValueError, TypeError):
-                    st = 0.0
-                try:
-                    et = (
-                        float(row["end_time"])
-                        if pd.notna(row.get("end_time"))
-                        else None
-                    )
-                except (ValueError, TypeError):
-                    et = None
-                self.file_to_bounds[fname] = (st, et)
-
-        self.coi_segments = self._compute_segments(split_df)
-        self.coi_segments_by_class: list[list[tuple[str, int, int, int]]] = [
-            [] for _ in range(n_coi_classes)
-        ]
-        for seg in self.coi_segments:
-            self.coi_segments_by_class[seg[3]].append(seg)
-
-        # Build a class-balanced training schedule so each COI class contributes
-        # the same number of samples per epoch.
-        self._balanced_train_schedule: list[tuple[str, int, int, int]] = []
-        if self.split == "train" and self.coi_segments_by_class:
-            max_class_len = max(
-                (len(cls) for cls in self.coi_segments_by_class), default=0
-            )
-            if max_class_len > 0:
-                for class_idx, seg_list in enumerate(self.coi_segments_by_class):
-                    if not seg_list:
-                        continue
-                    for i in range(max_class_len):
-                        self._balanced_train_schedule.append(
-                            seg_list[i % len(seg_list)]
-                        )
-
-                # Keep the schedule deterministic per epoch but still shuffled by DataLoader.
-                self._rng.shuffle(self._balanced_train_schedule)
-
-        if self.split == "train":
-            self.coi_segments_train = list(self.coi_segments)
-
-        self._extra_background_count = 0
-        if self.coi_files and self.background_only_prob > 0.0:
-            if split == "train" and self._balanced_train_schedule:
-                base = len(self._balanced_train_schedule)
-            else:
-                base = len(
-                    self.coi_segments_train if split == "train" else self.coi_segments
-                )
-            multiplier = self.augment_multiplier if split == "train" else 1
-            self._extra_background_count = int(
-                self.background_only_prob * base * multiplier + 0.5
-            )
-
-        print(
-            f"{split}: {len(self.coi_files)} COI files ({len(self.coi_segments)} segments), "
-            f"{len(self.non_coi_files)} non-COI files"
-        )
-        if split == "train" and self._extra_background_count:
-            print(f"  + {self._extra_background_count} background-only steps")
-        per_class = [len(cls) for cls in self.coi_files_by_class]
-        print(f"  COI files per class: {per_class}")
-
-    def set_epoch(self, epoch: int):
-        self._rng = np.random.default_rng(42 + epoch)
-        if self._balanced_train_schedule:
-            self._rng.shuffle(self._balanced_train_schedule)
-
-    def _compute_segments(
-        self, split_df: pd.DataFrame
-    ) -> list[tuple[str, int, int, int]]:
-        segments = []
-        failures = 0
-        for filepath in self.coi_files:
-            class_idx = self.file_to_class.get(filepath, 0)
-            bounds = self.file_to_bounds.get(filepath, (0.0, None))
-            start_sec, end_sec = bounds
-            try:
-                orig_sr, num_frames = _get_audio_info(filepath)
-                self._file_native_info[filepath] = (orig_sr, num_frames)
-            except Exception as exc:
-                failures += 1
-                if failures <= 5:
-                    print(f"info() failed for {filepath}: {exc}")
-                orig_sr = self.sample_rate
-                num_frames = (
-                    int(end_sec * orig_sr)
-                    if end_sec is not None
-                    else self.segment_samples
-                )
-                self._file_native_info[filepath] = (orig_sr, num_frames)
-
-            seg_frames = max(1, int(self.segment_samples * orig_sr / self.sample_rate))
-            stride_frames = max(
-                1, int(self.segment_stride_samples * orig_sr / self.sample_rate)
-            )
-            start_frame = int(start_sec * orig_sr)
-            end_frame = int(end_sec * orig_sr) if end_sec is not None else num_frames
-            end_frame = min(end_frame, num_frames)
-            valid = max(0, end_frame - start_frame)
-            n_segs = (
-                1
-                if valid <= seg_frames
-                else 1 + max(0, (valid - seg_frames) // stride_frames)
-            )
-            for s in range(n_segs):
-                segments.append(
-                    (filepath, start_frame + s * stride_frames, seg_frames, class_idx)
-                )
-        if failures:
-            print(f"  ⚠ info() failed for {failures}/{len(self.coi_files)} files")
-        return segments
-
-    def __len__(self):
-        if self.split == "train":
-            if self._balanced_train_schedule:
-                base = len(self._balanced_train_schedule) * self.augment_multiplier
-            else:
-                base = (
-                    len(self.coi_segments_train) * self.augment_multiplier
-                    if self.coi_segments_train
-                    else 0
-                )
-            return base + self._extra_background_count
-        return len(self.coi_segments) + self._extra_background_count
-
-    def _load_audio(
-        self,
-        filepath: str,
-        frame_offset: int | None = None,
-        num_frames: int | None = None,
-    ) -> torch.Tensor:
-        bounds = self.file_to_bounds.get(filepath, (0.0, None))
-        start_sec, end_sec = bounds
-
-        cached = self._file_native_info.get(filepath)
-        if cached is None:
-            try:
-                orig_sr, total_frames = _get_audio_info(filepath)
-                self._file_native_info[filepath] = (orig_sr, total_frames)
-            except Exception:
-                try:
-                    waveform, sr = torchaudio.load(
-                        filepath, num_frames=self.segment_samples * 2
-                    )
-                except Exception:
-                    return torch.zeros(self.segment_samples)
-                waveform = (
-                    waveform.mean(0) if waveform.shape[0] > 1 else waveform.squeeze(0)
-                )
-                self._file_native_info[filepath] = (sr, waveform.shape[-1])
-                cached = (sr, waveform.shape[-1])
-
-        if cached is None:
-            cached = self._file_native_info[filepath]
-        orig_sr, total_frames = cached
-
-        seg_frames = num_frames or max(
-            1, int(self.segment_samples * orig_sr / self.sample_rate)
-        )
-        start_frame = int(start_sec * orig_sr)
-        end_frame = int(end_sec * orig_sr) if end_sec is not None else total_frames
-        end_frame = min(end_frame, total_frames)
-
-        if frame_offset is None:
-            max_off = max(start_frame, end_frame - seg_frames)
-            offset = (
-                int(self._rng.integers(start_frame, max_off + 1))
-                if max_off > start_frame
-                else start_frame
-            )
-        else:
-            offset = int(frame_offset)
-
-        offset = max(0, min(offset, max(0, total_frames - seg_frames)))
-
-        try:
-            waveform, sr = torchaudio.load(
-                filepath, frame_offset=offset, num_frames=int(seg_frames)
-            )
-        except Exception:
-            try:
-                waveform, sr = torchaudio.load(filepath, num_frames=int(seg_frames))
-            except Exception:
-                return torch.zeros(self.segment_samples)
-
-        if sr != self.sample_rate:
-            # Use padded resampling to eliminate edge artifacts
-            # This is critical for fragment-based separation models where edge artifacts
-            # visible in spectrograms can confuse the model
-            waveform = self._resampler_cache.resample_padded(waveform, sr, self.sample_rate)
-
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        waveform = waveform.squeeze(0)
-        if waveform.shape[0] < self.segment_samples:
-            waveform = torch.nn.functional.pad(
-                waveform, (0, self.segment_samples - waveform.shape[0])
-            )
-        return waveform[: self.segment_samples]
-
-    def _jittered_offset(
-        self, base_offset: int, seg_frames: int | None, filepath: str
-    ) -> int:
-        if seg_frames is None:
-            return base_offset
-        cached = self._file_native_info.get(filepath)
-        if cached is None:
-            return base_offset
-        orig_sr, total_frames = cached
-        bounds = self.file_to_bounds.get(filepath, (0.0, None))
-        start_sec, end_sec = bounds
-        start_frame = int(start_sec * orig_sr)
-        end_frame = int(end_sec * orig_sr) if end_sec is not None else total_frames
-        end_frame = min(end_frame, total_frames)
-        half_stride = max(
-            1, int(self.segment_stride_samples * orig_sr / self.sample_rate) // 2
-        )
-        jitter = int(self._rng.integers(-half_stride, half_stride + 1))
-        offset = base_offset + jitter
-        offset = max(start_frame, offset)
-        offset = min(offset, max(start_frame, end_frame - seg_frames))
-        return offset
-
-    def __getitem__(self, idx) -> torch.Tensor:
-        background = None
-
-        if self.split == "train":
-            schedule = self._balanced_train_schedule or self.coi_segments_train
-            coi_count = len(schedule)
-            effective_coi_count = coi_count * self.augment_multiplier
-
-            if coi_count > 0 and idx < effective_coi_count:
-                actual_idx = idx % coi_count
-                augment_variant = idx // coi_count
-                filepath, base_offset, seg_frames, class_idx = schedule[actual_idx]
-                offset = self._jittered_offset(base_offset, seg_frames, filepath)
-                coi_audio = self._load_audio(
-                    filepath, frame_offset=offset, num_frames=seg_frames
-                )
-                if self.augment:
-                    coi_audio = AudioAugmentations.random_augment(coi_audio, self._rng)
-
-                sources = [
-                    torch.zeros(self.segment_samples) for _ in range(self.n_coi_classes)
-                ]
-                sources[class_idx] = coi_audio
-
-                if self.n_coi_classes > 1 and self._rng.random() < getattr(
-                    self, "multi_coi_prob", 0.0
-                ):
-                    available_classes = [
-                        c
-                        for c in range(self.n_coi_classes)
-                        if c != class_idx and len(self.coi_segments_by_class[c]) > 0
-                    ]
-                    if available_classes:
-                        class_idx_2 = int(self._rng.choice(available_classes))
-                        seg_list = self.coi_segments_by_class[class_idx_2]
-                        seg_idx = int(self._rng.integers(len(seg_list)))
-                        filepath_2, base_offset_2, seg_frames_2, _ = seg_list[seg_idx]
-                        offset_2 = self._jittered_offset(
-                            base_offset_2, seg_frames_2, filepath_2
-                        )
-                        coi_audio_2 = self._load_audio(
-                            filepath_2, frame_offset=offset_2, num_frames=seg_frames_2
-                        )
-                        if self.augment:
-                            coi_audio_2 = AudioAugmentations.random_augment(
-                                coi_audio_2, self._rng
-                            )
-                        sources[class_idx_2] = coi_audio_2
-            else:
-                # Background-only sample
-                idxs = self._rng.choice(
-                    len(self.non_coi_files),
-                    size=max(1, self.background_mix_n),
-                    replace=True,
-                )
-                bg_parts = [self._load_audio(self.non_coi_files[int(i)]) for i in idxs]
-                background = torch.stack(bg_parts).sum(0)
-                sources = [
-                    torch.zeros(self.segment_samples) for _ in range(self.n_coi_classes)
-                ]
-        else:
-            if idx < len(self.coi_segments):
-                filepath, frame_offset, num_frames, class_idx = self.coi_segments[idx]
-                coi_audio = self._load_audio(filepath, frame_offset, num_frames)
-                sources = [
-                    torch.zeros(self.segment_samples) for _ in range(self.n_coi_classes)
-                ]
-                sources[class_idx] = coi_audio
-            else:
-                idxs = self._rng.choice(
-                    len(self.non_coi_files),
-                    size=max(1, self.background_mix_n),
-                    replace=True,
-                )
-                background = torch.stack(
-                    [self._load_audio(self.non_coi_files[int(i)]) for i in idxs]
-                ).sum(0)
-                sources = [
-                    torch.zeros(self.segment_samples) for _ in range(self.n_coi_classes)
-                ]
-
-        if background is None:
-            bg_idx = int(self._rng.integers(len(self.non_coi_files)))
-            background = self._load_audio(self.non_coi_files[bg_idx])
-
-        sources.append(background)
-        return torch.stack(sources, dim=0)  # (n_coi_classes + 1, T)
-
-
-# =============================================================================
-# Training utilities
-# =============================================================================
-
-
-def normalize_tensor_wav(
-    wav: torch.Tensor, eps: float = ENERGY_EPS, min_std: float = NORMALIZE_MIN_STD
-) -> torch.Tensor:
-    mean = wav.mean(dim=-1, keepdim=True)
-    std = wav.std(dim=-1, keepdim=True)
-    is_silent = std < min_std
-    std_safe = torch.where(is_silent, torch.ones_like(std), std) + eps
-    normalized = (wav - mean) / std_safe
-    return torch.where(is_silent, torch.zeros_like(normalized), normalized)
-
-
-def prepare_batch(
-    sources: torch.Tensor,
-    snr_range: tuple[float, float],
-    deterministic: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build mixture and normalised clean sources from the raw source tensor.
-
-    The mixture and all clean source references are normalised using the
-    **same** statistics (mean and std of the raw mixture) so that
-    ``sum(clean_sources) ≈ mixture`` is preserved.  This keeps the
-    relative scale between sources consistent with what the model sees.
-
-    Args:
-        sources: (B, n_coi_classes + 1, T) – COI tracks + background (last)
-        snr_range: (min_snr_db, max_snr_db)
-        deterministic: use linspace SNR for validation reproducibility
-    Returns:
-        mixture:    (B, T)
-        clean_wavs: (B, n_coi_classes + 1, T)
-    """
-    B, n_src, T = sources.shape
-    eps = ENERGY_EPS
-
-    cois = [sources[:, i, :] for i in range(n_src - 1)]
-    bg = sources[:, -1, :]
-    total_coi = torch.stack(cois, dim=0).sum(dim=0)  # (B, T)
-
-    if deterministic and B > 1:
-        snr_db = torch.linspace(
-            snr_range[0], snr_range[1], B, device=sources.device
-        ).view(B, 1)
-    else:
-        snr_db = torch.zeros(B, 1, device=sources.device).uniform_(*snr_range)
-
-    coi_power = total_coi.pow(2).mean(dim=-1, keepdim=True) + eps
-    bg_power = bg.pow(2).mean(dim=-1, keepdim=True) + eps
-    snr_linear = torch.pow(10.0, snr_db / 10.0)
-    bg_scaling = torch.sqrt(coi_power / (bg_power * snr_linear + eps))
-    silent_coi = coi_power < SILENCE_ENERGY_EPS
-    bg_scaling = torch.where(silent_coi, torch.ones_like(bg_scaling), bg_scaling)
-    bg_scaling = torch.clamp(bg_scaling, BG_SCALE_MIN, BG_SCALE_MAX)
-
-    bg_scaled = bg * bg_scaling
-
-    # ---- Joint normalisation ------------------------------------------------
-    # Compute statistics from the raw mixture and apply the *same* transform
-    # to every source so that additivity is preserved.
-    raw_mixture = total_coi + bg_scaled  # (B, T)
-    mix_mean = raw_mixture.mean(dim=-1, keepdim=True)  # (B, 1)
-    mix_std = raw_mixture.std(dim=-1, keepdim=True)  # (B, 1)
-    is_silent = mix_std < NORMALIZE_MIN_STD
-    mix_std_safe = torch.where(is_silent, torch.ones_like(mix_std), mix_std) + eps
-
-    mixture = (raw_mixture - mix_mean) / mix_std_safe
-    mixture = torch.where(is_silent, torch.zeros_like(mixture), mixture)
-
-    # Normalise each clean source with the mixture's mean/std.
-    # Use mix_mean for all sources to preserve additivity:
-    # mixture = sum(norm_cois) + norm_bg
-    #
-    # Bug-fix: subtracting mix_mean from a zero-amplitude (absent) COI channel
-    # produces a small DC offset (0 - mix_mean) / mix_std ≠ 0.  That phantom
-    # energy causes snr_with_zeroref_loss to treat the silent stream as active
-    # (ref_power > 0) and apply full SNR loss instead of the down-weighted
-    # zero-ref penalty.  Re-zero any channel that was silent before
-    # normalization so the loss function's coef mask fires correctly.
-    norm_cois = []
-    for c in cois:
-        # Capture silence before normalization (per sample in the batch).
-        was_silent = c.pow(2).mean(dim=-1, keepdim=True) < SILENCE_ENERGY_EPS  # (B, 1)
-        normed = (c - mix_mean) / mix_std_safe
-        normed = torch.where(is_silent, torch.zeros_like(normed), normed)
-        # Re-zero channels whose source was silent (not merely a silent mixture).
-        normed = torch.where(was_silent, torch.zeros_like(normed), normed)
-        norm_cois.append(normed)
-
-    norm_bg = (bg_scaled - mix_mean) / mix_std_safe
-    norm_bg = torch.where(is_silent, torch.zeros_like(norm_bg), norm_bg)
-
-    clean_wavs = torch.stack(norm_cois + [norm_bg], dim=1)  # (B, n_src, T)
-    return mixture, clean_wavs
-
-
-def check_finite(*tensors) -> bool:
-    return all(torch.isfinite(t).all() for t in tensors)
-
-
-def generate_variable_prompts(
-    coi_prompts: list[str],
-    bg_prompt: str,
-    batch_size: int,
-    dropout_prob: float = 0.5,
-    min_coi: int = 0,
-    rng: np.random.Generator | None = None,
-) -> list[list[str]]:
-    """Generate variable prompt configurations for a batch.
-    
-    Randomly drops COI prompts to create variable n_src configurations,
-    similar to the base TUSS model's training strategy.
-    
-    Args:
-        coi_prompts: List of COI prompt names (e.g., ["airplane", "birds"])
-        bg_prompt: Background prompt name (e.g., "background")
-        batch_size: Number of samples in batch
-        dropout_prob: Probability of dropping each COI prompt
-        min_coi: Minimum number of COI prompts to keep (0 = allow background-only)
-        rng: Random number generator for reproducibility
-        
-    Returns:
-        List of prompt lists, one per batch sample.
-        Each inner list has variable length (min_coi+1 to len(coi_prompts)+1)
-        
-    Examples:
-        >>> generate_variable_prompts(["airplane", "birds"], "background", 3, 0.5, 0)
-        [["airplane", "background"], 
-         ["airplane", "birds", "background"],
-         ["birds", "background"]]
-    """
-    if rng is None:
-        rng = np.random.default_rng()
-    
-    n_coi = len(coi_prompts)
-    min_coi = max(0, min(min_coi, n_coi))  # Clamp to valid range
-    
-    batch_prompts = []
-    for _ in range(batch_size):
-        # Randomly select which COI prompts to include
-        keep_mask = rng.random(n_coi) > dropout_prob
-        
-        # Ensure minimum number of COI prompts
-        n_kept = keep_mask.sum()
-        if n_kept < min_coi:
-            # Randomly enable additional prompts to reach minimum
-            disabled_indices = np.where(~keep_mask)[0]
-            enable_count = min_coi - n_kept
-            enable_indices = rng.choice(disabled_indices, size=enable_count, replace=False)
-            keep_mask[enable_indices] = True
-        
-        # Build prompt list for this sample
-        sample_prompts = [coi_prompts[i] for i in range(n_coi) if keep_mask[i]]
-        sample_prompts.append(bg_prompt)  # Always include background
-        
-        batch_prompts.append(sample_prompts)
-    
-    return batch_prompts
-
-
-def select_sources_for_prompts(
-    clean_wavs: torch.Tensor,
-    all_coi_prompts: list[str],
-    bg_prompt: str,
-    selected_prompts: list[str],
-) -> torch.Tensor:
-    """Select and reorder source channels to match variable prompt configuration.
-    
-    Dropped COI sources are merged into the background channel so the model learns
-    to separate only what's prompted and put everything else in the residual.
-    
-    Args:
-        clean_wavs: (B, n_src_full, T) - full source tensor with all COI classes + background
-        all_coi_prompts: Complete list of COI prompts (e.g., ["airplane", "birds"])
-        bg_prompt: Background prompt name
-        selected_prompts: Variable prompts for this batch (e.g., ["airplane", "background"])
-        
-    Returns:
-        Tensor (B, n_src_selected, T) with sources matching selected_prompts order,
-        where background includes any dropped COI sources.
-        
-    Example:
-        clean_wavs.shape = (B, 3, T)  # [airplane, birds, background]
-        all_coi_prompts = ["airplane", "birds"]
-        selected_prompts = ["birds", "background"]
-        
-        Returns: (B, 2, T)  # [birds, (airplane+background)] with airplane merged to bg
-    """
-    B, n_src_full, T = clean_wavs.shape
-    
-    # Identify which COI prompts are ACTIVE (in selected_prompts)
-    active_coi_indices = []
-    for prompt in selected_prompts:
-        if prompt != bg_prompt and prompt in all_coi_prompts:
-            active_coi_indices.append(all_coi_prompts.index(prompt))
-    
-    # Start with original background channel
-    bg_channel = clean_wavs[:, -1, :].clone()
-    
-    # Merge dropped COI sources into background
-    # (any COI source that doesn't have a corresponding prompt)
-    for i in range(len(all_coi_prompts)):
-        if i not in active_coi_indices:
-            bg_channel = bg_channel + clean_wavs[:, i, :]
-    
-    # Build output: active COI channels (in selected_prompts order) + merged background
-    selected_channels = []
-    for prompt in selected_prompts:
-        if prompt == bg_prompt:
-            selected_channels.append(bg_channel)
-        elif prompt in all_coi_prompts:
-            idx = all_coi_prompts.index(prompt)
-            selected_channels.append(clean_wavs[:, idx, :])
-    
-    return torch.stack(selected_channels, dim=1)
+from .dataset import AudioDataset
+from .augmentations import AudioAugmentations, GpuAudioAugmentations
+from .losses import COIWeightedSNRLoss, WarmupScheduler
+from .utils import (
+    BG_SCALE_MAX,
+    BG_SCALE_MIN,
+    ENERGY_EPS,
+    NORMALIZE_MIN_STD,
+    check_finite,
+    generate_variable_prompts,
+    normalize_tensor_wav,
+    prepare_batch,
+    select_sources_for_prompts,
+)
 
 
 # =============================================================================
@@ -2120,9 +727,7 @@ def create_dataloader(config: Config, split: str) -> tuple[DataLoader, AudioData
     return loader, dataset
 
 
-# =============================================================================
-# Model creation
-# =============================================================================
+
 
 
 def create_model(
@@ -2328,7 +933,8 @@ def create_model(
     }
 
     if resume_ckpt_path:
-        checkpoint_prompts = get_prompts_from_checkpoint(resume_ckpt_path)
+        checkpoint_info = get_prompts_from_checkpoint(resume_ckpt_path)
+        checkpoint_prompts = set(checkpoint_info.get("prompts_in_state", {}).keys())
         new_p, continuing_p, frozen_p = classify_prompts_by_training_strategy(
             config.model.coi_prompts, config.model.bg_prompt, checkpoint_prompts
         )
@@ -2372,31 +978,63 @@ def create_model(
 # =============================================================================
 
 
-def get_prompts_from_checkpoint(checkpoint_path: str | Path) -> set[str]:
-    """Extract prompt names from a checkpoint file.
+def get_prompts_from_checkpoint(checkpoint_path: str | Path) -> dict:
+    """Extract prompt information from a TUSS checkpoint.
 
     Returns:
-        Set of prompt names found in the checkpoint's model state.
+        Dictionary with:
+            - 'coi_prompts': List of COI class prompts
+            - 'bg_prompt': Background prompt name
+            - 'all_prompts_meta': All prompt names from metadata
+            - 'prompts_in_state': Dict mapping prompt names to tensor shapes
+            - 'checkpoint_info': Dict with epoch, global_step, val_loss
     """
-    if not checkpoint_path or not Path(checkpoint_path).is_file():
-        return set()
+    checkpoint_path = Path(checkpoint_path)
+
+    if not checkpoint_path.is_file():
+        return {
+            "coi_prompts": [],
+            "bg_prompt": "",
+            "all_prompts_meta": [],
+            "prompts_in_state": {},
+            "checkpoint_info": {"epoch": "N/A", "global_step": "N/A", "val_loss": "N/A"},
+        }
 
     try:
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+        coi_prompts = ckpt.get("coi_prompts", [])
+        bg_prompt = ckpt.get("bg_prompt", "")
+        all_prompts_meta = ckpt.get("all_prompts", [])
+
         model_state = ckpt.get("model_state_dict", {})
-
-        prompts = set()
+        prompts_in_state = {}
         prompt_prefix = "separator.prompts."
-        for key in model_state.keys():
+        for key, value in model_state.items():
             if key.startswith(prompt_prefix):
-                # Extract just the prompt name (use replace with count=1 to be explicit)
                 prompt_name = key.replace(prompt_prefix, "", 1)
-                prompts.add(prompt_name)
+                prompts_in_state[prompt_name] = value.shape
 
-        return prompts
+        return {
+            "coi_prompts": coi_prompts,
+            "bg_prompt": bg_prompt,
+            "all_prompts_meta": all_prompts_meta,
+            "prompts_in_state": prompts_in_state,
+            "checkpoint_info": {
+                "epoch": ckpt.get("epoch", "N/A"),
+                "global_step": ckpt.get("global_step", "N/A"),
+                "val_loss": ckpt.get("val_loss", "N/A"),
+            },
+        }
     except Exception as e:
         print(f"⚠ Warning: Could not read prompts from checkpoint: {e}")
-        return set()
+        return {
+            "coi_prompts": [],
+            "bg_prompt": "",
+            "all_prompts_meta": [],
+            "prompts_in_state": {},
+            "checkpoint_info": {"epoch": "N/A", "global_step": "N/A", "val_loss": "N/A"},
+        }
 
 
 def validate_prompts_against_checkpoint(
@@ -2444,7 +1082,7 @@ def validate_prompts_against_checkpoint(
         checkpoint_prompts = (
             set(old_coi_prompts + [old_bg_prompt])
             if old_coi_prompts
-            else get_prompts_from_checkpoint(checkpoint_path)
+            else set(get_prompts_from_checkpoint(checkpoint_path).get("prompts_in_state", {}).keys())
         )
     except Exception as e:
         if isinstance(e, ValueError):
@@ -2452,7 +1090,7 @@ def validate_prompts_against_checkpoint(
         print(
             f"⚠ Warning: Could not read strict prompts from checkpoint, falling back: {e}"
         )
-        checkpoint_prompts = get_prompts_from_checkpoint(checkpoint_path)
+        checkpoint_prompts = set(get_prompts_from_checkpoint(checkpoint_path).get("prompts_in_state", {}).keys())
 
     if not checkpoint_prompts:
         # Checkpoint doesn't have prompts or couldn't be read
@@ -2527,15 +1165,6 @@ def classify_prompts_by_training_strategy(
 # =============================================================================
 # Seed
 # =============================================================================
-
-
-def set_seed(seed: int = 42):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
 
 
 # =============================================================================

@@ -12,10 +12,9 @@ Usage:
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torchaudio
@@ -23,33 +22,15 @@ import torchaudio
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from common.audio_utils import create_high_quality_resampler
+from common.training_utils import robust_load_audio
 from .config import Config
 
-# Check for environment variable to use old separation head
-USE_OLD_SEPARATION_HEAD = os.environ.get("USE_OLD_SEPARATION_HEAD", "0") == "1"
-
-# Import head index constants for consistent output access
-if USE_OLD_SEPARATION_HEAD:
-    # Define constants for backward compatibility with old head
-    _COI_HEAD_INDEX = 0
-    _BACKGROUND_HEAD_INDEX = 1
-    _NUM_SOURCES = 2
-else:
-    from .seperation_head import (
-        BACKGROUND_HEAD_INDEX as _BACKGROUND_HEAD_INDEX,
-    )
-    from .seperation_head import (
-        COI_HEAD_INDEX as _COI_HEAD_INDEX,
-    )
-    from .seperation_head import (
-        NUM_SOURCES as _NUM_SOURCES,
-    )
-    from .seperation_head import wrap_model_for_coi
-
-# Export as module-level constants
-COI_HEAD_INDEX: int = _COI_HEAD_INDEX
-BACKGROUND_HEAD_INDEX: int = _BACKGROUND_HEAD_INDEX
-NUM_SOURCES: int = _NUM_SOURCES
+from .seperation_head import (
+    BACKGROUND_HEAD_INDEX,
+    COI_HEAD_INDEX,
+    NUM_SOURCES,
+    wrap_model_for_coi,
+)
 
 
 def _create_model_for_inference(config: "Config") -> torch.nn.Module:
@@ -116,39 +97,6 @@ def _create_model_for_inference(config: "Config") -> torch.nn.Module:
     return model
 
 
-def robust_load_audio(path: Union[str, Path]) -> Tuple[torch.Tensor, int]:
-    """Load audio robustly: try torchaudio first, then switch backend to
-    `soundfile`, and finally fall back to the `soundfile` Python API.
-
-    Returns (waveform, sample_rate) where waveform has shape (channels, frames).
-    """
-    p = str(path)
-    # 1) Preferred: torchaudio.load (may use torchcodec internally)
-    try:
-        return torchaudio.load(p)
-    except Exception as e:  # pragma: no cover - runtime environment dependent
-        # Attempt to switch torchaudio backend to soundfile and retry
-        try:
-            torchaudio.set_audio_backend("soundfile")
-            return torchaudio.load(p)
-        except Exception:
-            # Final fallback: use pysoundfile directly (pure-python)
-            try:
-                import soundfile as sf
-            except Exception:
-                raise RuntimeError(
-                    "Failed to load audio with torchaudio and 'soundfile' is not installed. "
-                    "Install pysoundfile (`pip install soundfile`) or ensure FFmpeg/torchcodec compatibility."
-                ) from e
-
-            data, sr = sf.read(p, always_2d=True)
-            import numpy as _np
-
-            # data: (frames, channels) -> waveform: (channels, frames)
-            wav = torch.from_numpy(_np.asarray(data).T).to(torch.float32)
-            return wav, int(sr)
-
-
 class SeparationInference:
     """Inference wrapper for trained SuDORMRF separation model.
 
@@ -201,6 +149,127 @@ class SeparationInference:
             self.model = self.model.to(self.device)
             print(f"  Forced model.to({self.device})")
 
+    @staticmethod
+    def _load_checkpoint_file(checkpoint_path, device):
+        """Load checkpoint file with multiple fallback strategies."""
+        try:
+            return torch.load(
+                checkpoint_path, map_location=device, weights_only=False
+            )
+        except Exception as e:
+            msg = str(e)
+            if "numpy._core.multiarray.scalar" in msg or "Unsupported global" in msg:
+                try:
+                    import numpy as _np
+                    from torch.serialization import safe_globals
+
+                    with safe_globals([_np._core.multiarray.scalar]):
+                        return torch.load(
+                            checkpoint_path, map_location=device, weights_only=False
+                        )
+                except Exception:
+                    raise
+            else:
+                raise
+
+    @staticmethod
+    def _extract_config(checkpoint, checkpoint_path):
+        """Extract config from checkpoint dict or config.yaml.
+
+        Priority:
+          1. config.yaml in checkpoint directory
+          2. 'config' key in checkpoint dict
+        """
+        config = None
+
+        # PRIORITY 1: config.yaml in checkpoint directory
+        cfg_path = checkpoint_path.parent / "config.yaml"
+        if cfg_path.exists():
+            print(f"Loading config from {cfg_path}")
+            config = Config.from_yaml(str(cfg_path))
+
+        # PRIORITY 2: 'config' key in checkpoint dict
+        if config is None and isinstance(checkpoint, dict) and "config" in checkpoint:
+            print("Loading config from checkpoint dict (no config.yaml found)")
+            cfg_obj = checkpoint["config"]
+            if isinstance(cfg_obj, Config):
+                config = cfg_obj
+            elif isinstance(cfg_obj, dict):
+                config = Config.from_dict(cfg_obj)
+            else:
+                try:
+                    config = Config.from_dict(dict(cfg_obj))
+                except Exception:
+                    config = None
+
+        return config
+
+    @staticmethod
+    def _build_model(config):
+        """Create model using _create_model_for_inference."""
+        if config is None:
+            raise ValueError(
+                "No config found in checkpoint and no config.yaml in checkpoint folder."
+            )
+        return _create_model_for_inference(config)
+
+    @staticmethod
+    def _load_weights(model, checkpoint, device):
+        """Load state dict from checkpoint with shape mismatch diagnostics."""
+        # Extract state_dict from checkpoint dict
+        state_dict = None
+        if "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        elif "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif checkpoint and all(isinstance(v, torch.Tensor) for v in checkpoint.values()):
+            state_dict = checkpoint
+
+        if state_dict is None:
+            raise ValueError(
+                "Unsupported checkpoint format. Expected training checkpoint with config and state_dict."
+            )
+
+        model = model.to(device)
+
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError:
+            print(
+                "Warning: Error(s) in loading state_dict. Attempting to resolve mismatches."
+            )
+
+            model_state_dict = model.state_dict()
+
+            for k, v in state_dict.items():
+                if k in model_state_dict and model_state_dict[k].shape != v.shape:
+                    print(
+                        f"Shape mismatch for key '{k}': "
+                        f"Checkpoint shape {v.shape}, Model shape {model_state_dict[k].shape}"
+                    )
+
+            filtered_state_dict = {
+                k: v
+                for k, v in state_dict.items()
+                if k in model_state_dict and model_state_dict[k].shape == v.shape
+            }
+
+            missing_keys = set(model_state_dict.keys()) - set(
+                filtered_state_dict.keys()
+            )
+            unexpected_keys = set(state_dict.keys()) - set(
+                filtered_state_dict.keys()
+            )
+
+            if missing_keys:
+                print(f"Missing keys: {missing_keys}")
+            if unexpected_keys:
+                print(f"Unexpected keys: {unexpected_keys}")
+
+            model.load_state_dict(filtered_state_dict, strict=False)
+
+        return model
+
     @classmethod
     def from_checkpoint(
         cls, checkpoint_path: Union[str, Path], device: Optional[str] = None
@@ -214,144 +283,28 @@ class SeparationInference:
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
         print(f"Loading checkpoint from: {checkpoint_path}")
-        # Try loading the checkpoint allowing pickled objects. Some saved
-        # checkpoints require `weights_only=False` or an allowlist for
-        # numpy scalars introduced in newer PyTorch versions.
-        try:
-            checkpoint = torch.load(
-                checkpoint_path, map_location=device, weights_only=False
-            )
-        except Exception as e:
-            # If torch raises about unsafe globals (e.g. numpy scalar), try
-            # using the `safe_globals` context manager to allowlist the
-            # offending global. Only do this for trusted checkpoints.
-            msg = str(e)
-            if "numpy._core.multiarray.scalar" in msg or "Unsupported global" in msg:
-                try:
-                    import numpy as _np
-                    from torch.serialization import safe_globals
 
-                    with safe_globals([_np._core.multiarray.scalar]):
-                        checkpoint = torch.load(
-                            checkpoint_path, map_location=device, weights_only=False
-                        )
-                except Exception:
-                    raise
-            else:
-                # Re-raise original exception for unexpected failures
-                raise
+        # Step 1: Load checkpoint file
+        checkpoint = cls._load_checkpoint_file(checkpoint_path, device)
 
-        # Determine checkpoint layout and extract config/state_dict/model
-        config = None
-        state_dict = None
-        model_obj = None
+        # Step 2: Extract configuration
+        config = cls._extract_config(checkpoint, checkpoint_path)
 
-        # PRIORITY 1: Try loading config.yaml from checkpoint directory first
-        # This ensures we use the most up-to-date config with all parameters
-        cfg_path = checkpoint_path.parent / "config.yaml"
-        if cfg_path.exists():
-            print(f"Loading config from {cfg_path}")
-            config = Config.from_yaml(str(cfg_path))
-
-        if isinstance(checkpoint, dict):
-            # Extract state_dict from checkpoint
-            if "model_state_dict" in checkpoint:
-                state_dict = checkpoint["model_state_dict"]
-            elif "state_dict" in checkpoint:
-                state_dict = checkpoint["state_dict"]
-            # Sometimes checkpoints are saved as the raw state_dict
-            elif all(isinstance(v, torch.Tensor) for v in checkpoint.values()):
-                state_dict = checkpoint
-
-            # PRIORITY 2: If config not found in config.yaml, try checkpoint dict
-            if config is None and "config" in checkpoint:
-                print("Loading config from checkpoint dict (no config.yaml found)")
-                cfg_obj = checkpoint["config"]
-                if isinstance(cfg_obj, Config):
-                    config = cfg_obj
-                elif isinstance(cfg_obj, dict):
-                    config = Config.from_dict(cfg_obj)
-                else:
-                    try:
-                        config = Config.from_dict(dict(cfg_obj))
-                    except Exception:
-                        config = None
-
-            # If still no config or state_dict, raise error
-            if config is None or state_dict is None:
-                raise ValueError(
-                    "Unsupported checkpoint format. Expected training checkpoint with config and state_dict."
-                )
-
-        else:
-            # Loaded object may be a full model
-            if isinstance(checkpoint, torch.nn.Module):
-                model_obj = checkpoint
-            else:
-                if config is None:
-                    raise ValueError(
-                        "Unsupported checkpoint format and no config.yaml found."
-                    )
-
-        # Build model (or use provided model object) and load weights
-        if model_obj is not None:
-            model = model_obj
+        # Step 3: Build model and load weights
+        if isinstance(checkpoint, torch.nn.Module):
+            model = checkpoint.to(device)
+        elif isinstance(checkpoint, dict):
+            model = cls._build_model(config)
+            model = cls._load_weights(model, checkpoint, device)
         else:
             if config is None:
                 raise ValueError(
-                    "No config found in checkpoint and no config.yaml in checkpoint folder."
+                    "Unsupported checkpoint format and no config.yaml found."
                 )
-            # Create model without moving to training device - we'll move to inference device later
-            model = _create_model_for_inference(config)
+            model = cls._build_model(config)
+            model = model.to(device)
 
-        # Explicitly move model to inference device BEFORE loading state dict
-        # This ensures the model structure and state dict are on the same device
-        model = model.to(device)
-        
-        # Load state dict with error handling (if we have one)
-        if state_dict is not None:
-            try:
-                model.load_state_dict(state_dict)
-            except RuntimeError as e:
-                print(
-                    "Warning: Error(s) in loading state_dict. Attempting to resolve mismatches."
-                )
-
-                # Filter state_dict to match model's keys
-                model_state_dict = model.state_dict()
-
-                # Print shape mismatches for debugging
-                for k, v in state_dict.items():
-                    if k in model_state_dict and model_state_dict[k].shape != v.shape:
-                        print(
-                            f"Shape mismatch for key '{k}': "
-                            f"Checkpoint shape {v.shape}, Model shape {model_state_dict[k].shape}"
-                        )
-
-                filtered_state_dict = {
-                    k: v
-                    for k, v in state_dict.items()
-                    if k in model_state_dict and model_state_dict[k].shape == v.shape
-                }
-
-                missing_keys = set(model_state_dict.keys()) - set(
-                    filtered_state_dict.keys()
-                )
-                unexpected_keys = set(state_dict.keys()) - set(
-                    filtered_state_dict.keys()
-                )
-
-                if missing_keys:
-                    print(f"Missing keys: {missing_keys}")
-                if unexpected_keys:
-                    print(f"Unexpected keys: {unexpected_keys}")
-
-                model.load_state_dict(filtered_state_dict, strict=False)
-
-        # Compatibility: some checkpoints / model objects may lack attributes
-        # expected by newer code (e.g., `n_least_samples_req`). Compute and
-        # set a sane default on the model object to avoid AttributeError at
-        # inference time without modifying the base model source.
+        # Step 4: n_least_samples_req compatibility
         try:
             if not hasattr(model, "n_least_samples_req"):
                 enc_k = getattr(model, "enc_kernel_size", None)
@@ -378,13 +331,10 @@ class SeparationInference:
                 except Exception:
                     pass
         except Exception:
-            # Best-effort only; do not fail checkpoint loading for unexpected
-            # attribute access issues.
             pass
 
-        # If config still None, ensure values for return
+        # Step 5: Extract sample_rate and segment_samples
         if config is None:
-            # As a last resort, try to infer sample_rate/segment_samples from defaults
             sample_rate = getattr(model, "sample_rate", 16000)
             segment_samples = getattr(model, "segment_samples", 16000 * 5)
         else:
@@ -393,7 +343,6 @@ class SeparationInference:
                 if hasattr(config, "data")
                 else config.sample_rate
             )
-            # support older config shapes
             try:
                 segment_length = config.data.segment_length
             except Exception:

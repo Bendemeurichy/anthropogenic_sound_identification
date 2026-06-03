@@ -33,9 +33,7 @@ Usage:
 
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
-
-import numpy as np
+from typing import List, Optional, Union
 import torch
 import torchaudio
 import yaml
@@ -50,6 +48,7 @@ for _p in [str(_BASE_DIR), str(_SRC_DIR)]:
         sys.path.insert(0, _p)
 
 from common.audio_utils import resample_with_padding
+from common.training_utils import robust_load_audio
 from nets.model_wrapper import SeparationModel
 
 # Legacy head-index constants kept for backward compatibility with code that
@@ -59,39 +58,6 @@ from nets.model_wrapper import SeparationModel
 COI_HEAD_INDEX: int = 0       # only correct for single-COI (airplane) checkpoints
 BACKGROUND_HEAD_INDEX: int = 1  # only correct for 2-source (single-COI) checkpoints
 NUM_SOURCES: int = 2            # only correct for 2-source (single-COI) checkpoints
-
-
-def robust_load_audio(path: Union[str, Path]) -> Tuple[torch.Tensor, int]:
-    """Load audio robustly: try torchaudio first, then switch backend to
-    soundfile, and finally fall back to the soundfile Python API.
-
-    Returns (waveform, sample_rate) where waveform has shape (channels, frames).
-    """
-    p = str(path)
-    # 1) Preferred: torchaudio.load (may use torchcodec internally)
-    try:
-        return torchaudio.load(p)
-    except Exception as e:  # pragma: no cover - runtime environment dependent
-        # Attempt to switch torchaudio backend to soundfile and retry
-        try:
-            torchaudio.set_audio_backend("soundfile")
-            return torchaudio.load(p)
-        except Exception:
-            # Final fallback: use pysoundfile directly (pure-python)
-            try:
-                import soundfile as sf
-            except Exception:
-                raise RuntimeError(
-                    "Failed to load audio with torchaudio and 'soundfile' is not installed. "
-                    "Install pysoundfile (`pip install soundfile`) or ensure FFmpeg/torchcodec compatibility."
-                ) from e
-
-            data, sr = sf.read(p, always_2d=True)
-            import numpy as _np
-
-            # data: (frames, channels) -> waveform: (channels, frames)
-            wav = torch.from_numpy(_np.asarray(data).T).to(torch.float32)
-            return wav, int(sr)
 
 
 class TUSSInference:

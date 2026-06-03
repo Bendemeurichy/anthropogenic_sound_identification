@@ -6,9 +6,7 @@ separate from the audio mixture (e.g., "bird", "airplane", "rain").
 """
 
 from dataclasses import dataclass, field, asdict
-from pathlib import Path
 from typing import List, Optional
-import yaml
 
 
 @dataclass
@@ -28,9 +26,6 @@ class SoundClass:
                 Examples: ["bird", "Bird", "birdsong", "bird_call"]
         description: Human-readable description of what this class contains.
                     Useful for documentation and UI display.
-        dataset_filter: Optional filter to only include labels from a specific
-                       dataset (substring match on 'dataset' column). Leave
-                       empty to include matching labels from all datasets.
         color: Optional hex color for visualization (e.g., "#FF5733").
                Will be auto-assigned if not specified.
     
@@ -45,20 +40,22 @@ class SoundClass:
         ...     name="airplane",
         ...     labels=["airplane", "aircraft", "jet", "propeller"],
         ...     description="Aircraft engine noise",
-        ...     dataset_filter="aerosonicdb"  # Only from this dataset
         ... )
     """
     
     name: str
     labels: List[str]
     description: str = ""
-    dataset_filter: str = ""
     color: Optional[str] = None
+    
+    @staticmethod
+    def normalize_name(name: str) -> str:
+        """Normalize a name: lowercase, replace spaces/hyphens with underscores."""
+        return name.lower().replace(" ", "_").replace("-", "_")
     
     def __post_init__(self):
         """Validate the sound class configuration."""
-        # Normalize name (lowercase, replace spaces with underscores)
-        self.name = self.name.lower().replace(" ", "_").replace("-", "_")
+        self.name = self.normalize_name(self.name)
         
         # Ensure labels is a list
         if isinstance(self.labels, str):
@@ -125,7 +122,7 @@ class SoundClassCollection:
         Returns:
             True if removed, False if not found
         """
-        name = name.lower().replace(" ", "_").replace("-", "_")
+        name = SoundClass.normalize_name(name)
         for i, cls in enumerate(self.classes):
             if cls.name == name:
                 self.classes.pop(i)
@@ -141,7 +138,7 @@ class SoundClassCollection:
         Returns:
             The SoundClass if found, None otherwise
         """
-        name = name.lower().replace(" ", "_").replace("-", "_")
+        name = SoundClass.normalize_name(name)
         for cls in self.classes:
             if cls.name == name:
                 return cls
@@ -149,29 +146,6 @@ class SoundClassCollection:
     
     def names(self) -> List[str]:
         """Get list of all class names."""
-        return [cls.name for cls in self.classes]
-    
-    def all_labels(self) -> List[str]:
-        """Get flat list of all labels across all classes."""
-        labels = []
-        for cls in self.classes:
-            labels.extend(cls.labels)
-        return labels
-    
-    def to_target_classes(self) -> List[List[str]]:
-        """Convert to target_classes format for TUSS config.
-        
-        Returns:
-            List of label lists, one per class, in order.
-        """
-        return [cls.labels for cls in self.classes]
-    
-    def to_coi_prompts(self) -> List[str]:
-        """Convert to coi_prompts format for TUSS config.
-        
-        Returns:
-            List of class names, in order.
-        """
         return [cls.name for cls in self.classes]
     
     def __len__(self) -> int:

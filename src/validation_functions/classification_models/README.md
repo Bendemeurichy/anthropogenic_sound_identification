@@ -138,7 +138,7 @@ classification_models/
 ├── birdnet_wrapper.py         # BirdNET wrapper
 ├── pann_inference.py          # Original PANN implementation
 ├── ast_inference.py           # Original AST implementation
-├── plane_clasifier/           # Original PlaneClassifier
+├── plane_classifier/           # Original PlaneClassifier
 │   └── inference.py
 ├── example_usage.py           # Example script
 └── README.md                  # This file
@@ -225,7 +225,7 @@ See `example_usage.py` for complete examples of using each classifier type.
 For PlaneClassifier, you can provide a custom config:
 
 ```python
-from plane_clasifier.config import TrainingConfig
+from plane_classifier.config import TrainingConfig
 
 config = TrainingConfig(
     sample_rate=16000,

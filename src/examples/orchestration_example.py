@@ -101,7 +101,7 @@ def example_configure_project(project):
 def example_view_presets():
     """Example: View available training presets."""
     from orchestration import get_preset
-    from orchestration.presets import list_presets, PRESETS
+    from orchestration.presets import list_presets
     
     print("\n" + "=" * 60)
     print("EXAMPLE: Available Training Presets")
