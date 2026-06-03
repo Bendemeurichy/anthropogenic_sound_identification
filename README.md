@@ -27,37 +27,36 @@ Or use `src/common/paths.py` to override defaults in code.
 ## Project Structure
 
 ```
-├── configs/           YAML configs for hyperparameter tuning
-├── docs/              Project documentation
-├── scripts/           Utility and HPC scripts
-│   ├── analysis/      Analysis & visualization
-│   ├── data/          Data preparation (labels, webdataset)
-│   ├── debug/         Debugging & tracing
-│   ├── demo/          Demo entry points
-│   ├── diagnostics/   Diagnostics & reports
-│   ├── hpc/           HPC cluster job scripts (PBS)
-│   ├── tuning/        Optuna hyperparameter tuning
+├── configs/            YAML configs for hyperparameter tuning
+├── scripts/            Utility and HPC scripts
+│   ├── analysis/       Analysis & visualization
+│   ├── data/           Data preparation (labels, webdataset)
+│   ├── debug/          Debugging & tracing
+│   ├── demo/           Demo entry points
+│   ├── diagnostics/    Diagnostics & reports
+│   ├── hpc/            HPC cluster job scripts (PBS)
+│   ├── tuning/         Optuna hyperparameter tuning
 │   └── run_validation.py  Unified validation runner
-├── src/               Main package
-│   ├── common/        Shared utilities (audio, paths, augmentations)
+├── src/                Main package
+│   ├── common/         Shared utilities (audio, paths, augmentations)
 │   ├── activity_filter/  Audio activity detection
-│   ├── label_loading/    Dataset-specific label loaders (10+ datasets)
-│   ├── models/        Separation models
-│   │   ├── base.py    Shared BaseSeparator ABC
-│   │   ├── clapsep/   CLAPSep (text-prompt separation)
-│   │   ├── sudormrf/  SuDoRM-RF (time-domain separation)
-│   │   └── tuss/      TUSS (universal source separation)
-│   ├── orchestration/ Training orchestration & runner
-│   ├── pipeline/      End-to-end separation pipeline
-│   ├── validation_functions/  Validation, classification, diagnostics
-│   └── tag_analysis/  Tag/label analysis notebooks
-└── tests/            Test suite
-    ├── conftest.py    Shared fixtures & path setup
-    ├── audio/         Audio processing tests
-    ├── data/          Data loading & resampling tests
-    ├── models/        Model inference/training tests
-    ├── pipeline/      Pipeline & contamination tests
-    └── validation/    Validation & mask recycling tests
+│   ├── label_loading/  Dataset-specific label loaders (10+ datasets)
+│   ├── models/         Separation models (see per-model README)
+│   │   ├── base.py     Shared BaseSeparator ABC
+│   │   ├── clapsep/    CLAPSep (text-prompt separation)
+│   │   ├── sudormrf/   SuDoRM-RF (time-domain separation)
+│   │   └── tuss/       TUSS (universal source separation)
+│   ├── orchestration/  Training orchestration & runner
+│   ├── pipeline/       End-to-end separation pipeline
+│   ├── validation_functions/  Validation & diagnostics
+│   └── tag_analysis/   Tag/label analysis
+└── tests/              Test suite
+    ├── conftest.py     Shared fixtures & path setup
+    ├── audio/          Audio processing tests
+    ├── data/           Data loading & resampling tests
+    ├── models/         Model inference/training tests
+    ├── pipeline/       Pipeline & contamination tests
+    └── validation/     Validation & mask recycling tests
 ```
 
 ## Training
@@ -67,10 +66,12 @@ Models are trained via their respective train scripts, e.g.:
 ```bash
 python src/models/tuss/train.py --config src/models/tuss/training_config.yaml
 python src/models/sudormrf/train.py --config src/models/sudormrf/training_config.yaml
-python src/models/clapsep/train.py
+python src/models/clapsep/train_text_coi.py --config src/models/clapsep/training_config.yaml
 ```
 
-HPC cluster jobs are defined in `scripts/hpc/` (PBS format).
+Each model directory has a `README.md` with usage details.
+
+HPC cluster jobs are defined in `scripts/hpc/` (PBS format). See `scripts/hpc/README.md` for setup.
 
 ## Inference
 
@@ -112,6 +113,8 @@ python scripts/run_validation.py \
     --classifier bird_mae audioprotopnet \
     --with-risoux
 ```
+
+See `src/validation_functions/README.md` for COI synonym system details.
 
 ## Testing
 
