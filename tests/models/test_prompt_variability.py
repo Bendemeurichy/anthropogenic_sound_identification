@@ -13,11 +13,11 @@ import torch
 import sys
 from pathlib import Path
 
-# Add parent directory to path for imports
-_SCRIPT_DIR = Path(__file__).parent.resolve()
-sys.path.insert(0, str(_SCRIPT_DIR))
+from src.common.paths import setup_python_path
+setup_python_path()
 
-from train import generate_variable_prompts, select_sources_for_prompts, COIWeightedSNRLoss
+from src.models.tuss.utils import generate_variable_prompts, select_sources_for_prompts
+from src.models.tuss.losses import COIWeightedSNRLoss
 
 
 def test_generate_variable_prompts():

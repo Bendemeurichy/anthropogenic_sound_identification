@@ -8,7 +8,7 @@ Master thesis — Machine Learning for Biodiversity.
 ## Setup
 
 ```bash
-# Requires Python 3.11–3.12 and Poetry
+# Requires Python 3.11–3.13 and Poetry
 poetry install
 ```
 
@@ -18,9 +18,10 @@ Optional environment variables (defaults are relative to project root):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `THESIS_DATA_DIR` | `../datasets` | Root of audio datasets |
-| `THESIS_OUTPUT_DIR` | `<root>/outputs` | Output directory |
-| `THESIS_CHECKPOINTS_DIR` | `<root>/checkpoints` | Model checkpoints |
+| `THESIS_PROJECT_ROOT` | `<repo root>` | Root of the code repository |
+| `THESIS_DATA_DIR` | `<repo root>/../datasets` | Root of audio datasets |
+| `THESIS_OUTPUT_DIR` | `<repo root>/outputs` | Output directory |
+| `THESIS_CHECKPOINTS_DIR` | `<repo root>/checkpoints` | Model checkpoints |
 
 Or use `src/common/paths.py` to override defaults in code.
 Check paths in training/inference scripts for correct checkpoints/data.

@@ -11,7 +11,7 @@ import torch
 from scipy.io import wavfile
 
 # Add project to path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.models.sudormrf.inference import SeparationInference
 

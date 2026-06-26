@@ -9,13 +9,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import pandas as pd
-from src.validation_functions.test_pipeline import (
+from src.label_loading.coi_labels import (
     COI_SYNONYMS,
-    _is_coi_label,
-    _filter_contaminated_backgrounds,
     _extract_label_atoms,
-    _norm_label,
+    is_coi_label as _is_coi_label,
+    normalize_label as _norm_label,
 )
+from src.validation_functions.metrics import _filter_contaminated_backgrounds
 
 
 def test_synonym_expansion():

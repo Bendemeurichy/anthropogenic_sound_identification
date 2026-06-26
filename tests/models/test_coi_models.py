@@ -17,8 +17,10 @@ import argparse
 import sys
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from src.common.paths import setup_python_path
+setup_python_path()
 
 import numpy as np
 import torch

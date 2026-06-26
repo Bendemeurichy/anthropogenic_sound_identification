@@ -11,8 +11,8 @@ This script validates that:
 import sys
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+from src.common.paths import setup_python_path
+setup_python_path()
 
 from models.sudormrf.config import Config
 from models.sudormrf.train import create_dataloader
