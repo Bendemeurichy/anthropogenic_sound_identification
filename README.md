@@ -34,12 +34,14 @@ Or use `src/common/paths.py` to override defaults in code.
 │   ├── debug/          Debugging & tracing
 │   ├── demo/           Demo entry points
 │   ├── diagnostics/    Diagnostics & reports
+│   ├── gcp/            GCP configuration
 │   ├── hpc/            HPC cluster job scripts (PBS)
 │   ├── tuning/         Optuna hyperparameter tuning
 │   └── run_validation.py  Unified validation runner
 ├── src/                Main package
 │   ├── common/         Shared utilities (audio, paths, augmentations)
 │   ├── activity_filter/  Audio activity detection
+│   ├── examples/       Example scripts & demos
 │   ├── label_loading/  Dataset-specific label loaders (10+ datasets)
 │   ├── models/         Separation models (see per-model README)
 │   │   ├── base.py     Shared BaseSeparator ABC
@@ -51,7 +53,6 @@ Or use `src/common/paths.py` to override defaults in code.
 │   ├── validation_functions/  Validation & diagnostics
 │   └── tag_analysis/   Tag/label analysis
 └── tests/              Test suite
-    ├── conftest.py     Shared fixtures & path setup
     ├── audio/          Audio processing tests
     ├── data/           Data loading & resampling tests
     ├── models/         Model inference/training tests
@@ -66,7 +67,7 @@ Models are trained via their respective train scripts, e.g.:
 ```bash
 python src/models/tuss/train.py --config src/models/tuss/training_config.yaml
 python src/models/sudormrf/train.py --config src/models/sudormrf/training_config.yaml
-python src/models/clapsep/train_text_coi.py --config src/models/clapsep/training_config.yaml
+python src/models/clapsep/train.py --config src/models/clapsep/training_config.yaml
 ```
 
 Each model directory has a `README.md` with usage details.
