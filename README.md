@@ -1,6 +1,6 @@
-# Sound Separation & Classification
+# Acoustic scene decomposition with AI: distinguishing technophony and biophony to assess biodiversity effects
 
-Audio source separation and classification pipeline — separating
+Audio source separation pipeline for biodiversity monitoring — separating
 airplane noise and bird sounds from field recordings.
 
 Master thesis — Machine Learning for Biodiversity.
@@ -23,6 +23,7 @@ Optional environment variables (defaults are relative to project root):
 | `THESIS_CHECKPOINTS_DIR` | `<root>/checkpoints` | Model checkpoints |
 
 Or use `src/common/paths.py` to override defaults in code.
+Check paths in training/inference scripts for correct checkpoints/data.
 
 ## Project Structure
 
