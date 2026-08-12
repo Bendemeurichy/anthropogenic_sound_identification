@@ -1,9 +1,9 @@
 # Acoustic scene decomposition with AI: distinguishing technophony and biophony to assess biodiversity effects
 
-Audio source separation pipeline for biodiversity monitoring — separating
+Audio source separation pipeline for biodiversity monitoring: separating
 airplane noise and bird sounds from field recordings.
 
-Master thesis — Machine Learning for Biodiversity.
+Master thesis: Machine Learning for Biodiversity.
 
 ## Setup
 
